@@ -1,5 +1,6 @@
 import { cellX as colOf, cellY as rowOf } from '../grid/grid';
 import { chamferDistance } from '../grid/ops';
+import { candidate } from './candidate';
 import { cellAtM, cellX, cellY, label, labelAngle, mergeTree, nearestWhere, type GridSpec } from './grid';
 import { gradAt } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
@@ -46,10 +47,10 @@ export function detectLand(I: RegistryInput, S: Shared, out: Candidate[]): void 
   for (const k of S.continents) {
     const [x, y] = anchorOf(k);
     const areaKm2 = M.size[k] * cellKm2;
-    out.push({
+    out.push(candidate({
       kind: 'continent', x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000, mag: Math.min(1, areaKm2 / (0.25 * I.worldKm * I.worldKm)),
       data: { areaKm2: Math.round(areaKm2) }, idX: x, idY: y, landmass: k,
-    });
+    }));
   }
 
   // Islands: every other landmass from a minimum size, largest first, capped by land area.
@@ -62,10 +63,10 @@ export function detectLand(I: RegistryInput, S: Shared, out: Candidate[]): void 
     const [x, y] = anchorOf(k);
     const areaKm2 = M.size[k] * cellKm2;
     const sizeClass = areaKm2 >= 1000 ? 3 : areaKm2 >= 100 ? 2 : areaKm2 >= 10 ? 1 : 0;
-    out.push({
+    out.push(candidate({
       kind: 'island', x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000, mag: Math.min(1, Math.log10(areaKm2) / 4.5),
       data: { areaKm2: Math.round(areaKm2 * 10) / 10, sizeClass }, idX: x, idY: y, landmass: k, variant: sizeClass === 3 ? 'large' : 'small',
-    });
+    }));
   }
 
   detectArchipelagos(I, S, out);
@@ -141,12 +142,12 @@ function detectArchipelagos(I: RegistryInput, S: Shared, out: Candidate[]): void
     const y = sy * cellM;
     const areaKm2 = A * cellKm * cellKm;
     const heroScore = g.length / 50;
-    found.push({
+    found.push(candidate({
       kind: 'archipelago', x, y, angle: NaN, extentM, mag: Math.min(1, Math.log10(g.length) / 2),
       data: { islands: g.length, areaKm2: Math.round(areaKm2) }, idX: x, idY: y,
       variant: g.length >= 15 ? 'archipelago' : 'islands',
       hero: { cat: 'archipelago', score: heroScore },
-    });
+    }));
   }
   found.sort((a, b) => b.data.islands - a.data.islands || b.extentM - a.extentM);
   for (const c of found.slice(0, 8)) out.push(c);
@@ -239,11 +240,11 @@ function detectPeninsulas(I: RegistryInput, S: Shared, R: GridSpec, rKm: number,
       const mass = fa >= 0 ? S.masses.label[fa] : -1;
       if (mass >= 0 && areaKm2 > 0.4 * S.masses.size[mass] * (I.fine.cellM / 1000) ** 2) continue;
       accepted.push({ tx, ty });
-      found.push({
+      found.push(candidate({
         kind: 'peninsula', x, y, angle: labelAngle(tx - bx, ty - by), extentM: PKm * 1000, mag: Math.min(1, PKm / 300),
         data: { lengthKm: Math.round(PKm), areaKm2: Math.round(areaKm2), neckKm: Math.round(base * rKm) }, idX: cellX(R, tip), idY: cellY(R, tip),
         landmass: mass,
-      });
+      }));
       if (PKm >= 30) {
         // Cape: the fine land cell nearest the tip that touches the sea.
         const txm = cellX(R, tip) / I.fine.cellM;
@@ -261,10 +262,10 @@ function detectPeninsulas(I: RegistryInput, S: Shared, R: GridSpec, rKm: number,
         if (fc >= 0) {
           const cx = cellX(I.fine, fc);
           const cy = cellY(I.fine, fc);
-          capes.push({
+          capes.push(candidate({
             kind: 'cape', x: cx, y: cy, angle: NaN, extentM: Math.min(PKm, 40) * 1000 * 0.25, visM: Math.min(PKm, 60) * 1000 * 0.2,
             mag: Math.min(1, PKm / 300), data: { peninsulaKm: Math.round(PKm) }, idX: cx, idY: cy, landmass: S.masses.label[fc],
-          });
+          }));
         }
       }
     }
@@ -294,10 +295,10 @@ function detectIsthmuses(I: RegistryInput, S: Shared, R: GridSpec, rKm: number, 
     const fa = nearestWhere(I.fine, ax / I.fine.cellM, ay / I.fine.cellM, 3 * S.f, (q) => !I.sea[q]);
     const x = fa >= 0 ? cellX(I.fine, fa) : ax;
     const y = fa >= 0 ? cellY(I.fine, fa) : ay;
-    found.push({
+    found.push(candidate({
       kind: 'isthmus', x, y, angle: labelAngle(-vy, vx), extentM: Math.max(widthKm * 2, 10) * 1000, mag: Math.min(1, t.peakV[k] / (4 * Math.max(t.colV[k], 0.5))),
       data: { widthKm: Math.round(widthKm) }, idX: ax, idY: ay, landmass: fa >= 0 ? S.masses.label[fa] : -1,
-    });
+    }));
   }
   found.sort((a, b) => b.mag - a.mag);
   for (const c of found.slice(0, 4)) out.push(c);

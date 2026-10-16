@@ -1,5 +1,6 @@
 import { cellIndex, cellX as colOf, cellY as rowOf } from '../grid/grid';
 import { B } from '../stages/plates';
+import { candidate, own } from './candidate';
 import { cellAtM, cellX, cellY, insideDistance, label, labelAngle, mergeTree, nearestWhere, pca, resolveOwners, type MergeTree } from './grid';
 import { G } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
@@ -67,11 +68,11 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
     const rad = Math.max(f.size / 2 / cellM, 1.5);
     if (f.type === 'crater') {
       const D = f.data?.diameter ?? f.size;
-      const c: Candidate = {
+      const c: Candidate = candidate({
         kind: 'crater', x: f.x, y: f.y, angle: NaN, extentM: D, mag: Math.min(1, D / 40000),
         data: { diameterKm: Math.round(D / 100) / 10, depthM: Math.round(f.data?.depth ?? 0) }, idX: f.x, idY: f.y,
         hero: { cat: 'crater', score: D / 20000 }, tier: D >= 50000 ? 'legendary' : 'rare',
-      };
+      });
       volcanoes.push(c);
       continue;
     }
@@ -93,11 +94,11 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
       }
     }
     if (f.type === 'caldera') {
-      volcanoes.push({
+      volcanoes.push(candidate({
         kind: 'caldera', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 30000),
         data: { diameterKm: Math.round(f.size / 100) / 10, depthM: Math.round(f.data?.depth ?? 0), rimM: Math.round(f.data?.rim ?? 0) },
         idX: f.x, idY: f.y, tier: 'rare',
-      });
+      }));
       continue;
     }
     if (best < 0) continue;
@@ -111,20 +112,20 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
     const hgt = I.h[best];
     const x = cellX(I.fine, best);
     const y = cellY(I.fine, best);
-    volcanoes.push({
+    volcanoes.push(candidate({
       kind: 'volcano', x, y, angle: NaN, extentM: f.size, mag: 0.7 * Math.min(1, hgt / Math.max(kingH, 1)) + 0.3 * Math.min(1, f.size / 40000),
       data: { heightM: Math.round(hgt), ...(k >= 0 ? { prominenceM: Math.round(prom[k]) } : {}), diameterKm: Math.round(f.size / 100) / 10, shield: f.type === 'shield-volcano' ? 1 : 0 },
       idX: f.x, idY: f.y, variant: f.type === 'shield-volcano' ? 'shield' : 'strato', visM: Math.max(f.size, 3000),
       ...(k >= 0 ? { summit: k } : {}),
-    });
+    }));
   }
   const nVol = volcanoes.filter((v) => v.kind === 'volcano').length;
   let tallest: Candidate | null = null;
   for (const v of volcanoes) if (v.kind === 'volcano' && (!tallest || v.data.heightM > tallest.data.heightM)) tallest = v;
   // Every tall cone is a hero candidate (research 05 §3.4: stratovolcano > 4 km); the tallest also
   // stands for the whole chain (> 6 cones), so volcanic island worlds have more than one candidate.
-  for (const v of volcanoes) if (v.kind === 'volcano') v.hero = { cat: 'volcano', score: v.data.heightM / 4000 };
-  if (tallest) tallest.hero = { cat: 'volcano', score: Math.max(tallest.data.heightM / 4000, nVol / 6) };
+  for (const v of volcanoes) if (v.kind === 'volcano') v.hero = own({ cat: 'volcano', score: v.data.heightM / 4000 });
+  if (tallest) tallest.hero = own({ cat: 'volcano', score: Math.max(tallest.data.heightM / 4000, nVol / 6) });
   out.push(...volcanoes);
 
   // Peaks: prominent summits, most prominent first, spaced, capped by land area; the king always.
@@ -170,13 +171,13 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
     const isKing = k === kingK;
     const px = cellX(I.fine, c);
     const py = cellY(I.fine, c);
-    peaks.push({
+    peaks.push(candidate({
       kind: 'peak', x: px, y: py, angle: NaN, extentM: ext,
       visM: isKing ? 16000 : 1000 * (p / PEAK_MIN_PROM) ** 0.9, mag: 0.6 * Math.min(1, hgt / Math.max(kingH, 1)) + 0.4 * Math.min(1, p / 3000),
       data: { heightM: Math.round(hgt), prominenceM: Math.round(p), ...(isKing ? { worldKing: 1 } : {}) }, idX: px, idY: py,
       tier: hgt >= 7500 ? 'legendary' : hgt >= 5000 ? 'rare' : isKing ? 'uncommon' : 'common',
       landmass: S.masses.label[c],
-    });
+    }));
   }
   out.push(...peaks);
   detectPasses(I, S, out, t, prom, peakComps, peaks);
@@ -268,12 +269,12 @@ function detectRanges(I: RegistryInput, S: Shared, out: Candidate[], peaks: Cand
     const areaKm2 = cells.length * rKm * rKm;
     ranges.push({
       id,
-      c: {
+      c: candidate({
         kind: 'range', x, y, angle: labelAngle(ax.ux, ax.uy), extentM: lenKm * 1000, mag: 0.5 * Math.min(1, lenKm / 600) + 0.5 * Math.min(1, maxH / 6000),
         data: { lengthKm: Math.round(lenKm), widthKm: Math.round(widthKm), maxHeightM: Math.round(maxH), areaKm2: Math.round(areaKm2) },
         idX: cellX(R, t.peak[id]), idY: cellY(R, t.peak[id]), path, variant, hero: { cat: 'massif', score: maxH / 5000 },
         landmass: fa >= 0 ? S.masses.label[fa] : -1,
-      },
+      }),
     });
   }
   ranges.sort((a, b) => b.c.mag - a.c.mag);
@@ -333,11 +334,11 @@ function detectPasses(I: RegistryInput, S: Shared, out: Candidate[], t: MergeTre
     const y = cellY(fine, c);
     if (kept.some((o) => (o.x - x) ** 2 + (o.y - y) ** 2 < sp2)) continue;
     kept.push({ x, y });
-    out.push({
+    out.push(candidate({
       kind: 'pass', x, y, angle: NaN, extentM: PASS_EXTENT_M, visM: PASS_EXTENT_M, mag: Math.min(1, t.colV[k] / 4000),
       data: { heightM: Math.round(t.colV[k]), belowPeakM: Math.round(prom[k]) }, idX: x, idY: y, nameFrom: peaks[i],
       tier: 'common', landmass: S.masses.label[c],
-    });
+    }));
   }
 }
 
@@ -374,11 +375,11 @@ function detectFlats(I: RegistryInput, S: Shared, out: Candidate[], rangeOf: Int
       const fa = nearestWhere(I.fine, px / I.fine.cellM, py / I.fine.cellM, 3 * S.f, (c) => !I.sea[c]);
       const x = fa >= 0 ? cellX(I.fine, fa) : px;
       const y = fa >= 0 ? cellY(I.fine, fa) : py;
-      list.push({
+      list.push(candidate({
         kind, x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000, mag: Math.min(1, areaKm2 / 100000),
         data: { areaKm2: Math.round(areaKm2), elevationM: Math.round(sumH[k] / comps.size[k]) }, idX: px, idY: py,
         landmass: fa >= 0 ? S.masses.label[fa] : -1, variant: kind === 'plain' && areaKm2 > 40000 ? 'lowlands' : kind,
-      });
+      }));
     }
     list.sort((a, b) => b.extentM - a.extentM);
     out.push(...list.slice(0, cap));
@@ -429,11 +430,11 @@ function detectRifts(I: RegistryInput, S: Shared, out: Candidate[]): void {
     for (let b = 0; b < bins; b++) if (cnt[b]) pts.push(sx[b] / cnt[b], sy[b] / cnt[b]);
     const x = cellX(pg, mid);
     const y = cellY(pg, mid);
-    list.push({
+    list.push(candidate({
       kind: 'rift', x, y, angle: labelAngle(ax.ux, ax.uy), extentM: seg.lengthKm * 1000, mag: Math.min(1, seg.lengthKm / 800),
       data: { lengthKm: Math.round(seg.lengthKm) }, idX: x, idY: y, path: Float32Array.from(pts), tier: 'uncommon',
       landmass: S.masses.label[cellAtM(I.fine, x, y)],
-    });
+    }));
   }
   list.sort((a, b) => b.extentM - a.extentM);
   out.push(...list.slice(0, 4));
@@ -448,20 +449,20 @@ function landformAreas(I: RegistryInput, out: Candidate[]): void {
     .slice(0, cap);
   for (const f of pick('mesa-field', 150, 4)) {
     const a = f.data?.areaKm2 ?? 0;
-    out.push({
+    out.push(candidate({
       kind: 'mesa-field', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, a / 5000),
       data: { areaKm2: Math.round(a), mesas: f.data?.tops ?? 0 }, idX: f.x, idY: f.y, tier: 'uncommon',
-    });
+    }));
   }
   for (const f of pick('karst', 300, 3)) {
     const a = f.data?.areaKm2 ?? 0;
-    out.push({ kind: 'karst', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, a / 10000), data: { areaKm2: Math.round(a) }, idX: f.x, idY: f.y, tier: 'uncommon' });
+    out.push(candidate({ kind: 'karst', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, a / 10000), data: { areaKm2: Math.round(a) }, idX: f.x, idY: f.y, tier: 'uncommon' }));
   }
   for (const f of pick('tower-karst', 200, 2)) {
     const a = f.data?.areaKm2 ?? 0;
-    out.push({
+    out.push(candidate({
       kind: 'karst', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, a / 5000), data: { areaKm2: Math.round(a), towers: 1 },
       idX: f.x, idY: f.y, variant: 'towers', tier: 'rare', hero: { cat: 'karst-towers', score: a / 1500 },
-    });
+    }));
   }
 }

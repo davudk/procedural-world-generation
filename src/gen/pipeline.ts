@@ -52,7 +52,7 @@ export class Cancelled extends Error {
   }
 }
 
-interface CacheEntry {
+export interface CacheEntry {
   key: number;
   out: StageOutput;
 }
@@ -125,6 +125,16 @@ export class Pipeline {
   /** Cached output of a stage (tests). */
   output(id: StageId): StageOutput | undefined {
     return this.cache.get(id)?.out;
+  }
+
+  /** The cache as structured-cloneable entries (tests and metrics: hand a generated world to a worker). */
+  snapshot(): [StageId, CacheEntry][] {
+    return [...this.cache];
+  }
+
+  /** Loads entries from `snapshot()`; a run then re-runs only the stages they do not cover. */
+  restore(entries: readonly [StageId, CacheEntry][]): void {
+    for (const [id, e] of entries) this.cache.set(id, e);
   }
 
   private ctx(s: StageDef, resolved: Resolved, mode: GenMode, isStale: () => boolean): StageCtx {

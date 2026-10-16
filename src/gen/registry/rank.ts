@@ -1,6 +1,7 @@
 import type { Landmark, LandmarkKind, Tier } from '../../shared/landmarks';
 import { hashMix, hashString } from '../../shared/hash';
 import { applyWBudget } from './budget';
+import { own } from './candidate';
 import type { Namer } from './names';
 import type { Candidate, HeroCat, Shared } from './types';
 
@@ -142,7 +143,8 @@ export function rankAndName(
     if (c.path && c.path.length >= 4) lm.path = c.path;
     if (isHero) lm.data = { ...c.data, heroScore: Math.round(c.hero!.score * 100) / 100 };
     index.set(c, lm.id);
-    landmarks.push(lm);
+    // Kept as a copy of its own, like candidates (candidate.ts: V8 Maglev workaround).
+    landmarks.push(own(lm));
   }
   const heroPool = pool.filter((c) => c.hero!.score >= 0.2).map((c) => `${c.hero!.cat}:${c.hero!.score.toFixed(2)}@${Math.round(c.x / 1000)},${Math.round(c.y / 1000)}`);
   return { landmarks, heroes: heroes.map((h) => index.get(h)!), heroPool, index, wDropped: budget.dropped.length, wQuota: budget.quota };
