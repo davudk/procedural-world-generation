@@ -102,23 +102,14 @@ function hash(seed: number, x: number, y: number, z: number): number {
   let h = seed ^ Math.imul(x | 0, 0x8da6b343) ^ Math.imul(y | 0, 0xd8163841) ^ Math.imul(z | 0, 0xcb1ab31f);
   h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
   h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
-  return (h ^ (h >>> 15)) >>> 0;
+  return (h ^ (h >>> 15)) & 15;
 }
 
-/** Dot product with one of the 12 cube-edge gradients (Perlin 2002). */
+/** Perlin's 12 cube-edge gradients, padded to 16 with four of them repeated (a mask instead of a modulo). */
+const GX = Float64Array.from([1, -1, 1, -1, 1, -1, 1, -1, 0, 0, 0, 0, 1, -1, 0, 0]);
+const GY = Float64Array.from([1, 1, -1, -1, 0, 0, 0, 0, 1, -1, 1, -1, 1, 1, -1, -1]);
+const GZ = Float64Array.from([0, 0, 0, 0, 1, 1, -1, -1, 1, 1, -1, -1, 0, 0, 1, -1]);
+
 function grad(h: number, x: number, y: number, z: number): number {
-  switch (h % 12) {
-    case 0: return x + y;
-    case 1: return -x + y;
-    case 2: return x - y;
-    case 3: return -x - y;
-    case 4: return x + z;
-    case 5: return -x + z;
-    case 6: return x - z;
-    case 7: return -x - z;
-    case 8: return y + z;
-    case 9: return -y + z;
-    case 10: return y - z;
-    default: return -y - z;
-  }
+  return GX[h] * x + GY[h] * y + GZ[h] * z;
 }

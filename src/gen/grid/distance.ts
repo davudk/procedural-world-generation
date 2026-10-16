@@ -51,7 +51,8 @@ export function distanceField(source: Uint8Array, g: Grid): { dist: Float32Array
 function distanceFieldCube(source: Uint8Array, g: CubeGrid): { dist: Float32Array; nearest: Int32Array } {
   const N = g.cells;
   const p = unitPositions(g);
-  const inv = 1 / g.delta;
+  // Keyed by the squared chord to the source (monotonic in the great-circle distance, and cheap);
+  // converted to nominal cells at the end.
   const dist = new Float64Array(N).fill(Infinity);
   const nearest = new Int32Array(N).fill(-1);
   const heap = new MinHeap(g.n * 24);
@@ -72,13 +73,10 @@ function distanceFieldCube(source: Uint8Array, g: CubeGrid): { dist: Float32Arra
     for (let k = 0; k < 8; k++) {
       const nc = g.nbr(c, k);
       if (nc < 0) continue;
-      const qx = p[nc * 3];
-      const qy = p[nc * 3 + 1];
-      const qz = p[nc * 3 + 2];
-      const cx = sy * qz - sz * qy;
-      const cy = sz * qx - sx * qz;
-      const cz = sx * qy - sy * qx;
-      const nd = Math.atan2(Math.sqrt(cx * cx + cy * cy + cz * cz), sx * qx + sy * qy + sz * qz) * inv;
+      const dx = p[nc * 3] - sx;
+      const dy = p[nc * 3 + 1] - sy;
+      const dz = p[nc * 3 + 2] - sz;
+      const nd = dx * dx + dy * dy + dz * dz;
       if (nd < dist[nc]) {
         dist[nc] = nd;
         nearest[nc] = s;
@@ -86,7 +84,10 @@ function distanceFieldCube(source: Uint8Array, g: CubeGrid): { dist: Float32Arra
       }
     }
   }
-  return { dist: Float32Array.from(dist), nearest };
+  const inv = 2 / g.delta;
+  const out = new Float32Array(N);
+  for (let i = 0; i < N; i++) out[i] = dist[i] === Infinity ? Infinity : Math.asin(Math.min(1, Math.sqrt(dist[i]) / 2)) * inv;
+  return { dist: out, nearest };
 }
 
 /**
