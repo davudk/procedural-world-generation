@@ -747,3 +747,56 @@ Each research note lists its sources with URLs. The core references are:
 - **Creek trunks** follow macro D8, so a faint 1 km structure can show.
 - **Hydraulic erosion constants** are untuned starting values.
 - **Snow** patches still have hard edges.
+
+### M6 — Landforms (2026-10-16)
+
+**Pipeline order:** `refine → climate → glacial → landforms → hydro → biome`. Terrain-changing landforms run before hydrology, so crater and caldera lakes, fjord drainage, lagoons and karst ponds come out of the water balance.
+
+**S7 Glacial** (`src/gen/glacial/*`):
+- Ohmura ELA shifted by `glaciation`. Present-day ice is shown as cover; troughs are carved with a colder glacial-maximum ELA, because they are relics of past ice.
+- Ice flux accumulated along drainage; U-troughs as the distance to smoothed glacier centrelines; cirques; hanging valleys.
+- Fjords over-deepened 300–1200 m below sea level with sills, flooded only when 4-connected to the sea.
+- Uplift-free repair erosion; carving only lowers terrain.
+- Results: Fjordland has fjords on 8/8 test seeds (~1000–1800 km of fjord coast). Earth-like has small or no fjord coasts.
+
+**S10 Landforms** (`src/gen/landforms/*`, one module per family behind a shared `LandformCtx`):
+- **Volcanic:** fresh stratovolcanoes on active arcs, which rejuvenate eroded stamped cones. Young shields at the leading end of hotspot tracks. Calderas with raised-cosine walls, so lakes form. Cinder fields and geothermal halos. Outlines are irregular: angular harmonics, rift-zone elongation, lava lobes, coastline warp.
+- **Impact:** fresh craters, Poisson-sized with N(>D) ∝ D⁻² and at least 150 km apart. Pike simple and complex profiles, slightly polygonal rims, lobate ejecta and a ray mask.
+- **Arid:** caprock terracing, which gives mesas, buttes and escarpments. Erg (sand-sea) and dune-direction masks. Inselbergs.
+- **Karst:** limestone provinces, dolines, tropical tower karst, cenotes.
+- **Coastal:**
+  - Exposure-based coast classes; rias; cliffs with sea stacks.
+  - Barrier islands with tidal inlets and lagoons, spits, tombolos.
+  - Fringing and barrier reefs; atolls at the old end of warm hotspot chains.
+  - A full rebuild of the ocean mask (`fixed`).
+- Placed landmarks are collected as `Feature`s for the M7 registry.
+
+**Biomes:**
+- Wetlands are typed as swamp (warm and humid), fen (cold, by lakes or rivers), bog (cold, rain-fed) or marsh.
+
+**Rendering:**
+- A landform-mask texture: reef (turquoise shallows with a pale crest), erg (redder sand with dune ridges at region zoom), crater ejecta brightening.
+
+**Fixes found visually:**
+- Scalloped trough walls: per-cell stamps were replaced by distance to a smoothed centreline, which halved the added roughness.
+- Perfectly circular volcanoes: they now have irregular outlines.
+- 1-cell caldera steps: caldera walls are now at least 2.5 cells wide.
+
+**Climate seams:** straight north–south vegetation and snow seams on Fjordland were narrow air-mass fronts carried along nearly uniform wind paths; the upwind sweep spreads almost nothing sideways.
+
+- **Fix:** humidity is mixed sideways (σ 30 km) before rain is drawn, and marine influence and summer-rain share are mixed sideways and meandered (±35 km).
+- **Result:** the worst interior gradients fell 2–4×. A regression test checks for axis-aligned steps.
+
+**Test changes:** the hydrology "carving only lowers" invariant now compares against the landforms output, since landforms legitimately raise ground. 152 tests pass.
+
+**Timings at build, seed 7:**
+
+| Stage | Time |
+|---|---|
+| Glacial | 0.2–0.3 s |
+| Landforms | 0.1–0.3 s |
+
+**Known gaps:**
+- Coastal dunes (F22) are not done.
+- Landform passes can't see the positions of old craters and hotspots, so they re-detect them from the terrain.
+- Generation in the browser pane is sometimes several times slower than in node, because of machine load while agents ran.

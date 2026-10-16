@@ -26,7 +26,7 @@ async function world(seed: number, mode: GenMode = 'preview', pins: WorldSpec['p
   if (error) throw new Error(error);
   const hydro = p.output('hydro')!;
   const { rivers, lakes } = hydro.vectors!;
-  return { hydro, refine: p.output('refine')!.extra as ErodedExtra, extra: hydro.extra as HydroExtra, rivers: rivers!, lakes: lakes! };
+  return { hydro, refine: p.output('landforms')!.extra as ErodedExtra, extra: hydro.extra as HydroExtra, rivers: rivers!, lakes: lakes! };
 }
 
 const TERMINAL = RIVER.MOUTH_SEA | RIVER.MOUTH_LAKE | RIVER.LAKE_TERMINAL | RIVER.SINK_DRY;

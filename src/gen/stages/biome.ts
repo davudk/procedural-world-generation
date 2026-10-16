@@ -31,10 +31,10 @@ const PRESENT_SHARE = 0.001;
 export const biomeStage: StageDef = {
   id: 'biome',
   label: 'Biomes',
-  inputs: ['refine', 'climate', 'hydro'],
+  inputs: ['landforms', 'climate', 'hydro'],
   reads: ['worldSize', 'glaciation'],
   async run(ctx) {
-    const t = ctx.input('refine').extra as ErodedExtra;
+    const t = ctx.input('landforms').extra as ErodedExtra;
     const cl = ctx.input('climate').extra as ClimateExtra;
     const hy = ctx.input('hydro').extra as HydroExtra;
     const { n, cellKm } = cl;

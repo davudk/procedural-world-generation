@@ -112,6 +112,8 @@ uniform int u_hasSurface;
 uniform sampler2D u_sunVis;  // horizon pass: r = sun visibility
 uniform sampler2D u_ao;      // horizon pass: r/g = ambient occlusion in g
 uniform int u_hasLight;
+uniform sampler2D u_reef;    // RGBA8 linear landform masks: r reef, g erg (sand sea), b crater ejecta, a cliff
+uniform int u_hasReef;
 uniform int u_palette;       // 0 biome LUT (satellite / stylised), 1 hypsometric
 uniform sampler2D u_layer;   // optional draped layer
 uniform ivec2 u_layerSize;
@@ -157,6 +159,15 @@ vec3 landColor(vec2 w, float h, vec3 n, float pxFoot, vec2 grad) {
   c *= 0.88 + 0.24 * fbm3(w / 90000.0 + 3.0);                    // geology scale
   c *= mix(1.0, 0.9 + 0.2 * vnoise(w / 3500.0), fine);           // field / patch mosaic
   c *= 1.0 - 0.1 * cl.a;                                         // dense canopy reads darker
+  if (u_hasReef == 1) {
+    vec4 lm = texture(u_reef, uv);
+    // Sand seas: warmer, redder sand with dune ridges (≈2 km wavelength) until the detail map takes over.
+    float erg = smoothstep(0.05, 0.9, lm.g + 0.25 * (fbm3(w / 14000.0 + 5.0) - 0.5));
+    float dunes = 0.5 + 0.5 * sin(dot(w, vec2(0.94, 0.34)) / 320.0 + 4.0 * fbm3(w / 9000.0));
+    float duneFade = 1.0 - smoothstep(250.0, 700.0, pxFoot);
+    c = mix(c, vec3(0.82, 0.64, 0.42) * (0.92 + 0.12 * dunes * duneFade), erg * 0.55);
+    c = mix(c, c * 1.25 + 0.05, smoothstep(0.2, 0.9, lm.b) * 0.5);   // bright crater ejecta
+  }
   c = mix(c, vec3(0.86, 0.80, 0.66), smoothstep(0.15, 0.7, cv.b) * 0.9);   // beach / dunes / salt
   c = mix(c, vec3(0.24, 0.32, 0.22), smoothstep(0.15, 0.8, cv.a) * 0.5);   // marsh / bog / mangrove
   float slope = length(grad);
@@ -208,6 +219,12 @@ void main() {
     if (cls > 5.5) { shallow = vec3(0.55, 0.78, 0.76); deep = vec3(0.30, 0.58, 0.62); }
     col = mix(shallow, deep, pow(clamp(depth / (lake ? 400.0 : 4000.0), 0.0, 1.0), 0.35));
     col = mix(col, vec3(0.42, 0.68, 0.70), (1.0 - smoothstep(0.0, 60.0, depth)) * 0.6);
+    if (u_hasReef == 1 && !lake) {
+      // Reefs: turquoise shallows with a pale crest where the reef nearly reaches the surface.
+      float reef = texture(u_reef, luv).r;
+      col = mix(col, vec3(0.38, 0.80, 0.78), smoothstep(0.1, 0.6, reef) * (1.0 - smoothstep(10.0, 60.0, depth)) * 0.85);
+      col = mix(col, vec3(0.80, 0.88, 0.82), smoothstep(0.55, 0.95, reef) * (1.0 - smoothstep(0.0, 8.0, depth)) * 0.6);
+    }
     // Waves: three scrolling noise layers; each fades out once its wavelength is under ~4 px.
     vec2 g = vec2(0.0);
     float amp = 0.06;
@@ -298,6 +315,8 @@ export class TerrainPass {
   private readonly lutTex: WebGLTexture;
   private readonly lutDryTex: WebGLTexture;
   private readonly paletteTex: WebGLTexture;
+  private readonly reefTex: WebGLTexture;
+  private hasReef = 0;
   private hasSurface = 0;
   /** 'hypsometric' ignores biomes and colours by elevation only. */
   palette: Palette | 'hypsometric' = 'satellite';
@@ -316,7 +335,7 @@ export class TerrainPass {
     this.u = uniforms(gl, this.prog, [
       'u_viewProj', 'u_exag', 'u_pxScale', 'u_height', 'u_hn', 'u_size', 'u_origin', 'u_sun', 'u_normalExag', 'u_cell', 'u_haze', 'u_hazeColor',
       'u_time', 'u_grad', 'u_water', 'u_hasWater', 'u_wclass', 'u_hasClass', 'u_masks', 'u_climate', 'u_cover', 'u_lut', 'u_lutDry',
-      'u_biomePal', 'u_hasSurface', 'u_palette', 'u_sunVis', 'u_ao', 'u_hasLight', 'u_layer', 'u_layerSize', 'u_layerMode', 'u_layerMin', 'u_layerMax',
+      'u_biomePal', 'u_hasSurface', 'u_palette', 'u_sunVis', 'u_ao', 'u_hasLight', 'u_reef', 'u_hasReef', 'u_layer', 'u_layerSize', 'u_layerMode', 'u_layerMin', 'u_layerMax',
     ] as const);
 
     const verts = new Float32Array((GRID + 1) * (GRID + 1) * 2);
@@ -372,6 +391,27 @@ export class TerrainPass {
     this.lutTex = linearTexture(gl);
     this.lutDryTex = linearTexture(gl);
     this.paletteTex = linearTexture(gl);
+    this.reefTex = linearTexture(gl);
+  }
+
+  /** Landform masks (0–255 each, same grid) from the landforms stage; any may be missing. */
+  setLandformMasks(m: { reef: Layer | null; erg: Layer | null; crater: Layer | null; cliff: Layer | null; n: number } | null): void {
+    this.hasReef = m ? 1 : 0;
+    if (!m) return;
+    const n = m.n;
+    const out = new Uint8Array(n * n * 4);
+    const put = (l: Layer | null, ch: number): void => {
+      if (!l || l.w !== n) return;
+      for (let i = 0; i < n * n; i++) out[i * 4 + ch] = l.data[i];
+    };
+    put(m.reef, 0);
+    put(m.erg, 1);
+    put(m.crater, 2);
+    put(m.cliff, 3);
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.reefTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, n, n, 0, gl.RGBA, gl.UNSIGNED_BYTE, out);
   }
 
   /**
@@ -507,6 +547,8 @@ export class TerrainPass {
     bind(8, this.lutTex, this.u.u_lut);
     bind(9, this.lutDryTex, this.u.u_lutDry);
     bind(10, this.paletteTex, this.u.u_biomePal);
+    bind(15, this.reefTex, this.u.u_reef);
+    gl.uniform1i(this.u.u_hasReef, this.hasReef);
     gl.uniform1i(this.u.u_hasSurface, this.hasSurface);
     gl.uniform1i(this.u.u_palette, this.palette === 'hypsometric' ? 1 : 0);
     gl.uniform1i(this.u.u_hasLight, f.lighting ? 1 : 0);
@@ -558,7 +600,7 @@ function coverMasks(biome: Layer, snow: Layer, n: number): Uint8Array {
     raw[i * 4] = Math.max(snow.data[i], id === BIOME.ICE ? 1 : 0);
     raw[i * 4 + 1] = id === BIOME.ROCK || id === BIOME.NIVAL ? 1 : 0;
     raw[i * 4 + 2] = id === BIOME.BEACH || id === BIOME.SALT_FLAT ? 1 : 0;
-    raw[i * 4 + 3] = id === BIOME.MARSH || id === BIOME.BOG || id === BIOME.SALT_MARSH || id === BIOME.MANGROVE ? 1 : 0;
+    raw[i * 4 + 3] = id === BIOME.MARSH || id === BIOME.BOG || id === BIOME.SALT_MARSH || id === BIOME.MANGROVE || id === BIOME.SWAMP || id === BIOME.FEN ? 1 : 0;
   }
   const out = new Uint8Array(n * n * 4);
   for (let y = 0; y < n; y++) {

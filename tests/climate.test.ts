@@ -204,3 +204,84 @@ describe('M4 biomes', () => {
     expect(await hashes()).toEqual(a);
   }, 60_000);
 });
+
+/**
+ * Straight-seam regression (research 03 §7.5). Upwind sweeps under a near-uniform wind used to carry
+ * the edge of a coastal air mass as a narrow front along a straight streamline: on fjordland seed 31
+ * (build) the temperature range changed ~6 °C per 100 km across a N–S line, which the renderer showed
+ * as a straight vegetation/snow seam. Before the fix these preview worlds reached 6.7–8 °C/100 km
+ * (tAmp) and 0.6–0.9 /100 km (summerRain) in the interior; now ≤ 4.3 and ≤ 0.35.
+ */
+describe('M4 climate has no straight seams', () => {
+  const WORLDS: [string, number][] = [['fjordland', 31], ['earth', 7], ['pangaea', 2]];
+
+  /** Largest gradient (per 100 km) of `f` over land at least 80 km from the sea. */
+  function interiorGradient(c: ClimateExtra, f: Float32Array): number {
+    const { n, cellKm } = c;
+    let max = 0;
+    for (let y = 1; y < n - 1; y++) {
+      for (let x = 1; x < n - 1; x++) {
+        const i = y * n + x;
+        if (c.sea[i] || c.coastKm[i] < 80) continue;
+        max = Math.max(max, (Math.hypot(f[i + 1] - f[i - 1], f[i + n] - f[i - n]) / (2 * cellKm)) * 100);
+      }
+    }
+    return max;
+  }
+
+  /**
+   * Axis-aligned seam score: over 32-cell runs along one axis, the mean central difference across
+   * a single column (row) relative to the columns 4–6 cells either side. A straight step or kink
+   * stands out against its neighbourhood; smooth or curved fronts do not.
+   */
+  function seamScore(c: ClimateExtra, f: Float32Array): number {
+    const { n } = c;
+    const RUN = 32;
+    let global = 0;
+    let cnt = 0;
+    for (let i = n + 1; i < n * n - n - 1; i++) {
+      if (c.sea[i]) continue;
+      global += Math.abs(f[i + 1] - f[i - 1]) + Math.abs(f[i + n] - f[i - n]);
+      cnt += 2;
+    }
+    const floor = (0.25 * global) / Math.max(1, cnt);
+    let worst = 0;
+    for (const horiz of [true, false]) {
+      const step = horiz ? 1 : n;
+      const col = new Float64Array(n);
+      for (let r0 = 0; r0 + RUN <= n; r0 += RUN / 2) {
+        for (let u = 1; u < n - 1; u++) {
+          let s = 0;
+          let k = 0;
+          for (let r = r0; r < r0 + RUN; r++) {
+            const i = horiz ? r * n + u : u * n + r;
+            if (c.sea[i - step] || c.sea[i] || c.sea[i + step]) continue;
+            s += Math.abs(f[i + step] - f[i - step]);
+            k++;
+          }
+          col[u] = k >= RUN * 0.9 ? s / k : NaN;
+        }
+        for (let u = 7; u < n - 7; u++) {
+          const ref = [col[u - 6], col[u - 4], col[u + 4], col[u + 6]];
+          if (!(col[u] >= 0) || ref.some((v) => !(v >= 0))) continue;
+          worst = Math.max(worst, col[u] / (Math.max(...ref) + floor));
+        }
+      }
+    }
+    return worst;
+  }
+
+  for (const [archetype, seed] of WORLDS) {
+    it(`${archetype} ${seed}: smooth air-mass fronts and no axis-aligned steps`, async () => {
+      const { c, b } = await world(archetype, seed);
+      const lnP = Float32Array.from(c.precip, (v) => Math.log(Math.max(1, v)));
+      const lutV = Float32Array.from(b.aridity, (v) => Math.log10(Math.max(0.01, v) * 10) / 2);
+      const gA = interiorGradient(c, c.tAmp);
+      const gS = interiorGradient(c, c.pSummer);
+      const seams = [c.temp, c.tAmp, c.pSummer, lnP, lutV].map((f) => seamScore(c, f));
+      expect(gA).toBeLessThan(5);
+      expect(gS).toBeLessThan(0.5);
+      for (const s of seams) expect(s).toBeLessThan(3);
+    }, 60_000);
+  }
+});

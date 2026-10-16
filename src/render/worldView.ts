@@ -116,6 +116,10 @@ export class WorldView {
     this.terrain.setSurface(s);
   }
 
+  setLandformMasks(m: { reef: Layer | null; erg: Layer | null; crater: Layer | null; cliff: Layer | null; n: number } | null): void {
+    this.terrain.setLandformMasks(m);
+  }
+
   setPalette(p: Palette | 'hypsometric'): void {
     this.terrain.palette = p;
   }

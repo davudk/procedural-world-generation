@@ -141,7 +141,7 @@ export function classifyBiomes(inp: BiomeInput): BiomeFields {
         if (sheltered && Tc >= 16 && sstCold >= 20) b = BIOME.MANGROVE;
         else b = sheltered ? BIOME.SALT_MARSH : BIOME.BEACH;
       } else if (wc === W_PLAYA) b = BIOME.SALT_FLAT;
-      else if (wc === W_WETLAND) b = T < 4 ? BIOME.BOG : BIOME.MARSH; // T ≥ 18 is forested swamp, same id
+      else if (wc === W_WETLAND) b = wetlandType(T, ai, waterClass, n, x, y);
       else b = zonal(T, Tw, Tc, A, P, ps, ai, hp, fog[i] === 1);
       raw[i] = b;
     }
@@ -153,7 +153,7 @@ export function classifyBiomes(inp: BiomeInput): BiomeFields {
     const b = biome[i];
     if (b === BIOME.WATER) continue;
     const T = temp[i];
-    let c = b === BIOME.MARSH && T >= 18 ? 0.8 : BIOMES[b].canopy;
+    let c = BIOMES[b].canopy;
     if (c > 0) {
       const Tw = T + tAmp[i];
       c *= (0.7 + 0.3 * smoothstep(0.4, 1.4, aridity[i])) * (0.6 + 0.4 * smoothstep(10, 15, Tw));
@@ -238,4 +238,25 @@ function majority(raw: Uint8Array, n: number): Uint8Array {
     }
   }
   return out;
+}
+
+/**
+ * Wetland typing (research 02 §7): warm humid → swamp (forested); cold → fen where fed by groundwater
+ * or open water (next to a lake or river), otherwise rain-fed bog; everything else → marsh.
+ */
+function wetlandType(T: number, ai: number, wc: ArrayLike<number>, n: number, x: number, y: number): BiomeId {
+  if (T >= 18 && ai >= 1) return BIOME.SWAMP;
+  if (T < 6) {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+        const c = wc[ny * n + nx];
+        if (c === W_LAKE || c === W_RIVER) return BIOME.FEN;
+      }
+    }
+    return BIOME.BOG;
+  }
+  return BIOME.MARSH;
 }

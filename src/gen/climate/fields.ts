@@ -165,3 +165,28 @@ export function minMax(a: Float32Array, skip?: Uint8Array): [number, number] {
   }
   return Number.isFinite(lo) ? [lo, hi] : [0, 0];
 }
+
+/**
+ * Domain warp: out(x, y) = a(x + dx, y + dy), bilinear, edges clamped; dx, dy in cells. Used to
+ * bend the straight isolines that uniform winds leave in advected fields.
+ */
+export function warp(a: Float32Array, n: number, dx: Float32Array, dy: Float32Array): Float32Array {
+  const out = new Float32Array(n * n);
+  const last = n - 1;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const i = y * n + x;
+      const u = Math.min(last, Math.max(0, x + dx[i]));
+      const v = Math.min(last, Math.max(0, y + dy[i]));
+      const x0 = Math.min(last - 1, Math.floor(u));
+      const y0 = Math.min(last - 1, Math.floor(v));
+      const tx = u - x0;
+      const ty = v - y0;
+      const r = y0 * n + x0;
+      const top = a[r] + tx * (a[r + 1] - a[r]);
+      const bot = a[r + n] + tx * (a[r + n + 1] - a[r + n]);
+      out[i] = top + ty * (bot - top);
+    }
+  }
+  return out;
+}

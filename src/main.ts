@@ -206,6 +206,11 @@ function showSelected(): void {
     world.setTerrain(elev, wl, cls && cls.stage === elev.stage ? cls : null);
     world.setRivers(rivers);
     minimap.setTerrain(elev, wl);
+    const mask = (id: string): Layer | null => {
+      const l = layers.get(id);
+      return l && l.w === elev.w ? l : null;
+    };
+    world.setLandformMasks({ reef: mask('reef'), erg: mask('erg'), crater: mask('crater'), cliff: mask('cliff'), n: elev.w });
     const wc = layers.get('waterClass');
     const dis = layers.get('discharge');
     world.setCreekWorld(

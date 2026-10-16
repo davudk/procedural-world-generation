@@ -29,6 +29,10 @@ export const BIOME = {
   BEACH: 23,
   SALT_FLAT: 24,
   ROCK: 25,
+  /** Forested wetland in warm humid climates. */
+  SWAMP: 26,
+  /** Groundwater-fed peatland: cold, by lakes, rivers and slope toes. */
+  FEN: 27,
 } as const;
 
 export type BiomeId = (typeof BIOME)[keyof typeof BIOME];
@@ -70,9 +74,11 @@ export const BIOMES: readonly BiomeInfo[] = [
   b(BIOME.NIVAL, 'Alpine rock / nival', 0, [128, 122, 116], [165, 160, 155]),
   b(BIOME.MANGROVE, 'Mangrove', 0.9, [36, 70, 46], [60, 110, 80]),
   b(BIOME.SALT_MARSH, 'Salt marsh', 0.1, [100, 110, 80], [140, 160, 110]),
-  b(BIOME.MARSH, 'Freshwater marsh / swamp', 0.3, [60, 80, 56], [90, 130, 100]),
-  b(BIOME.BOG, 'Bog / fen', 0.1, [110, 100, 70], [150, 140, 100]),
+  b(BIOME.MARSH, 'Freshwater marsh', 0.3, [60, 80, 56], [90, 130, 100]),
+  b(BIOME.BOG, 'Bog', 0.1, [110, 100, 70], [150, 140, 100]),
   b(BIOME.BEACH, 'Beach / dunes', 0, [226, 212, 178], [240, 225, 180]),
   b(BIOME.SALT_FLAT, 'Salt flat', 0, [232, 230, 222], [245, 245, 240]),
   b(BIOME.ROCK, 'Bare rock / scree', 0, [120, 114, 108], [160, 150, 140]),
+  b(BIOME.SWAMP, 'Swamp', 0.8, [34, 62, 40], [55, 105, 75]),
+  b(BIOME.FEN, 'Fen', 0.15, [100, 112, 78], [140, 160, 110]),
 ];

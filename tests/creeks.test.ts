@@ -69,7 +69,7 @@ async function buildWorld(seed: number): Promise<World> {
   // Score every 40×40 window (step 8) by land share and macro river nodes.
   const wc = input.waterClass;
   const g = input.rivers;
-  const windows: { x: number; y: number; land: number; riv: number }[] = [];
+  const windows: { x: number; y: number; land: number; sea: number; riv: number }[] = [];
   for (let y = 0; y + SIDE <= n; y += 8) {
     for (let x = 0; x + SIDE <= n; x += 8) {
       let land = 0;

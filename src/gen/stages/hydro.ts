@@ -77,10 +77,10 @@ const WETLAND_MAX_SLOPE = 0.02;
 export const hydroStage: StageDef = {
   id: 'hydro',
   label: 'Rivers & lakes',
-  inputs: ['refine', 'climate'],
+  inputs: ['landforms', 'climate'],
   reads: ['worldSize', 'riverDensity', 'lakeDensity', 'meanderStrength', 'wetlandShare', 'waveEnergy', 'tideRange'],
   async run(ctx) {
-    const t = ctx.input('refine').extra as ErodedExtra;
+    const t = ctx.input('landforms').extra as ErodedExtra;
     const cl = ctx.input('climate').extra as ClimateExtra;
     const { n, cellKm, fixed } = t;
     if (cl.n !== n) throw new Error(`hydro: climate grid ${cl.n} ≠ terrain grid ${n}`);

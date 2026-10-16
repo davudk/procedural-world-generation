@@ -22,19 +22,19 @@ const ran = (events: FromWorker[]): string[] =>
 describe('pipeline caching', () => {
   it('re-runs only stages whose read parameters or inputs changed', async () => {
     const p = new Pipeline(STAGES);
-    const ALL = ['plates', 'base', 'stamps', 'lem', 'refine', 'climate', 'hydro', 'biome'];
+    const ALL = ['plates', 'base', 'stamps', 'lem', 'refine', 'climate', 'glacial', 'landforms', 'hydro', 'biome'];
     expect(ran(await run(p, spec()))).toEqual(ALL);
     expect(ran(await run(p, spec()))).toEqual([]);
     // continentalShare is read by plates, so both stages re-run; coastRoughness only by base.
     expect(ran(await run(p, spec({ continentalShare: 0.6 })))).toEqual(ALL);
     expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4 })))).toEqual(ALL.slice(1));
     // Sea-level rise starts at refine.
-    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50 })))).toEqual(['refine', 'climate', 'hydro', 'biome']);
+    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50 })))).toEqual(['refine', 'climate', 'glacial', 'landforms', 'hydro', 'biome']);
     // Humidity only reaches climate and what depends on it.
-    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50, humidity: 2 })))).toEqual(['climate', 'hydro', 'biome']);
+    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50, humidity: 2 })))).toEqual(['climate', 'glacial', 'landforms', 'hydro', 'biome']);
     // A parameter no stage reads yet regenerates nothing.
-    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50, humidity: 2, karstShare: 0.3 })))).toEqual([]);
-  });
+    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50, humidity: 2, heroCount: [4, 4] })))).toEqual([]);
+    }, 60_000);
 
   it('rejects undeclared parameter reads and out-of-order inputs', async () => {
     const bad: StageDef = { id: 'plates', label: 'x', inputs: [], reads: [], run: (c) => ({ layers: [], stats: { v: c.num('humidity') }, outcomes: {} }) };

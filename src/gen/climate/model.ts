@@ -2,7 +2,7 @@ import type { Noise2 } from '../../shared/noise';
 import { chamferDistance, smoothstep } from '../grid/ops';
 import { advectMarine, advectMoisture, buildStencil } from './advect';
 import { sstAnomaly } from './currents';
-import { coarseFbm, downsample, expNeg, gaussBlur, upsample } from './fields';
+import { coarseFbm, downsample, expNeg, gaussBlur, upsample, warp } from './fields';
 import { ampLand, ampOcean, capacity, circulation, HALF_YEAR, LAPSE, zonalT } from './tables';
 import { windField, type Wind, type WindOptions } from './wind';
 
@@ -28,6 +28,19 @@ const HOLDRIDGE = 58.93;
  * reads a σ 5 km blurred DEM, so sweeping finer than 2 km only costs time.
  */
 const SWEEP_KM = 2;
+/**
+ * Cross-wind mixing (km, σ) and streamline meander (km, ± displacement at WARP_WAVE_KM). The upwind
+ * sweeps have almost no cross-wind diffusion, so under a uniform wind the edge of a coastal air mass
+ * (marine influence → temperature range) or a rain shadow travels hundreds of km as a narrow front
+ * along a straight streamline, and every isoline derived from it (treeline, snowline, the renderer's
+ * colour LUT) becomes a straight seam — often exactly N–S or E–W where the band winds are near an
+ * axis (research 03 §7.5). Real air masses mix laterally over ~100 km and their paths meander.
+ */
+const MIX_Q_KM = 30;
+const MIX_MARINE_KM = 80;
+const MIX_SEASON_KM = 40;
+const WARP_KM = 35;
+const WARP_WAVE_KM = 250;
 
 export interface ClimateParams {
   latNorth: number;
@@ -154,20 +167,28 @@ export async function computeClimate(
     pC[i] = tot / 2;
     psC[i] = tot > 1e-6 ? sw.ps[i] / tot : 0.5;
   }
-  gaussBlur(psC, g.n, 15 / g.cellKm);
+  gaussBlur(psC, g.n, MIX_SEASON_KM / g.cellKm);
   for (let i = 0; i < g.anom.length; i++) if (g.sea[i]) sw.a[i] = g.anom[i];
-  gaussBlur(sw.m, g.n, 15 / g.cellKm);
-  gaussBlur(sw.a, g.n, 15 / g.cellKm);
-  const up = (c: Float32Array): Float32Array => {
+  gaussBlur(sw.m, g.n, MIX_MARINE_KM / g.cellKm);
+  gaussBlur(sw.a, g.n, MIX_MARINE_KM / g.cellKm);
+  // fBm rarely leaves ±0.5, so ×2 gives ±WARP_KM.
+  const wx = coarseFbm(noise, g.n, g.cellKm, WARP_WAVE_KM, 2, 63.1);
+  const wy = coarseFbm(noise, g.n, g.cellKm, WARP_WAVE_KM, 2, 77.9);
+  for (let i = 0; i < wx.length; i++) {
+    wx[i] *= (2 * WARP_KM) / g.cellKm;
+    wy[i] *= (2 * WARP_KM) / g.cellKm;
+  }
+  const up = (cIn: Float32Array, bend = false): Float32Array => {
+    const c = bend ? warp(cIn, g.n, wx, wy) : cIn;
     if (f === 1) return c;
     const out = new Float32Array(N);
     upsample(c, g.n, f, out);
     return out;
   };
   const precip = up(pC);
-  const pSummer = up(psC);
-  const marine = up(sw.m);
-  const sstAnom = up(sw.a);
+  const pSummer = up(psC, true);
+  const marine = up(sw.m, true);
+  const sstAnom = up(sw.a, true);
   const fogF = up(sw.fog);
   const tex = coarseFbm(noise, n, cellKm, 120, 3, 41.7);
   const temp = new Float32Array(N);
@@ -325,7 +346,7 @@ async function sweeps(g: SweepGrid, p: ClimateParams, noise: Noise2, stats: Reco
       if (divLine[i]) bq[i] = q[i];
     }
     stats[`roundsMoisture${season}`] = advectMoisture(
-      st, { sea, target, recharge, deplete, cap, retain, recycle, boundaryQ: bq }, p0, lRain, q, summer ? out.ps : out.pw,
+      st, { sea, target, recharge, deplete, cap, retain, recycle, boundaryQ: bq }, p0, lRain, MIX_Q_KM / cellKm, q, summer ? out.ps : out.pw,
     );
     for (let i = 0; i < N; i++) {
       out.m[i] += 0.5 * m[i];

@@ -1,3 +1,4 @@
+import { gaussBlur } from './fields';
 import type { Wind } from './wind';
 
 /**
@@ -167,7 +168,15 @@ export interface MoistureInput {
  * recycling, then a final non-mutating pass that turns what each column lost into precipitation:
  * P = P0·(q_in − q_out)·L_RAIN / ds (mm/yr). Returns the rounds used.
  */
-export function advectMoisture(st: Stencil, inp: MoistureInput, p0: number, lRain: number, q: Float32Array, precip: Float32Array): number {
+export function advectMoisture(
+  st: Stencil,
+  inp: MoistureInput,
+  p0: number,
+  lRain: number,
+  mixCells: number,
+  q: Float32Array,
+  precip: Float32Array,
+): number {
   const { order, ds } = st;
   const { sea, target, recharge, deplete, cap, retain, recycle, boundaryQ } = inp;
   let rounds = 0;
@@ -196,8 +205,14 @@ export function advectMoisture(st: Stencil, inp: MoistureInput, p0: number, lRai
     }
     if (res < TOL) break;
   }
+  // Lateral (synoptic-eddy) mixing: first-order upwind transport has almost no cross-wind diffusion,
+  // so the edge of a rain shadow or a coastal air mass stays a sharp front along the streamline for
+  // hundreds of km and shows as a straight seam. Rain is drawn from humidity blurred by σ = mixCells;
+  // the local efficiency (circulation, uplift, snow-out) keeps its full resolution.
+  const qs = q.slice();
+  gaussBlur(qs, st.n, mixCells);
   for (let i = 0; i < q.length; i++) {
-    const qin = inflow(st, q, boundaryQ, i);
+    const qin = inflow(st, qs, boundaryQ, i);
     let qq = qin * deplete[i];
     if (!sea[i]) {
       const c = cap[i];
