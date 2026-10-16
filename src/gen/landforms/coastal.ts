@@ -1,3 +1,4 @@
+import { cellX, cellY } from '../grid/grid';
 import { COAST, classifyCoast } from './coast/classify';
 import { placeBarriers } from './coast/barriers';
 import { placeCliffs } from './coast/cliffs';
@@ -18,8 +19,8 @@ import type { LandformCtx } from './types';
  * Masks: `cliff`, `reef`, `beach`, `marsh` (salt marsh / mangrove hint). Deltas are left to hydrology.
  */
 export function applyCoastal(c: LandformCtx): void {
-  const { n, h } = c;
-  const N = n * n;
+  const { grid: g, h } = c;
+  const N = g.cells;
   const t0 = performance.now();
   let tLap = t0;
   const lap = (key: string): void => {
@@ -47,7 +48,7 @@ export function applyCoastal(c: LandformCtx): void {
 
   const land = new Uint8Array(N);
   for (let i = 0; i < N; i++) land[i] = info.sea[i] ? 0 : 1;
-  const { dist, nearest } = chamferNearest(land, n);
+  const { dist, nearest } = chamferNearest(land, g);
   lap('distance');
   const bar = placeBarriers(c, info, dist, nearest, edited, beach, marsh, landBefore);
   lap('barriers');
@@ -64,12 +65,12 @@ export function applyCoastal(c: LandformCtx): void {
     else if (kc === COAST.SHELTERED && h[i] < lowH && !beach[i]) marsh[i] = 255;
   }
 
-  const fixed = reconcileFixed(h, fixedBefore, hBefore, n);
+  const fixed = reconcileFixed(h, fixedBefore, hBefore, g);
   c.fixed.set(fixed);
   lap('fixed');
 
   // Lagoons behind barrier islands: open (tidal inlets) or enclosed (a coastal lake for hydrology).
-  const lc = components8(bar.lagoon, n);
+  const lc = components8(bar.lagoon, g);
   const enclosed = new Uint8Array(lc.sizes.length).fill(1);
   const sx = new Float64Array(lc.sizes.length);
   const sy = new Float64Array(lc.sizes.length);
@@ -77,8 +78,8 @@ export function applyCoastal(c: LandformCtx): void {
     const l = lc.label[i];
     if (l < 0) continue;
     if (c.fixed[i]) enclosed[l] = 0;
-    sx[l] += i % n;
-    sy[l] += Math.floor(i / n);
+    sx[l] += cellX(g, i);
+    sy[l] += cellY(g, i);
   }
   let lagoons = 0;
   let lagoonsEnclosed = 0;

@@ -17,7 +17,7 @@ const article = (w: string): string => (/^[aeiou]/i.test(w) ? 'An' : 'A');
  * dominant character and the two headline landmarks, and 3–8 bullets with numbers.
  */
 export function worldTraits(I: RegistryInput, S: Shared, lms: Landmark[], heroes: number[]): WorldTraits {
-  const N = I.fine.n * I.fine.n;
+  const N = I.fine.cells;
   const T = S.totals;
   const landCells = T.landCells;
   const L = Math.max(1, landCells);

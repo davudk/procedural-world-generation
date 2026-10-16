@@ -1,12 +1,13 @@
 import { hashMix } from '../../shared/hash';
-import { DX, DY, offsets, outside } from './grid8';
+import type { Grid } from '../grid/grid';
+import { DX, DY } from './grid8';
 
 /** Jitter amplitude of routing nodes, in cells (research 02 §2.2). */
 export const ROUTING_JITTER = 0.7;
 
 /** Fixed sub-cell offset of each routing node (cells, in [−J/2, J/2]). */
-export function jitter(n: number, seed: number): { jx: Float32Array; jy: Float32Array } {
-  const N = n * n;
+export function jitter(g: Grid, seed: number): { jx: Float32Array; jy: Float32Array } {
+  const N = g.cells;
   const jx = new Float32Array(N);
   const jy = new Float32Array(N);
   for (let i = 0; i < N; i++) {
@@ -32,43 +33,39 @@ export interface Routing {
  * walk across the flat toward its exits (lakes drain to their outlet this way). `roots` marks cells
  * that keep themselves as receiver (terminal-lake bottoms); unresolvable minima also become roots.
  */
-export function route(S: Float32Array, n: number, fixed: Uint8Array, roots: Uint8Array, jx: Float32Array, jy: Float32Array, crossKey: Float32Array): Routing {
-  const N = n * n;
-  const off = offsets(n);
+export function route(S: Float32Array, g: Grid, fixed: Uint8Array, roots: Uint8Array, jx: Float32Array, jy: Float32Array, crossKey: Float32Array): Routing {
+  const { cells: N, off8: off, border } = g;
   const rcv = new Int32Array(N).fill(-1);
   const dxs = Float64Array.from(DX);
   const dys = Float64Array.from(DY);
-  for (let y = 0; y < n; y++) {
-    const edgeRow = y === 0 || y === n - 1;
-    for (let x = 0; x < n; x++) {
-      const i = y * n + x;
-      if (fixed[i] || roots[i]) {
-        rcv[i] = i;
-        continue;
-      }
-      const edge = edgeRow || x === 0 || x === n - 1;
-      const zi = S[i];
-      const jxi = jx[i];
-      const jyi = jy[i];
-      let best = -1;
-      let bestS = 0;
-      for (let k = 0; k < 8; k++) {
-        if (edge && outside(x, y, k, n)) continue;
-        const j = i + off[k];
-        const dz = zi - S[j];
-        if (dz <= 0) continue;
-        const ddx = dxs[k] + jx[j] - jxi;
-        const ddy = dys[k] + jy[j] - jyi;
-        const s2 = (dz * dz) / (ddx * ddx + ddy * ddy);
-        if (s2 > bestS) {
-          bestS = s2;
-          best = j;
-        }
-      }
-      rcv[i] = best;
+  for (let i = 0; i < N; i++) {
+    if (fixed[i] || roots[i]) {
+      rcv[i] = i;
+      continue;
     }
+    const b = border[i];
+    const zi = S[i];
+    const jxi = jx[i];
+    const jyi = jy[i];
+    let best = -1;
+    let bestS = 0;
+    for (let k = 0; k < 8; k++) {
+      let j: number;
+      if (b === 0) j = i + off[k];
+      else if ((j = g.nbr(i, k)) < 0) continue;
+      const dz = zi - S[j];
+      if (dz <= 0) continue;
+      const ddx = dxs[k] + jx[j] - jxi;
+      const ddy = dys[k] + jy[j] - jyi;
+      const s2 = (dz * dz) / (ddx * ddx + ddy * ddy);
+      if (s2 > bestS) {
+        bestS = s2;
+        best = j;
+      }
+    }
+    rcv[i] = best;
   }
-  uncross(S, n, rcv, crossKey);
+  uncross(S, g, rcv, crossKey);
 
   // Flats: breadth-first from resolved cells into unresolved cells of equal height.
   const queue = new Int32Array(N);
@@ -76,11 +73,11 @@ export function route(S: Float32Array, n: number, fixed: Uint8Array, roots: Uint
   const seen = new Uint8Array(N);
   for (let i = 0; i < N; i++) {
     if (rcv[i] >= 0) continue;
-    const x = i % n;
-    const y = (i - x) / n;
+    const b = border[i];
     for (let k = 0; k < 8; k++) {
-      if (outside(x, y, k, n)) continue;
-      const j = i + off[k];
+      let j: number;
+      if (b === 0) j = i + off[k];
+      else if ((j = g.nbr(i, k)) < 0) continue;
       if (rcv[j] >= 0 && !seen[j] && S[j] === S[i]) {
         seen[j] = 1;
         queue[qt++] = j;
@@ -89,11 +86,11 @@ export function route(S: Float32Array, n: number, fixed: Uint8Array, roots: Uint
   }
   for (let qh = 0; qh < qt; qh++) {
     const c = queue[qh];
-    const x = c % n;
-    const y = (c - x) / n;
+    const b = border[c];
     for (let k = 0; k < 8; k++) {
-      if (outside(x, y, k, n)) continue;
-      const j = c + off[k];
+      let j: number;
+      if (b === 0) j = c + off[k];
+      else if ((j = g.nbr(c, k)) < 0) continue;
       if (rcv[j] < 0 && S[j] === S[c]) {
         rcv[j] = c;
         queue[qt++] = j;
@@ -123,21 +120,25 @@ export function route(S: Float32Array, n: number, fixed: Uint8Array, roots: Uint
   return { rcv, stack, donStart, donList };
 }
 
+/** Raster k of the east, south-east and south neighbours: the 2×2 block whose north-west cell is i. */
+const K_E = 4;
+const K_SE = 7;
+const K_S = 6;
+
 /**
  * Removes crossing diagonal receivers in every 2×2 block (research 02 §2.2 step 4): the cell with
- * the smaller `key` (a drainage-area proxy) moves to its best strictly lower orthogonal neighbour.
+ * the smaller `key` (a drainage-area proxy) moves to its best strictly lower orthogonal neighbour
+ * (E W S N, first wins). Blocks are visited by their north-west cell in index order.
  */
-function uncross(S: Float32Array, n: number, rcv: Int32Array, key: Float32Array): void {
+function uncross(S: Float32Array, g: Grid, rcv: Int32Array, key: Float32Array): void {
+  const { cells: N, off8: off, off4, axialToRaster, border } = g;
   const reroute = (i: number): void => {
-    const x = i % n;
-    const y = (i - x) / n;
     let best = -1;
     let bestDz = 0;
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
-      const nx = x + dx;
-      const ny = y + dy;
-      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-      const j = ny * n + nx;
+    for (let k = 0; k < 4; k++) {
+      let j: number;
+      if (border[i] === 0) j = i + off4[k];
+      else if ((j = g.nbr(i, axialToRaster[k])) < 0) continue;
       const dz = S[i] - S[j];
       if (dz > bestDz) {
         bestDz = dz;
@@ -146,19 +147,26 @@ function uncross(S: Float32Array, n: number, rcv: Int32Array, key: Float32Array)
     }
     if (best >= 0) rcv[i] = best;
   };
-  for (let y = 0; y < n - 1; y++) {
-    for (let x = 0; x < n - 1; x++) {
-      const a = y * n + x;
-      const b = a + 1;
-      const c = a + n;
-      const d = c + 1;
-      const diagA = rcv[a] === d || rcv[d] === a;
-      const diagB = rcv[b] === c || rcv[c] === b;
-      if (!diagA || !diagB) continue;
-      const pa = rcv[a] === d ? a : d;
-      const pb = rcv[b] === c ? b : c;
-      reroute(key[pa] < key[pb] ? pa : pb);
+  const oE = off[K_E];
+  const oS = off[K_S];
+  const oSE = off[K_SE];
+  for (let a = 0; a < N; a++) {
+    let b: number;
+    let c: number;
+    let d: number;
+    if (border[a] === 0) {
+      b = a + oE;
+      c = a + oS;
+      d = a + oSE;
+    } else if ((b = g.nbr(a, K_E)) < 0 || (c = g.nbr(a, K_S)) < 0 || (d = g.nbr(a, K_SE)) < 0) {
+      continue;
     }
+    const diagA = rcv[a] === d || rcv[d] === a;
+    const diagB = rcv[b] === c || rcv[c] === b;
+    if (!diagA || !diagB) continue;
+    const pa = rcv[a] === d ? a : d;
+    const pb = rcv[b] === c ? b : c;
+    reroute(key[pa] < key[pb] ? pa : pb);
   }
 }
 

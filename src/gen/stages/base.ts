@@ -2,6 +2,7 @@ import { Noise2 } from '../../shared/noise';
 import type { Layer } from '../../shared/protocol';
 import type { Rng } from '../../shared/rng';
 import { signedDistance } from '../grid/distance';
+import { cellIndex, cellX, cellY, edgeCells, forWindow, type Grid } from '../grid/grid';
 import { boxBlur, quantile, smoothstep } from '../grid/ops';
 import { cellAt } from '../grid/sample';
 import { upliftForPeak } from '../lem/streamPower';
@@ -85,6 +86,8 @@ export const baseStage: StageDef = {
     const cellKm = worldKm / n;
     const cellM = cellKm * 1000;
     const N = n * n;
+    const g = ctx.grid(n);
+    const pg = ctx.grid(P.n);
     const noise = new Noise2(ctx.rng('noise').nextU32());
     const warpN = new Noise2(ctx.rng('warp').nextU32());
     const coastN = new Noise2(ctx.rng('coast').nextU32());
@@ -97,21 +100,21 @@ export const baseStage: StageDef = {
     const cont = new Uint8Array(N);
     for (let y = 0; y < n; y++) {
       for (let x = 0; x < n; x++) {
-        const i = y * n + x;
+        const i = cellIndex(g, x, y);
         const wx = (x + 0.5) * cellKm;
         const wy = (y + 0.5) * cellKm;
         const qx = wx + 30 * warpN.fbm(wx / 220, wy / 220, 3);
         const qy = wy + 30 * warpN.fbm(wx / 220 + 19.1, wy / 220 - 7.3, 3);
         wxs[i] = qx;
         wys[i] = qy;
-        const pc = cellAt(P.n, qx / worldKm, qy / worldKm);
+        const pc = cellAt(pg, qx / worldKm, qy / worldKm);
         pcell[i] = pc;
         cont[i] = P.continent[pc] !== -1 ? 1 : 0;
       }
     }
     await ctx.checkpoint();
 
-    const sdf = signedDistance(cont, n);
+    const sdf = signedDistance(cont, g);
     const segs = P.segments.map((s, id) => segProps(ctx.rng('segment', id), s, ctx));
     // Direct steering of relief contrast (research 05 §3.6, CONFIG.md §4): when the range cores cover
     // too little of the continental crust (few or short convergent boundaries), widen every belt.
@@ -137,7 +140,7 @@ export const baseStage: StageDef = {
 
     for (let y = 0; y < n; y++) {
       for (let x = 0; x < n; x++) {
-        const i = y * n + x;
+        const i = cellIndex(g, x, y);
         const wx = (x + 0.5) * cellKm;
         const wy = (y + 0.5) * cellKm;
         // Coast field (km, + inland): warped distance + fractal noise + ridged peninsulas near the coast.
@@ -151,8 +154,8 @@ export const baseStage: StageDef = {
         // Nearest plate boundary.
         const pc = pcell[i];
         const nb = P.nearest[pc];
-        const bx = ((nb % P.n) + 0.5) * P.cellKm;
-        const by = (Math.floor(nb / P.n) + 0.5) * P.cellKm;
+        const bx = (cellX(pg, nb) + 0.5) * P.cellKm;
+        const by = (cellY(pg, nb) + 0.5) * P.cellKm;
         const dB = Math.hypot(wxs[i] - bx, wys[i] - by);
         const cls = P.bClass[nb];
         const segId = P.bSeg[nb];
@@ -236,7 +239,7 @@ export const baseStage: StageDef = {
       const inland: number[] = [];
       for (let y = 0; y < n; y++) {
         for (let x = 0; x < n; x++) {
-          const i = y * n + x;
+          const i = cellIndex(g, x, y);
           if (coastA[i] <= 30) continue;
           sv[i] = noise.fbm(((x + 0.5) * cellKm) / SWELL_KM + 211, ((y + 0.5) * cellKm) / SWELL_KM - 97, 3);
           if (coastA[i] > 150) inland.push(sv[i]);
@@ -248,7 +251,7 @@ export const baseStage: StageDef = {
         if (sv[i] === -Infinity) continue;
         const sw = smoothstep(cut - 0.1, cut + 0.1, sv[i]);
         if (!(sw > 0)) continue;
-        const k = sw * smoothstep(30, 150, coastA[i]) * (0.75 + 0.25 * noise.fbm(((i % n) + 0.5) * cellKm / 90 - 3, (Math.floor(i / n) + 0.5) * cellKm / 90 + 8, 2));
+        const k = sw * smoothstep(30, 150, coastA[i]) * (0.75 + 0.25 * noise.fbm((cellX(g, i) + 0.5) * cellKm / 90 - 3, (cellY(g, i) + 0.5) * cellKm / 90 + 8, 2));
         U[i] += uSwell * k;
       }
     }
@@ -259,30 +262,27 @@ export const baseStage: StageDef = {
     for (let i = 0; i < N; i++) if (U[i] > uCap) U[i] = uCap;
     // Deep-ocean features come from per-segment boundary profiles; smooth them so the abyss has no facets.
     const blurred = h0.slice();
-    boxBlur(blurred, n, Math.max(1, Math.round(18 / cellKm)), 2);
+    boxBlur(blurred, g, Math.max(1, Math.round(18 / cellKm)), 2);
     for (let i = 0; i < N; i++) h0[i] += (blurred[i] - h0[i]) * deep[i];
     // Uplift ends abruptly where a boundary segment ends; a blur tapers range ends naturally.
-    boxBlur(U, n, Math.max(1, Math.round(10 / cellKm)), 2);
+    boxBlur(U, g, Math.max(1, Math.round(10 / cellKm)), 2);
 
     const sea = quantile(h0, 1 - ctx.num('landFraction'));
     // King massif (research 05 §3.6: highest summit ≥ 1.5 × the 95th-percentile peak): one uplift
     // cone with a uniform crystalline core, preferably on the strongest orogen well inland, standing
     // clear above every other range. Placed after sea level is known, so the whole cone is on land.
-    const king = placeKing(n, cellKm, h0, U, uOro, coastA, sea);
+    const king = placeKing(g, h0, U, uOro, coastA, sea);
     if (king) {
       const rCells = king.rKm / cellKm;
       const r0 = Math.ceil(rCells);
       const uKing = OROGEN_GAIN * upliftForPeak(Math.min(KING_MAX_M, KING_REL * ctx.range('peakHeight')[1]), K0, LEM_M, king.rKm * 1000, cellM);
-      for (let y = king.y - r0; y <= king.y + r0; y++) {
-        for (let x = king.x - r0; x <= king.x + r0; x++) {
-          const t = Math.hypot(x - king.x, y - king.y) / rCells;
-          if (t >= 1) continue;
-          const i = y * n + x;
-          U[i] = Math.max(U[i], uKing * (1 - t * t) ** KING_SHAPE);
-          K[i] = K0;
-          strata[i] = 0;
-        }
-      }
+      forWindow(g, king.c, r0, (i, dx, dy) => {
+        const t = Math.hypot(dx, dy) / rCells;
+        if (t >= 1) return;
+        U[i] = Math.max(U[i], uKing * (1 - t * t) ** KING_SHAPE);
+        K[i] = K0;
+        strata[i] = 0;
+      });
     }
     let lo = Infinity;
     let hi = -Infinity;
@@ -304,7 +304,7 @@ export const baseStage: StageDef = {
       { id: 'erodibility', label: 'Erodibility (log10 K)', stage: 'base', kind: 'scalar', w: n, h: n, worldKm, unit: '', min: -6.5, max: -4.3, data: Klog },
     ];
     const extra: BaseExtra = { n, cellKm, h0, U, K, strata };
-    return { layers, stats: { maxUpliftMmYr: uMax * 1000, seaLevelShift: sea, beltShare, beltMul, kingRadiusKm: king ? king.rKm : 0, kingCell: king ? king.y * n + king.x : -1 }, outcomes: {}, extra };
+    return { layers, stats: { maxUpliftMmYr: uMax * 1000, seaLevelShift: sea, beltShare, beltMul, kingRadiusKm: king ? king.rKm : 0, kingCell: king ? king.c : -1 }, outcomes: {}, extra };
   },
 };
 
@@ -349,9 +349,9 @@ function bump(x: number, w: number): number {
  * slightly preferred) whose whole cone of radius r stands on land; r shrinks for small landmasses.
  */
 function placeKing(
-  n: number, cellKm: number, h0: Float32Array, U: Float32Array, uOro: Float32Array, coastA: Float32Array, sea: number,
-): { x: number; y: number; rKm: number } | null {
-  const N = n * n;
+  g: Grid, h0: Float32Array, U: Float32Array, uOro: Float32Array, coastA: Float32Array, sea: number,
+): { c: number; rKm: number } | null {
+  const { cells: N, cellKm } = g;
   for (const f of [1, 0.7, 0.5]) {
     const rKm = KING_RADIUS_KM * f;
     const rCells = rKm / cellKm;
@@ -366,18 +366,15 @@ function placeKing(
     }
     cands.sort((a, b) => score(b) - score(a) || a - b);
     for (const c of cands.slice(0, 400)) {
-      const kx = c % n;
-      const ky = (c - kx) / n;
-      let dry = kx >= r0 && ky >= r0 && kx < n - r0 && ky < n - r0;
-      for (let y = ky - r0; y <= ky + r0 && dry; y++) {
-        for (let x = kx - r0; x <= kx + r0; x++) {
-          if (Math.hypot(x - kx, y - ky) < rCells && h0[y * n + x] <= sea + 50) {
-            dry = false;
-            break;
-          }
-        }
+      // The whole cone must fit on the map and stand on land.
+      let dry = edgeCells(g, c) >= r0;
+      if (dry) {
+        forWindow(g, c, r0, (j, dx, dy) => {
+          if (Math.hypot(dx, dy) < rCells && h0[j] <= sea + 50) dry = false;
+          return dry;
+        });
       }
-      if (dry) return { x: kx, y: ky, rKm };
+      if (dry) return { c, rKm };
     }
   }
   return null;

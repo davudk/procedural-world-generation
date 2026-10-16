@@ -1,4 +1,5 @@
 import { RIVER } from '../../shared/protocol';
+import { cellIndex } from '../grid/grid';
 import { MinHeap } from '../grid/heap';
 import { alongPolyline, cellAtM, cellX, cellY, decimate, labelAngle, nearestWhere } from './grid';
 import type { Candidate, RegistryInput, Shared } from './types';
@@ -177,10 +178,9 @@ function detectLakes(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const idx = I.lakes.map((_, i) => i).filter((i) => I.lakes[i].areaKm2 >= minKm2);
   idx.sort((a, b) => I.lakes[b].areaKm2 - I.lakes[a].areaKm2 || a - b);
   const cap = Math.round(Math.max(5, S.landKm2 / 12000));
-  const n = I.fine.n;
   for (const i of idx.slice(0, cap)) {
     const L = I.lakes[i];
-    const fc = nearestWhere(n, L.cx / I.fine.cellM, L.cy / I.fine.cellM, Math.max(4, 2 * Math.sqrt(L.areaKm2 / cellKm2)), (c) => I.hydro.lakeId[c] === i);
+    const fc = nearestWhere(I.fine, L.cx / I.fine.cellM, L.cy / I.fine.cellM, Math.max(4, 2 * Math.sqrt(L.areaKm2 / cellKm2)), (c) => I.hydro.lakeId[c] === i);
     const x = fc >= 0 ? cellX(I.fine, fc) : L.cx;
     const y = fc >= 0 ? cellY(I.fine, fc) : L.cy;
     const variant = L.type === 'playa' ? 'playa' : L.salinity === 2 || L.type === 'salt' ? 'salt' : L.type === 'crater' ? 'crater' : 'lake';
@@ -240,21 +240,17 @@ function detectFalls(I: RegistryInput, S: Shared, out: Candidate[], reachOf: Int
 function detectCanyons(I: RegistryInput, S: Shared, out: Candidate[], stems: Stem[], named: Map<number, Candidate>, rangeOf: Int32Array): void {
   const g = I.rivers;
   const R = S.reg;
-  const m = R.n;
-  const near = new Float32Array(m * m);
-  for (let y = 0; y < m; y++) {
-    for (let x = 0; x < m; x++) {
-      let v = -Infinity;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx < 0 || ny < 0 || nx >= m || ny >= m) continue;
-          v = Math.max(v, S.hMax[ny * m + nx]);
-        }
-      }
-      near[y * m + x] = v;
+  const { off8, border } = R;
+  // Highest ground of each regional cell and its 8 neighbours.
+  const near = new Float32Array(R.cells);
+  for (let i = 0; i < R.cells; i++) {
+    let v = S.hMax[i];
+    const b = border[i];
+    for (let k = 0; k < 8; k++) {
+      const j = b === 0 ? i + off8[k] : R.nbr(i, k);
+      if (j >= 0) v = Math.max(v, S.hMax[j]);
     }
+    near[i] = v;
   }
   const found: Candidate[] = [];
   stems.forEach((s, si) => {
@@ -343,7 +339,8 @@ const GORGE_PER_KM2 = 50000;
 
 function detectGorges(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const g = I.rivers;
-  const { n, cellM } = I.fine;
+  const fine = I.fine;
+  const { n, cellM } = fine;
   const r = Math.max(1, Math.round(GORGE_RADIUS_M / cellM));
   const depth = new Float32Array(g.n);
   const deep = new Uint8Array(g.n);
@@ -352,13 +349,15 @@ function detectGorges(I: RegistryInput, S: Shared, out: Candidate[]): void {
     const cx = Math.min(n - 1, Math.floor(g.x[i] / cellM));
     const cy = Math.min(n - 1, Math.floor(g.y[i] / cellM));
     let mx = -Infinity;
-    for (let dy = -r; dy <= r; dy++) {
-      const y = cy + dy;
-      if (y < 0 || y >= n) continue;
-      for (let dx = -r; dx <= r; dx++) {
-        const x = cx + dx;
-        if (x < 0 || x >= n || dx * dx + dy * dy > r * r) continue;
-        const h = I.h[y * n + x];
+    const xb = Math.min(n - 1, cx + r);
+    const yb = Math.min(n - 1, cy + r);
+    for (let y = Math.max(0, cy - r); y <= yb; y++) {
+      const dy = y - cy;
+      const row = cellIndex(fine, 0, y);
+      for (let x = Math.max(0, cx - r); x <= xb; x++) {
+        const dx = x - cx;
+        if (dx * dx + dy * dy > r * r) continue;
+        const h = I.h[row + x];
         if (h > mx) mx = h;
       }
     }

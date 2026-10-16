@@ -1,6 +1,7 @@
+import { coarser } from '../grid/grid';
 import { boxBlur } from '../grid/ops';
 import {
-  areaFactor, aridityAt, bigRegions, centreOf, coarseNoise, coarsen, concavity, DiskSet, drains, DX8, DY8, forDisk, poisson, refineCoarse,
+  areaFactor, aridityAt, bigRegions, centreOf, coarseNoise, coarsen, concavity, DiskSet, drains, forDisk, poisson, refineCoarse,
   settleFixed, snapshot, sstep, stampRadial, strataField,
 } from './profiles';
 import type { LandformCtx } from './types';
@@ -25,8 +26,8 @@ const RISER = 0.35;
  */
 export function applyArid(c: LandformCtx): void {
   const snap = snapshot(c);
-  const { n, h, fixed } = c;
-  const N = n * n;
+  const { grid, h, fixed } = c;
+  const { cells: N, border, off8Axial, axialToRaster } = grid;
   const ck = c.cellKm;
   const rng = c.rng('arid');
   const T = rng.range(140, 220);
@@ -55,10 +56,8 @@ export function applyArid(c: LandformCtx): void {
   }
   // New pits from spatially varying weights: lift back just above the lowest neighbour.
   const wasPit = (i: number): boolean => {
-    const x = i % n;
-    const y = (i - x) / n;
-    if (x === 0 || y === 0 || x === n - 1 || y === n - 1) return false;
-    for (let k = 0; k < 8; k++) if (snap.h[i + DY8[k] * n + DX8[k]] < snap.h[i]) return false;
+    if (border[i]) return false;
+    for (let k = 0; k < 8; k++) if (snap.h[i + off8Axial[k]] < snap.h[i]) return false;
     return true;
   };
   let repaired = 0;
@@ -66,8 +65,9 @@ export function applyArid(c: LandformCtx): void {
     let fixes = 0;
     for (const i of changed) {
       if (drains(c, i) || wasPit(i)) continue;
+      // Not draining implies an interior cell (drains() is true on the border).
       let lo = Infinity;
-      for (let k = 0; k < 8; k++) lo = Math.min(lo, h[i + DY8[k] * n + DX8[k]]);
+      for (let k = 0; k < 8; k++) lo = Math.min(lo, h[i + off8Axial[k]]);
       h[i] = Math.min(snap.h[i], lo + 0.1);
       fixes++;
     }
@@ -92,13 +92,10 @@ export function applyArid(c: LandformCtx): void {
     while (stack.length) {
       const i = stack.pop()!;
       cells.push(i);
-      const x = i % n;
-      const y = (i - x) / n;
+      const b = border[i];
       for (let d = 0; d < 8; d++) {
-        const xx = x + DX8[d];
-        const yy = y + DY8[d];
-        if (xx < 0 || yy < 0 || xx >= n || yy >= n) continue;
-        const j = yy * n + xx;
+        const j = b === 0 ? i + off8Axial[d] : grid.nbr(i, axialToRaster[d]);
+        if (j < 0) continue;
         if (snap.h[j] >= (k + 1) * T) isTop = false;
         if (d < 4 && !seen[j] && zone(j) && level[j] === k) {
           seen[j] = 1;
@@ -117,12 +114,9 @@ export function applyArid(c: LandformCtx): void {
   // Escarpments: risers of at least half a step between neighbouring cells.
   const esc = new Uint8Array(N);
   for (const i of changed) {
-    if (w[i] < 0.3) continue;
-    const x = i % n;
-    const y = (i - x) / n;
-    if (x === 0 || y === 0 || x === n - 1 || y === n - 1) continue;
+    if (w[i] < 0.3 || border[i]) continue;
     let lo = Infinity;
-    for (let k = 0; k < 8; k++) lo = Math.min(lo, h[i + DY8[k] * n + DX8[k]]);
+    for (let k = 0; k < 8; k++) lo = Math.min(lo, h[i + off8Axial[k]]);
     if (h[i] - lo >= 0.5 * T) esc[i] = 1;
   }
   const escs = changed.length ? bigRegions(c, esc, 40 * ck, Math.ceil(10 * af)).list : [];
@@ -149,16 +143,19 @@ export function applyArid(c: LandformCtx): void {
   const co = coarsen(c, h);
   const cm = co.m;
   const ckC = ck * co.f;
+  const cg = coarser(grid, co.f);
   const sC = new Float32Array(cm * cm);
-  for (let y = 1; y < cm - 1; y++) {
-    for (let x = 1; x < cm - 1; x++) {
-      const i = y * cm + x;
-      sC[i] = Math.hypot(co.g[i + 1] - co.g[i - 1], co.g[i + cm] - co.g[i - cm]) / (2 * ckC * 1000);
+  {
+    // Central differences on interior coarse cells (raster offsets W E N S); the rim stays 0.
+    const { border: cb, off8: o } = cg;
+    for (let i = 0; i < cg.cells; i++) {
+      if (cb[i]) continue;
+      sC[i] = Math.hypot(co.g[i + o[4]] - co.g[i + o[3]], co.g[i + o[6]] - co.g[i + o[1]]) / (2 * ckC * 1000);
     }
   }
-  boxBlur(sC, cm, Math.max(1, Math.round(8 / ckC)));
+  boxBlur(sC, cg, Math.max(1, Math.round(8 / ckC)));
   const slope = refineCoarse(c, sC, cm, co.f);
-  boxBlur(co.g, cm, Math.max(1, Math.round(40 / ckC)), 2);
+  boxBlur(co.g, cg, Math.max(1, Math.round(40 / ckC)), 2);
   const reg = refineCoarse(c, co.g, cm, co.f);
   const shape = coarseNoise(c, rng.nextU32(), [{ km: 300, octaves: 3, weight: 1 }]);
   const dens = c.num('density_arid');

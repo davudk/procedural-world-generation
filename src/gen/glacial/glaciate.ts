@@ -1,4 +1,5 @@
 import type { Rng } from '../../shared/rng';
+import { cellIndex, cellX, cellY, isDiagonalStep, tryCellIndex, type Grid } from '../grid/grid';
 import { boxBlur, components, smoothstep } from '../grid/ops';
 import { LAND_MIN } from '../lem/streamPower';
 import { CorridorSources, corridorCarve, softenCarve } from './corridor';
@@ -13,8 +14,7 @@ import { donorsCsr, flowOrder, glacierWidth, heightAboveEla, iceFlux, Q0, Q_TROU
  */
 
 export interface GlaciateInput {
-  n: number;
-  cellKm: number;
+  grid: Grid;
   h: Float32Array;
   fixed: Uint8Array;
   rcv: Int32Array;
@@ -69,9 +69,8 @@ const MIN_HALF_CELLS = 0.8;
 const CIRQUE_SLOPE = 0.08;
 
 export function glaciate(inp: GlaciateInput, opt: GlaciateOptions, rng: Rng): GlaciateResult {
-  const { n, h: hIn, fixed: fixedIn, rcv } = inp;
-  const N = n * n;
-  const cellM = inp.cellKm * 1000;
+  const { grid: g, h: hIn, fixed: fixedIn, rcv } = inp;
+  const { cells: N, cellM } = g;
   const dzPast = heightAboveEla(inp.temp, inp.tAmp, inp.precip, opt.presentShift + opt.pastShift, new Float32Array(N));
   let any = false;
   for (let i = 0; i < N && !any; i++) any = !fixedIn[i] && dzPast[i] > 0;
@@ -91,21 +90,21 @@ export function glaciate(inp: GlaciateInput, opt: GlaciateOptions, rng: Rng): Gl
     tLap = now;
   };
   const order = flowOrder(rcv);
-  const past = iceFlux(order, rcv, fixedIn, hIn, dzPast, inp.precip, n, cellM);
+  const past = iceFlux(order, rcv, fixedIn, hIn, dzPast, inp.precip, g);
   const dzNow = heightAboveEla(inp.temp, inp.tAmp, inp.precip, opt.presentShift, new Float32Array(N));
-  const now = iceFlux(order, rcv, fixedIn, hIn, dzNow, inp.precip, n, cellM);
+  const now = iceFlux(order, rcv, fixedIn, hIn, dzNow, inp.precip, g);
 
   lap('fluxMs');
   const h = hIn.slice();
-  const carver = new Stamper(n, cellM, h, fixedIn, hIn);
+  const carver = new Stamper(g, h, fixedIn, hIn);
 
   // U-troughs: every glaciated channel cell is a centreline source of a parabolic cross-section
   // around its lowered floor, applied once per cell by distance to the centreline (corridor.ts).
   // Depth grows with flux (so tributaries end above the trunk floor: hanging valleys) and is limited
   // by the relief the ice drains from (plateau ice sheets scour little).
-  const troughs = troughSources(past, rcv, fixedIn, hIn, n, cellM);
+  const troughs = troughSources(past, rcv, fixedIn, hIn, g);
   lap('srcMs');
-  const troughField = corridorCarve(troughs, hIn, fixedIn, n, false);
+  const troughField = corridorCarve(troughs, hIn, fixedIn, g, false);
   lap('corrMs');
 
   const fjordMask = new Uint8Array(N);
@@ -116,7 +115,7 @@ export function glaciate(inp: GlaciateInput, opt: GlaciateOptions, rng: Rng): Gl
     const fj = fjordSources(inp, past, rng);
     fjordWalks = fj.walks;
     if (fj.sources.size > 0) {
-      const fjField = corridorCarve(fj.sources, hIn, fixedIn, n, true);
+      const fjField = corridorCarve(fj.sources, hIn, fixedIn, g, true);
       for (let i = 0; i < N; i++) {
         if (fjField.carve[i] <= 0) continue;
         fjordMask[i] = 1;
@@ -127,7 +126,7 @@ export function glaciate(inp: GlaciateInput, opt: GlaciateOptions, rng: Rng): Gl
   }
   lap('fjCorrMs');
   // Soften (σ ≈ 1 cell where corridors are wide) and apply; only fjords may lower sea cells.
-  const carveSoft = softenCarve(carveRaw, rcField, n);
+  const carveSoft = softenCarve(carveRaw, rcField, g);
   lap('softMs');
   for (let i = 0; i < N; i++) {
     if (fixedIn[i] && !fjordMask[i]) continue;
@@ -144,7 +143,7 @@ export function glaciate(inp: GlaciateInput, opt: GlaciateOptions, rng: Rng): Gl
     if (dzPast[i] < 0 || dzPast[i] > CIRQUE_BAND) continue;
     // Only on steep ground: plateau ice caps have no cirques.
     const r = rcv[i];
-    const run = Math.abs(r - i) === 1 || Math.abs(r - i) === n ? cellM : cellM * Math.SQRT2;
+    const run = isDiagonalStep(g, i, r) ? cellM * Math.SQRT2 : cellM;
     if ((hIn[i] - hIn[r]) / run < CIRQUE_SLOPE) continue;
     const R = rng.range(1000, 2500);
     const depth = rng.range(80, 220);
@@ -156,7 +155,7 @@ export function glaciate(inp: GlaciateInput, opt: GlaciateOptions, rng: Rng): Gl
 
   // Sea: carved cells at or below 0 m join the sea when 4-connected to it; enclosed ones stay land.
   const fixed = fixedIn.slice();
-  floodSea(h, fixed, n);
+  floodSea(h, fixed, g);
   for (let i = 0; i < N; i++) if (!fixed[i] && h[i] < LAND_MIN) h[i] = LAND_MIN;
 
   const fjord = new Uint8Array(N);
@@ -176,13 +175,13 @@ export function glaciate(inp: GlaciateInput, opt: GlaciateOptions, rng: Rng): Gl
     }
   }
   let fjordEdges = 0;
+  const { off4, axialToRaster, border } = g;
   for (let i = 0; i < N; i++) {
     if (!fjord[i]) continue;
-    const x = i % n;
-    if (x > 0 && !fixed[i - 1]) fjordEdges++;
-    if (x < n - 1 && !fixed[i + 1]) fjordEdges++;
-    if (i >= n && !fixed[i - n]) fjordEdges++;
-    if (i < N - n && !fixed[i + n]) fjordEdges++;
+    for (let k = 0; k < 4; k++) {
+      const j = border[i] === 0 ? i + off4[k] : g.nbr(i, axialToRaster[k]);
+      if (j >= 0 && !fixed[j]) fjordEdges++;
+    }
   }
 
   const carve = new Float32Array(N);
@@ -193,7 +192,7 @@ export function glaciate(inp: GlaciateInput, opt: GlaciateOptions, rng: Rng): Gl
   }
 
   lap('seaMs');
-  const ice = iceCover(now, dzNow, fixed, n, cellM);
+  const ice = iceCover(now, dzNow, fixed, inp.grid);
   lap('iceMs');
   let land = 0;
   let iceSum = 0;
@@ -207,18 +206,18 @@ export function glaciate(inp: GlaciateInput, opt: GlaciateOptions, rng: Rng): Gl
   const glacierMask = new Uint8Array(N);
   for (let i = 0; i < N; i++) glacierMask[i] = ice[i] >= 0.5 ? 1 : 0;
   const minCells = Math.max(1, Math.ceil(2e6 / (cellM * cellM)));
-  const glaciers = components(glacierMask, n).sizes.filter((s) => s >= minCells).length;
+  const glaciers = components(glacierMask, inp.grid).sizes.filter((s) => s >= minCells).length;
 
   Object.assign(stats, {
     glaciers,
     iceShare: land ? iceSum / land : 0,
     pastIceShare: land ? pastIce / land : 0,
     fjords: fjordCount,
-    fjordCoastKm: Math.round(fjordEdges * inp.cellKm),
+    fjordCoastKm: Math.round(fjordEdges * g.cellKm),
     cirques,
     maxCarveM: Math.round(maxCarve),
     maxFjordDepthM: Math.round(maxFjordDepth),
-    troughKm: Math.round(troughCells * inp.cellKm),
+    troughKm: Math.round(troughCells * g.cellKm),
   });
   return { carved: true, h, fixed, ice, carve, fjord, stats };
 }
@@ -241,15 +240,15 @@ function smoothLine(v: number[]): number[] {
  * twice along each trunk (receiver and largest-flux donor, 1-2-1) to take the D8 zigzag out of the
  * centreline; a tributary keeps its junction point, so it still meets the trunk.
  */
-function troughSources(past: IceFlux, rcv: Int32Array, fixed: Uint8Array, h: Float32Array, n: number, cellM: number): CorridorSources {
-  const N = n * n;
+function troughSources(past: IceFlux, rcv: Int32Array, fixed: Uint8Array, h: Float32Array, g: Grid): CorridorSources {
+  const { cells: N, cellM } = g;
   const src = new CorridorSources();
   const idx = new Int32Array(N).fill(-1);
   for (let i = 0; i < N; i++) {
     const q = past.q[i];
     if (fixed[i] || q < Q_TROUGH) continue;
     const D = Math.min(troughDepth(q), 50 + 0.6 * Math.max(0, past.top[i] - h[i]));
-    idx[i] = src.add(i % n, Math.floor(i / n), Math.max(1, h[i] - D), h[i] + 0.6 * D, Math.max(MIN_HALF_CELLS, glacierWidth(q) / 2 / cellM), 1.5 * D);
+    idx[i] = src.add(cellX(g, i), cellY(g, i), Math.max(1, h[i] - D), h[i] + 0.6 * D, Math.max(MIN_HALF_CELLS, glacierWidth(q) / 2 / cellM), 1.5 * D);
   }
   const main = new Int32Array(src.size).fill(-1);
   const cells = new Int32Array(src.size);
@@ -285,8 +284,7 @@ function troughSources(past: IceFlux, rcv: Int32Array, fixed: Uint8Array, h: Flo
 /** Writes h = min(h, target) stamps with a power-law cross-section around a centre cell. */
 class Stamper {
   constructor(
-    readonly n: number,
-    readonly cellM: number,
+    readonly g: Grid,
     readonly h: Float32Array,
     readonly fixed: Uint8Array,
     /** Heights before carving, for the per-stamp cut limit. */
@@ -301,22 +299,20 @@ class Stamper {
   stamp(
     c: number, floor: number, edge: number, R: number, minCells: number, pow: number, maxCut: number, sea: boolean,
   ): void {
-    const { n, h, fixed, ref } = this;
-    const rc = Math.max(R / this.cellM, minCells);
+    const { g, h, fixed, ref } = this;
+    const rc = Math.max(R / g.cellM, minCells);
     const r = Math.floor(rc);
-    const cx = c % n;
-    const cy = (c - cx) / n;
     const inv = rc > 0 ? 1 / rc : 0;
     const span = edge - floor;
+    // Plain loops rather than forWindow: tongues stamp once per glacier cell.
+    const cx = cellX(g, c);
+    const cy = cellY(g, c);
     for (let dy = -r; dy <= r; dy++) {
-      const y = cy + dy;
-      if (y < 0 || y >= n) continue;
       for (let dx = -r; dx <= r; dx++) {
-        const x = cx + dx;
-        if (x < 0 || x >= n) continue;
+        const i = tryCellIndex(g, cx + dx, cy + dy);
+        if (i < 0) continue;
         const d2 = dx * dx + dy * dy;
         if (d2 > rc * rc) continue;
-        const i = y * n + x;
         if (fixed[i] && !sea) continue;
         const t = Math.sqrt(d2) * inv;
         let target = floor + span * (pow === 2 ? t * t : t ** pow);
@@ -335,9 +331,8 @@ class Stamper {
  * each diagonal step so the fjord stays 4-connected) and the trunk cells of each fjord.
  */
 function fjordSources(inp: GlaciateInput, past: IceFlux, rng: Rng): { sources: CorridorSources; walks: number[][] } {
-  const { n, h: hIn, fixed, rcv } = inp;
-  const N = n * n;
-  const cellM = inp.cellKm * 1000;
+  const { grid: g, h: hIn, fixed, rcv } = inp;
+  const { n, cells: N, cellM } = g;
   const mouths: number[] = [];
   for (let i = 0; i < N; i++) {
     const r = rcv[i];
@@ -352,13 +347,11 @@ function fjordSources(inp: GlaciateInput, past: IceFlux, rng: Rng): { sources: C
   const sources = new CorridorSources();
   for (const m of mouths) {
     if (budget <= 0) break;
-    const mx = m % n;
-    const my = (m - mx) / n;
+    const mx = cellX(g, m);
+    const my = cellY(g, m);
     let near = false;
     for (const t of taken) {
-      const tx = t % n;
-      const ty = (t - tx) / n;
-      if (Math.hypot(tx - mx, ty - my) * cellM < FJORD_SPACING) {
+      if (Math.hypot(cellX(g, t) - mx, cellY(g, t) - my) * cellM < FJORD_SPACING) {
         near = true;
         break;
       }
@@ -382,8 +375,8 @@ function fjordSources(inp: GlaciateInput, past: IceFlux, rng: Rng): { sources: C
         if (!fixed[d] && (best < 0 || past.q[d] > past.q[best])) best = d;
       }
       if (best < 0 || past.q[best] < 0.3 * Q_FJORD || hIn[best] > FJORD_HEAD_MAX) break;
-      const ddx = (best % n) - (c % n);
-      const ddy = Math.floor(best / n) - Math.floor(c / n);
+      const ddx = cellX(g, best) - cellX(g, c);
+      const ddy = cellY(g, best) - cellY(g, c);
       s += Math.hypot(ddx, ddy) * cellM;
       path.push(best);
       dist.push(s);
@@ -394,8 +387,8 @@ function fjordSources(inp: GlaciateInput, past: IceFlux, rng: Rng): { sources: C
     const L = Math.max(s, 2 * cellM);
     // Centreline vertices: the sea cell beyond the mouth, then the trunk, positions smoothed 1-2-1.
     const line = [rcv[m], ...path];
-    const px = smoothLine(line.map((c) => c % n));
-    const py = smoothLine(line.map((c) => Math.floor(c / n)));
+    const px = smoothLine(line.map((c) => cellX(g, c)));
+    const py = smoothLine(line.map((c) => cellY(g, c)));
     let prev = -1;
     let prevRc = 1;
     for (let k = 0; k < line.length; k++) {
@@ -418,11 +411,11 @@ function fjordSources(inp: GlaciateInput, past: IceFlux, rng: Rng): { sources: C
       // so the fjord stays 4-connected.
       if (k > 0 && rc < 2) {
         const a = line[k - 1];
-        if (Math.abs(p - a) !== 1 && Math.abs(p - a) !== n) {
-          const s1 = Math.floor(a / n) * n + (p % n);
-          const s2 = Math.floor(p / n) * n + (a % n);
+        if (isDiagonalStep(g, a, p)) {
+          const s1 = cellIndex(g, cellX(g, p), cellY(g, a));
+          const s2 = cellIndex(g, cellX(g, a), cellY(g, p));
           const side = hIn[s1] <= hIn[s2] ? s1 : s2;
-          sources.add(side % n, Math.floor(side / n), floor, edge, Math.min(rc, prevRc), cut);
+          sources.add(cellX(g, side), cellY(g, side), floor, edge, Math.min(rc, prevRc), cut);
         }
       }
       prev = v;
@@ -437,27 +430,31 @@ function fjordSources(inp: GlaciateInput, past: IceFlux, rng: Rng): { sources: C
  * Joins cells at or below 0 m to the sea where 4-connected to it (in place on `fixed`). Open map
  * edges (fixed cells above 0 m on a continental edge) are base level but not sea, so never seed.
  */
-function floodSea(h: Float32Array, fixed: Uint8Array, n: number): void {
-  const N = n * n;
+function floodSea(h: Float32Array, fixed: Uint8Array, g: Grid): void {
+  const { cells: N, off4, axialToRaster, border } = g;
   const stack: number[] = [];
   const join = (j: number): void => {
     fixed[j] = 1;
     stack.push(j);
   };
+  const nb = (c: number, k: number): number => (border[c] === 0 ? c + off4[k] : g.nbr(c, axialToRaster[k]));
   // Seeds: carved land cells at or below 0 m touching the sea; then spread through such cells.
   for (let i = 0; i < N; i++) {
     if (fixed[i] || h[i] > 0) continue;
-    const x = i % n;
-    const sea = (j: number): boolean => fixed[j] === 1 && h[j] <= 0;
-    if ((x > 0 && sea(i - 1)) || (x < n - 1 && sea(i + 1)) || (i >= n && sea(i - n)) || (i < N - n && sea(i + n))) join(i);
+    for (let k = 0; k < 4; k++) {
+      const j = nb(i, k);
+      if (j >= 0 && fixed[j] === 1 && h[j] <= 0) {
+        join(i);
+        break;
+      }
+    }
   }
   while (stack.length > 0) {
     const c = stack.pop()!;
-    const x = c % n;
-    if (x > 0 && !fixed[c - 1] && h[c - 1] <= 0) join(c - 1);
-    if (x < n - 1 && !fixed[c + 1] && h[c + 1] <= 0) join(c + 1);
-    if (c >= n && !fixed[c - n] && h[c - n] <= 0) join(c - n);
-    if (c < N - n && !fixed[c + n] && h[c + n] <= 0) join(c + n);
+    for (let k = 0; k < 4; k++) {
+      const j = nb(c, k);
+      if (j >= 0 && !fixed[j] && h[j] <= 0) join(j);
+    }
   }
 }
 
@@ -465,12 +462,12 @@ function floodSea(h: Float32Array, fixed: Uint8Array, n: number): void {
  * Present-day ice cover 0–1: accumulation zones fade in over 0–150 m above the ELA, tongues fill
  * their glacier width; a 3×3 blur softens the edges outward. Zero on the sea.
  */
-function iceCover(now: IceFlux, dz: Float32Array, fixed: Uint8Array, n: number, cellM: number): Float32Array {
-  const N = n * n;
+function iceCover(now: IceFlux, dz: Float32Array, fixed: Uint8Array, g: Grid): Float32Array {
+  const N = g.cells;
   const raw = new Float32Array(N);
   // Tongues: the min-stamp on negated cover, −1 inside the glacier width fading to 0 at its edge.
   const tongue = new Float32Array(N);
-  const st = new Stamper(n, cellM, tongue, fixed);
+  const st = new Stamper(g, tongue, fixed);
   for (let i = 0; i < N; i++) {
     if (fixed[i]) continue;
     if (dz[i] > 0) raw[i] = smoothstep(0, 150, dz[i]);
@@ -480,7 +477,7 @@ function iceCover(now: IceFlux, dz: Float32Array, fixed: Uint8Array, n: number, 
   }
   for (let i = 0; i < N; i++) raw[i] = Math.max(raw[i], -tongue[i]);
   const soft = raw.slice();
-  boxBlur(soft, n, 1);
+  boxBlur(soft, g, 1);
   for (let i = 0; i < N; i++) raw[i] = fixed[i] ? 0 : Math.min(1, Math.max(raw[i], soft[i]));
   return raw;
 }

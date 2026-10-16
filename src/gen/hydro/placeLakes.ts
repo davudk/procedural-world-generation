@@ -1,7 +1,7 @@
 import type { Rng } from '../../shared/rng';
+import type { Grid } from '../grid/grid';
 import { MinHeap } from '../grid/heap';
 import { smoothstep } from '../grid/ops';
-import { DX, DY, offsets } from './grid8';
 
 /** Lakes of at least 1 km² per km² of land in an average climate (HydroLAKES / Downing 2006, research 02 §6). */
 const LAKES_PER_KM2 = 1e-3;
@@ -10,8 +10,7 @@ const MEAN_WEIGHT = 0.07;
 const MAX_AREA_KM2 = 3000;
 
 export interface PlaceInput {
-  n: number;
-  cellKm: number;
+  grid: Grid;
   h: Float32Array;
   fixed: Uint8Array;
   /** Drainage area (m²) and receivers of the input terrain. */
@@ -35,10 +34,9 @@ export interface PlaceInput {
  * Returns the number of basins carved.
  */
 export function placeLakeBasins(p: PlaceInput): number {
-  const { n, cellKm, h, fixed, area, rcv, temp, precip, pet, rng } = p;
-  const N = n * n;
+  const { grid: g, h, fixed, area, rcv, temp, precip, pet, rng } = p;
+  const { cells: N, cellKm, off8: off, border } = g;
   const cellKm2 = cellKm * cellKm;
-  const off = offsets(n);
   let landCells = 0;
   for (let i = 0; i < N; i++) if (!fixed[i]) landCells++;
   const aMin = Math.max(1, cellKm2);
@@ -49,14 +47,11 @@ export function placeLakeBasins(p: PlaceInput): number {
   const heap = new MinHeap(256);
   const region: number[] = [];
   const steep = (i: number): number => {
-    const x = i % n;
-    const y = (i - x) / n;
     let s = 0;
     for (let k = 0; k < 8; k++) {
-      const nx = x + DX[k];
-      const ny = y + DY[k];
-      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-      s = Math.max(s, Math.abs(h[i] - h[i + off[k]]));
+      const j = border[i] === 0 ? i + off[k] : g.nbr(i, k);
+      if (j < 0) continue;
+      s = Math.max(s, Math.abs(h[i] - h[j]));
     }
     return s / (cellKm * 1000);
   };
@@ -81,13 +76,9 @@ export function placeLakeBasins(p: PlaceInput): number {
     // Grow the basin upstream of the sill, lowest cells first, never next to lower ground outside it.
     region.length = 0;
     heap.size = 0;
-    const sx = sill % n;
-    const sy = (sill - sx) / n;
     for (let d = 0; d < 8; d++) {
-      const nx = sx + DX[d];
-      const ny = sy + DY[d];
-      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-      const j = sill + off[d];
+      const j = border[sill] === 0 ? sill + off[d] : g.nbr(sill, d);
+      if (j < 0) continue;
       if (!fixed[j] && !taken[j] && h[j] >= level && inHeap[j] !== k) {
         inHeap[j] = k;
         heap.push(h[j], j);
@@ -97,17 +88,14 @@ export function placeLakeBasins(p: PlaceInput): number {
     while (heap.size > 0 && region.length < target) {
       const c = heap.pop();
       if (h[c] > level + rise) break;
-      const cx = c % n;
-      const cy = (c - cx) / n;
+      const b = border[c];
       let leak = false;
       for (let d = 0; d < 8 && !leak; d++) {
-        const nx = cx + DX[d];
-        const ny = cy + DY[d];
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) {
+        const j = b === 0 ? c + off[d] : g.nbr(c, d);
+        if (j < 0) {
           leak = true;
           continue;
         }
-        const j = c + off[d];
         if (j === sill || taken[j] === 2) continue;
         if (fixed[j] || taken[j] || h[j] < level) leak = true;
       }
@@ -115,10 +103,8 @@ export function placeLakeBasins(p: PlaceInput): number {
       region.push(c);
       taken[c] = 2;
       for (let d = 0; d < 8; d++) {
-        const nx = cx + DX[d];
-        const ny = cy + DY[d];
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        const j = c + off[d];
+        const j = b === 0 ? c + off[d] : g.nbr(c, d);
+        if (j < 0) continue;
         if (!fixed[j] && !taken[j] && j !== sill && inHeap[j] !== k) {
           inHeap[j] = k;
           heap.push(h[j], j);
@@ -128,7 +114,7 @@ export function placeLakeBasins(p: PlaceInput): number {
     if (region.length === 0) continue;
     // Bowl: deepest away from the shore, depth growing with lake size.
     const depth = Math.min(80, 3 + 4 * Math.pow(region.length * cellKm2, 0.35));
-    const ring = shoreDistance(region, taken, n);
+    const ring = shoreDistance(region, taken, g);
     let far = 1;
     for (const d of ring) far = Math.max(far, d);
     for (let r = 0; r < region.length; r++) {
@@ -144,19 +130,17 @@ export function placeLakeBasins(p: PlaceInput): number {
 }
 
 /** Distance (cells, ≥ 1) from each region cell to the nearest cell outside the region. */
-function shoreDistance(region: number[], taken: Uint8Array, n: number): Int32Array {
+function shoreDistance(region: number[], taken: Uint8Array, g: Grid): Int32Array {
+  const { off8: off, border } = g;
   const index = new Map<number, number>();
   region.forEach((c, r) => index.set(c, r));
   const dist = new Int32Array(region.length);
   const queue: number[] = [];
   for (let r = 0; r < region.length; r++) {
     const c = region[r];
-    const x = c % n;
-    const y = (c - x) / n;
     for (let d = 0; d < 8; d++) {
-      const nx = x + DX[d];
-      const ny = y + DY[d];
-      if (nx < 0 || ny < 0 || nx >= n || ny >= n || taken[ny * n + nx] !== 2) {
+      const j = border[c] === 0 ? c + off[d] : g.nbr(c, d);
+      if (j < 0 || taken[j] !== 2) {
         dist[r] = 1;
         queue.push(r);
         break;
@@ -166,13 +150,10 @@ function shoreDistance(region: number[], taken: Uint8Array, n: number): Int32Arr
   for (let q = 0; q < queue.length; q++) {
     const r = queue[q];
     const c = region[r];
-    const x = c % n;
-    const y = (c - x) / n;
     for (let d = 0; d < 8; d++) {
-      const nx = x + DX[d];
-      const ny = y + DY[d];
-      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-      const s = index.get(ny * n + nx);
+      const j = border[c] === 0 ? c + off[d] : g.nbr(c, d);
+      if (j < 0) continue;
+      const s = index.get(j);
       if (s !== undefined && dist[s] === 0) {
         dist[s] = dist[r] + 1;
         queue.push(s);

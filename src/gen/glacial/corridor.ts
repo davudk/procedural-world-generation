@@ -1,3 +1,5 @@
+import { cellIndex, cellY, type Grid } from '../grid/grid';
+
 /**
  * Glacier corridors: a U cross-section evaluated per cell from its distance to a continuous glacier
  * centreline, instead of a union of per-cell circular stamps (whose overlapping rims leave scallops
@@ -44,8 +46,8 @@ export interface CorridorField {
 }
 
 /** Carve field of a centreline polyline over `h`. Sea (fixed) cells are skipped unless `sea`. */
-export function corridorCarve(src: CorridorSources, h: Float32Array, fixed: Uint8Array, n: number, sea: boolean): CorridorField {
-  const N = n * n;
+export function corridorCarve(src: CorridorSources, h: Float32Array, fixed: Uint8Array, g: Grid, sea: boolean): CorridorField {
+  const { n, cells: N } = g;
   const target = new Float32Array(N).fill(Infinity);
   const rcOut = new Float32Array(N);
   const { x: X, y: Y, floor: F, edge: E, rc: R, cut: C, next } = src;
@@ -63,7 +65,7 @@ export function corridorCarve(src: CorridorSources, h: Float32Array, fixed: Uint
     const y1 = Math.min(n - 1, Math.ceil(Math.max(ay, ay + by) + rMax));
     for (let y = y0; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
-        const i = y * n + x;
+        const i = cellIndex(g, x, y);
         if (fixed[i] && !sea) continue;
         const px = x - ax;
         const py = y - ay;
@@ -94,32 +96,38 @@ export function corridorCarve(src: CorridorSources, h: Float32Array, fixed: Uint
  * none for corridors ≤ 1 cell wide (it would fill single-cell channels), full from 3 cells. Values
  * stay ≥ 0, so applying the result still only lowers terrain.
  */
-export function softenCarve(carve: Float32Array, rc: Float32Array, n: number): Float32Array {
-  const N = n * n;
+export function softenCarve(carve: Float32Array, rc: Float32Array, g: Grid): Float32Array {
+  const { n, cells: N, off8, border } = g;
+  // Neighbour in raster slot k with offset o, or the cell itself where the map ends (clamped edges).
+  const side = (i: number, k: number, o: number): number => {
+    if (border[i] === 0) return i + o;
+    const j = g.nbr(i, k);
+    return j < 0 ? i : j;
+  };
+  const oW = off8[3];
+  const oE = off8[4];
+  const oN = off8[1];
+  const oS = off8[6];
   const a = carve.slice();
   const tmp = new Float32Array(N);
   // Rows within 3 of any carving; everything else stays 0 and is skipped.
   const has = new Uint8Array(n);
-  for (let i = 0; i < N; i++) if (carve[i] > 0) has[(i / n) | 0] = 1;
+  for (let i = 0; i < N; i++) if (carve[i] > 0) has[cellY(g, i)] = 1;
   const active = new Uint8Array(n);
   for (let y = 0; y < n; y++) if (has[y]) for (let k = Math.max(0, y - 3); k <= Math.min(n - 1, y + 3); k++) active[k] = 1;
   for (let pass = 0; pass < 2; pass++) {
     for (let y = 0; y < n; y++) {
       if (!active[y]) continue;
-      const row = y * n;
       for (let x = 0; x < n; x++) {
-        const l = x > 0 ? a[row + x - 1] : a[row + x];
-        const r = x < n - 1 ? a[row + x + 1] : a[row + x];
-        tmp[row + x] = 0.25 * l + 0.5 * a[row + x] + 0.25 * r;
+        const i = cellIndex(g, x, y);
+        tmp[i] = 0.25 * a[side(i, 3, oW)] + 0.5 * a[i] + 0.25 * a[side(i, 4, oE)];
       }
     }
     for (let y = 0; y < n; y++) {
       if (!active[y]) continue;
       for (let x = 0; x < n; x++) {
-        const i = y * n + x;
-        const u = y > 0 ? tmp[i - n] : tmp[i];
-        const d = y < n - 1 ? tmp[i + n] : tmp[i];
-        a[i] = 0.25 * u + 0.5 * tmp[i] + 0.25 * d;
+        const i = cellIndex(g, x, y);
+        a[i] = 0.25 * tmp[side(i, 1, oN)] + 0.5 * tmp[i] + 0.25 * tmp[side(i, 6, oS)];
       }
     }
   }
@@ -128,19 +136,23 @@ export function softenCarve(carve: Float32Array, rc: Float32Array, n: number): F
   const wRow = new Float32Array(N);
   for (let y = 0; y < n; y++) {
     if (!active[y]) continue;
-    const row = y * n;
     for (let x = 0; x < n; x++) {
-      let w = rc[row + x];
-      if (x > 0 && rc[row + x - 1] > w) w = rc[row + x - 1];
-      if (x < n - 1 && rc[row + x + 1] > w) w = rc[row + x + 1];
-      wRow[row + x] = w;
+      const i = cellIndex(g, x, y);
+      let w = rc[i];
+      const l = side(i, 3, oW);
+      const r = side(i, 4, oE);
+      if (rc[l] > w) w = rc[l];
+      if (rc[r] > w) w = rc[r];
+      wRow[i] = w;
     }
   }
   for (let i = 0; i < N; i++) {
     if (a[i] === 0 && carve[i] === 0) continue;
     let w = wRow[i];
-    if (i >= n && wRow[i - n] > w) w = wRow[i - n];
-    if (i < N - n && wRow[i + n] > w) w = wRow[i + n];
+    const u = side(i, 1, oN);
+    const d = side(i, 6, oS);
+    if (wRow[u] > w) w = wRow[u];
+    if (wRow[d] > w) w = wRow[d];
     const t = Math.min(1, Math.max(0, (w - 1) / 2));
     const al = t * t * (3 - 2 * t);
     a[i] = carve[i] + al * (a[i] - carve[i]);

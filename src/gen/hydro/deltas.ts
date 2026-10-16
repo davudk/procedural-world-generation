@@ -1,5 +1,6 @@
 import { RIVER } from '../../shared/protocol';
 import type { Rng } from '../../shared/rng';
+import { cellIndex, forWindow, type Grid } from '../grid/grid';
 import { DEPTH_COEF, WIDTH_COEF } from './geometry';
 import type { GraphBuilder } from './graph';
 
@@ -15,8 +16,7 @@ const SHELF_DEPTH = 50;
 const SHELF_KM = 20;
 
 export interface DeltaInput {
-  n: number;
-  cellM: number;
+  grid: Grid;
   h: Float32Array;
   fixed: Uint8Array;
   lakeId: Int32Array;
@@ -47,12 +47,15 @@ type Style = 'river' | 'wave' | 'tide';
  * reach the sea or the lake; arid dry-sink fans end on land. Their cells are marked in `plain`.
  */
 export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array): DeltaStats {
-  const { n, cellM, h, fixed, lakeId, rng } = inp;
+  const { grid, h, fixed, lakeId, rng } = inp;
+  const { n, cellM } = grid;
+  /** Map size in metres (distributaries stop at the map edge). */
+  const mapM = n * cellM;
   const stats: DeltaStats = { birdsFoot: 0, arcuate: 0, cuspate: 0, estuaries: 0, inland: 0, distributaries: 0 };
   const cellOf = (x: number, y: number): number => {
     const cx = Math.min(n - 1, Math.max(0, Math.floor(x / cellM)));
     const cy = Math.min(n - 1, Math.max(0, Math.floor(y / cellM)));
-    return cy * n + cx;
+    return cellIndex(grid, cx, cy);
   };
   const reaches = gb.reaches;
   // Sea mouths largest first, so the cap keeps the big deltas; then everything else in reach order.
@@ -94,20 +97,15 @@ export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array):
     let extra = 0;
     if (mode === 'sea') {
       const R = Math.max(2, Math.ceil((SHELF_KM * 1000) / cellM));
-      const mx = mc % n;
-      const my = (mc - mx) / n;
       let ocean = 0;
       let shallow = 0;
       let total = 0;
-      for (let y = Math.max(0, my - R); y <= Math.min(n - 1, my + R); y++) {
-        for (let x = Math.max(0, mx - R); x <= Math.min(n - 1, mx + R); x++) {
-          const c = y * n + x;
-          total++;
-          if (!fixed[c] || h[c] > 0) continue;
-          ocean++;
-          if (h[c] > -SHELF_DEPTH) shallow++;
-        }
-      }
+      forWindow(grid, mc, R, (c) => {
+        total++;
+        if (!fixed[c] || h[c] > 0) return;
+        ocean++;
+        if (h[c] > -SHELF_DEPTH) shallow++;
+      });
       const exposure = ocean / Math.max(1, total);
       const shelf = shallow / Math.max(1, ocean);
       const sR = 0.6 + 0.6 * Math.log10(Q / DELTA_MIN_Q);
@@ -164,10 +162,10 @@ export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array):
     if (extra === 0) continue;
 
     let targetLake = -1;
-    for (let k = 0; k < 9 && targetLake < 0; k++) {
-      const c = mc + (Math.floor(k / 3) - 1) * n + (k % 3) - 1;
-      if (c >= 0 && c < n * n) targetLake = lakeId[c];
-    }
+    forWindow(grid, mc, 1, (c) => {
+      targetLake = lakeId[c];
+      return targetLake < 0;
+    });
     const zEnd = mode === 'sea' ? 0 : gb.zWater[m];
     const dirX = gb.x[m] - ax;
     const dirY = gb.y[m] - ay;
@@ -194,7 +192,7 @@ export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array):
         const b = Math.sin(Math.min(1, s / len) * Math.PI) * bend;
         const x = ax + ux * s - uy * b;
         const y = ay + uy * s + ux * b;
-        if (x < 0 || y < 0 || x >= n * cellM || y >= n * cellM) break;
+        if (x < 0 || y < 0 || x >= mapM || y >= mapM) break;
         const c = cellOf(x, y);
         const target = mode === 'sea' ? fixed[c] === 1 && h[c] <= 0 : mode === 'lake' ? lakeId[c] === targetLake : s >= len;
         if (!target && (fixed[c] || lakeId[c] >= 0 || h[c] > az + 1)) break;

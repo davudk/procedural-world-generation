@@ -1,8 +1,10 @@
-/** Small raster operations on square row-major grids. */
+/** Small raster operations on world grids. */
+import type { Grid } from './grid';
 
 /** In-place separable box blur with radius `r` cells (edges clamp). O(n) per pass. */
-export function boxBlur(a: Float32Array, n: number, r: number, passes = 1): void {
+export function boxBlur(a: Float32Array, g: Grid, r: number, passes = 1): void {
   if (r < 1) return;
+  const n = g.n;
   const tmp = new Float32Array(n);
   const inv = 1 / (2 * r + 1);
   for (let p = 0; p < passes; p++) {
@@ -32,11 +34,12 @@ export function quantile(a: Float32Array, q: number): number {
  * Labels 4-connected components of cells where `mask` is non-zero. Returns labels (−1 outside the
  * mask) and the size of each component.
  */
-export function components(mask: Uint8Array, n: number): { label: Int32Array; sizes: number[] } {
-  const label = new Int32Array(n * n).fill(-1);
+export function components(mask: Uint8Array, g: Grid): { label: Int32Array; sizes: number[] } {
+  const { cells, off4, border, axialToRaster } = g;
+  const label = new Int32Array(cells).fill(-1);
   const sizes: number[] = [];
-  const stack = new Int32Array(n * n);
-  for (let s = 0; s < n * n; s++) {
+  const stack = new Int32Array(cells);
+  for (let s = 0; s < cells; s++) {
     if (!mask[s] || label[s] !== -1) continue;
     const id = sizes.length;
     let top = 0;
@@ -46,11 +49,11 @@ export function components(mask: Uint8Array, n: number): { label: Int32Array; si
     while (top > 0) {
       const c = stack[--top];
       size++;
-      const x = c % n;
-      if (x > 0 && mask[c - 1] && label[c - 1] === -1) (label[c - 1] = id), (stack[top++] = c - 1);
-      if (x < n - 1 && mask[c + 1] && label[c + 1] === -1) (label[c + 1] = id), (stack[top++] = c + 1);
-      if (c >= n && mask[c - n] && label[c - n] === -1) (label[c - n] = id), (stack[top++] = c - n);
-      if (c < n * n - n && mask[c + n] && label[c + n] === -1) (label[c + n] = id), (stack[top++] = c + n);
+      const b = border[c];
+      for (let k = 0; k < 4; k++) {
+        const j = b === 0 ? c + off4[k] : g.nbr(c, axialToRaster[k]);
+        if (j >= 0 && mask[j] && label[j] === -1) (label[j] = id), (stack[top++] = j);
+      }
     }
     sizes.push(size);
   }
@@ -66,7 +69,8 @@ export function smoothstep(e0: number, e1: number, x: number): number {
  * Two-pass 3-4 chamfer distance (in cells, ≈ Euclidean within ~8 %) to the nearest cell where
  * `source` is non-zero. O(n), for fields where approximate distance is fine (e.g. coast distance).
  */
-export function chamferDistance(source: Uint8Array, n: number): Float32Array {
+export function chamferDistance(source: Uint8Array, g: Grid): Float32Array {
+  const n = g.n;
   const INF = 1e9;
   const d = new Float32Array(n * n);
   for (let i = 0; i < n * n; i++) d[i] = source[i] ? 0 : INF;

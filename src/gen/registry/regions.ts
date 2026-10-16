@@ -10,10 +10,9 @@ import type { Candidate, RegistryInput, Shared } from './types';
  * components of the glacier ice cover on the macro grid.
  */
 export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): void {
-  const { n } = I.fine;
+  const fine = I.fine;
   const R = S.reg;
-  const m = R.n;
-  const MM = m * m;
+  const MM = R.cells;
   const f = S.f;
   const share = S.groupShare;
   const rKm2 = (R.cellM / 1000) ** 2;
@@ -24,8 +23,8 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
       for (const g of gr) s += share[g][i];
       mask[i] = s >= thr ? 1 : 0;
     }
-    const comps = label(mask, m, true);
-    const inside = insideDistance(mask, m);
+    const comps = label(mask, R, true);
+    const inside = insideDistance(mask, R);
     const res: { cells: number[]; areaKm2: number; pole: number }[] = [];
     const cellsOf: number[][] = Array.from({ length: comps.count }, () => []);
     for (let i = 0; i < MM; i++) if (comps.label[i] >= 0) cellsOf[comps.label[i]].push(i);
@@ -42,7 +41,7 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
   const anchor = (pole: number): [number, number] => {
     const px = cellX(R, pole);
     const py = cellY(R, pole);
-    const fc = nearestWhere(n, px / I.fine.cellM, py / I.fine.cellM, 3 * f, (c) => !I.sea[c]);
+    const fc = nearestWhere(fine, px / I.fine.cellM, py / I.fine.cellM, 3 * f, (c) => !I.sea[c]);
     return fc >= 0 ? [cellX(I.fine, fc), cellY(I.fine, fc)] : [px, py];
   };
   const tempAt = (c: number): number => I.climate.temp[cellAtM(I.fine, cellX(R, c), cellY(R, c))];
@@ -53,7 +52,7 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
     let t = 0;
     for (const c of r.cells) t += tempAt(c);
     t /= r.cells.length;
-    const ax = pca(r.cells, m);
+    const ax = pca(r.cells, R);
     out.push({
       kind: 'desert', x, y, angle: NaN, extentM: Math.max(Math.sqrt(r.areaKm2), ax.length * R.cellM / 1000 * 0.7) * 1000,
       mag: Math.min(1, r.areaKm2 / 150000), data: { areaKm2: Math.round(r.areaKm2), meanTempC: Math.round(t * 10) / 10 },
@@ -136,10 +135,10 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
   }
 
   // Ice caps and glaciers (macro grid).
-  const N = n * n;
+  const N = fine.cells;
   const ice = new Uint8Array(N);
   for (let c = 0; c < N; c++) ice[c] = !I.sea[c] && (I.landforms.ice[c] >= 0.5 || I.biome.biome[c] === BIOME.ICE) ? 1 : 0;
-  const comps = label(ice, n, true);
+  const comps = label(ice, fine, true);
   const cellKm2 = (I.fine.cellM / 1000) ** 2;
   const caps: Candidate[] = [];
   const glaciers: Candidate[] = [];
@@ -152,7 +151,7 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
     if ((cap ? caps : glaciers).length >= (cap ? 3 : 10)) continue;
     const cx = comps.sx[k] / comps.size[k] + 0.5;
     const cy = comps.sy[k] / comps.size[k] + 0.5;
-    const fc = nearestWhere(n, cx, cy, Math.max(4, Math.sqrt(comps.size[k])), (c) => comps.label[c] === k);
+    const fc = nearestWhere(fine, cx, cy, Math.max(4, Math.sqrt(comps.size[k])), (c) => comps.label[c] === k);
     const x = fc >= 0 ? cellX(I.fine, fc) : cx * I.fine.cellM;
     const y = fc >= 0 ? cellY(I.fine, fc) : cy * I.fine.cellM;
     (cap ? caps : glaciers).push({

@@ -44,8 +44,9 @@ export const glacialStage: StageDef = {
     const { n } = t;
     if (cl.n !== n) throw new Error(`glacial: grids differ (${n}, ${cl.n})`);
     const g = ctx.num('glaciation');
+    const grid = ctx.grid(n);
     const r = glaciate(
-      { n, cellKm: t.cellKm, h: t.h, fixed: t.fixed, rcv: t.rcv, temp: cl.temp, tAmp: cl.tAmp, precip: cl.precip },
+      { grid, h: t.h, fixed: t.fixed, rcv: t.rcv, temp: cl.temp, tAmp: cl.tAmp, precip: cl.precip },
       { presentShift: 2 * (g - 1), pastShift: PAST_COOLING * g, fjords: ctx.bool('fjords') },
       ctx.rng('carve'),
     );
@@ -64,7 +65,7 @@ export const glacialStage: StageDef = {
       const h = r.h;
       const active = new Uint8Array(n * n);
       for (let i = 0; i < n * n; i++) active[i] = r.carve[i] > 0 ? 1 : 0;
-      const lem = repairDrainage(h, r.fixed, t.K, n, t.cellKm * 1000, LEM_M, REPAIR_DT, REPAIR_ITERATIONS, active);
+      const lem = repairDrainage(h, r.fixed, t.K, grid, LEM_M, REPAIR_DT, REPAIR_ITERATIONS, active);
       repairMs = performance.now() - t1;
       basinKm2 = Math.round(lem.basinCells * t.cellKm * t.cellKm);
       for (let i = 0; i < n * n; i++) {

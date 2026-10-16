@@ -1,5 +1,6 @@
+import { cellX as colOf, cellY as rowOf } from '../grid/grid';
 import { chamferDistance } from '../grid/ops';
-import { cellAtM, cellX, cellY, DX8, DY8, label, labelAngle, mergeTree, nearestWhere, type GridSpec } from './grid';
+import { cellAtM, cellX, cellY, label, labelAngle, mergeTree, nearestWhere, type GridSpec } from './grid';
 import { gradAt } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
 
@@ -10,18 +11,17 @@ import type { Candidate, RegistryInput, Shared } from './types';
  * tips) and isthmuses (key cols of the distance-from-sea merge tree between two land cores).
  */
 export function detectLand(I: RegistryInput, S: Shared, out: Candidate[]): void {
-  const { n, cellM } = I.fine;
+  const { cellM } = I.fine;
   const cellKm = cellM / 1000;
   const cellKm2 = cellKm * cellKm;
   const M = S.masses;
   const R = S.reg;
-  const m = R.n;
   const rKm = R.cellM / 1000;
 
   // Pole of inaccessibility of every landmass on the regional grid (deepest inland cell).
   const poleCell = new Int32Array(M.count).fill(-1);
   const poleD = new Float32Array(M.count);
-  for (let i = 0; i < m * m; i++) {
+  for (let i = 0; i < R.cells; i++) {
     if (!S.land[i]) continue;
     const fc = cellAtM(I.fine, cellX(R, i), cellY(R, i));
     const k = M.label[fc];
@@ -33,12 +33,12 @@ export function detectLand(I: RegistryInput, S: Shared, out: Candidate[]): void 
   }
   const anchorOf = (k: number): [number, number] => {
     if (poleCell[k] >= 0 && M.size[k] >= 6 * S.f * S.f) {
-      const fc = nearestWhere(n, cellX(R, poleCell[k]) / cellM, cellY(R, poleCell[k]) / cellM, 3 * S.f, (c) => M.label[c] === k);
+      const fc = nearestWhere(I.fine, cellX(R, poleCell[k]) / cellM, cellY(R, poleCell[k]) / cellM, 3 * S.f, (c) => M.label[c] === k);
       if (fc >= 0) return [cellX(I.fine, fc), cellY(I.fine, fc)];
     }
     const cx = M.sx[k] / M.size[k] + 0.5;
     const cy = M.sy[k] / M.size[k] + 0.5;
-    const fc = nearestWhere(n, cx, cy, Math.max(4, Math.sqrt(M.size[k])), (c) => M.label[c] === k);
+    const fc = nearestWhere(I.fine, cx, cy, Math.max(4, Math.sqrt(M.size[k])), (c) => M.label[c] === k);
     return fc >= 0 ? [cellX(I.fine, fc), cellY(I.fine, fc)] : [cx * cellM, cy * cellM];
   };
 
@@ -154,8 +154,8 @@ function detectArchipelagos(I: RegistryInput, S: Shared, out: Candidate[]): void
 
 /** Peninsulas at three opening radii, largest first; capes at the tips of the long ones. */
 function detectPeninsulas(I: RegistryInput, S: Shared, R: GridSpec, rKm: number, out: Candidate[]): void {
-  const m = R.n;
-  const MM = m * m;
+  const MM = R.cells;
+  const { off8Axial: off, border, axialToRaster } = R;
   const accepted: { tx: number; ty: number }[] = [];
   const found: Candidate[] = [];
   const capes: Candidate[] = [];
@@ -164,7 +164,7 @@ function detectPeninsulas(I: RegistryInput, S: Shared, R: GridSpec, rKm: number,
     if (rad < 1.5) continue;
     const eroded = new Uint8Array(MM);
     for (let i = 0; i < MM; i++) eroded[i] = S.land[i] && S.dSea[i] > rad ? 1 : 0;
-    const dO = chamferDistance(eroded, m);
+    const dO = chamferDistance(eroded, R);
     const resid = new Uint8Array(MM);
     const opened = new Uint8Array(MM);
     for (let i = 0; i < MM; i++) {
@@ -172,7 +172,7 @@ function detectPeninsulas(I: RegistryInput, S: Shared, R: GridSpec, rKm: number,
       if (dO[i] <= rad) opened[i] = 1;
       else resid[i] = 1;
     }
-    const comps = label(resid, m, true);
+    const comps = label(resid, R, true);
     const cellsOf: number[][] = Array.from({ length: comps.count }, () => []);
     for (let i = 0; i < MM; i++) if (comps.label[i] >= 0) cellsOf[comps.label[i]].push(i);
     const depth = new Float32Array(MM).fill(Infinity);
@@ -184,19 +184,17 @@ function detectPeninsulas(I: RegistryInput, S: Shared, R: GridSpec, rKm: number,
       let bx = 0;
       let by = 0;
       for (const c of cells) {
-        const x = c % m;
-        const y = (c - x) / m;
+        const b = border[c];
         let touches = false;
         for (let d = 0; d < 4; d++) {
-          const nx = x + DX8[d];
-          const ny = y + DY8[d];
-          if (nx >= 0 && ny >= 0 && nx < m && ny < m && opened[ny * m + nx]) touches = true;
+          const nc = b === 0 ? c + off[d] : R.nbr(c, axialToRaster[d]);
+          if (nc >= 0 && opened[nc]) touches = true;
         }
         if (touches) {
           depth[c] = 0;
           queue.push(c);
-          bx += x;
-          by += y;
+          bx += colOf(R, c);
+          by += rowOf(R, c);
         }
       }
       if (queue.length === 0) continue;
@@ -205,14 +203,10 @@ function detectPeninsulas(I: RegistryInput, S: Shared, R: GridSpec, rKm: number,
       by /= base;
       for (let qi = 0; qi < queue.length; qi++) {
         const c = queue[qi];
-        const x = c % m;
-        const y = (c - x) / m;
+        const b = border[c];
         for (let d = 0; d < 8; d++) {
-          const nx = x + DX8[d];
-          const ny = y + DY8[d];
-          if (nx < 0 || ny < 0 || nx >= m || ny >= m) continue;
-          const nc = ny * m + nx;
-          if (comps.label[nc] !== k) continue;
+          const nc = b === 0 ? c + off[d] : R.nbr(c, axialToRaster[d]);
+          if (nc < 0 || comps.label[nc] !== k) continue;
           const nd = depth[c] + (d < 4 ? 1 : Math.SQRT2);
           if (nd < depth[nc]) {
             depth[nc] = nd;
@@ -225,8 +219,8 @@ function detectPeninsulas(I: RegistryInput, S: Shared, R: GridSpec, rKm: number,
       for (const c of cells) if (depth[c] < Infinity && depth[c] > P) (P = depth[c]), (tip = c);
       const PKm = (P + rad * 0.5) * rKm;
       if (tip < 0 || PKm < Math.max(25, 1.5 * radKm) || P < 1.2 * base) continue;
-      const tx = tip % m;
-      const ty = (tip - tx) / m;
+      const tx = colOf(R, tip);
+      const ty = rowOf(R, tip);
       if (accepted.some((a) => Math.hypot(a.tx - tx, a.ty - ty) * rKm < Math.max(20, 2 * radKm))) continue;
       // Anchor: the most inland cell of the middle third.
       let anchor = tip;
@@ -237,7 +231,7 @@ function detectPeninsulas(I: RegistryInput, S: Shared, R: GridSpec, rKm: number,
       }
       const ax = cellX(R, anchor);
       const ay = cellY(R, anchor);
-      const fa = nearestWhere(I.fine.n, ax / I.fine.cellM, ay / I.fine.cellM, 3 * S.f, (c) => !I.sea[c]);
+      const fa = nearestWhere(I.fine, ax / I.fine.cellM, ay / I.fine.cellM, 3 * S.f, (c) => !I.sea[c]);
       const x = fa >= 0 ? cellX(I.fine, fa) : ax;
       const y = fa >= 0 ? cellY(I.fine, fa) : ay;
       const areaKm2 = cells.length * rKm * rKm;
@@ -254,11 +248,15 @@ function detectPeninsulas(I: RegistryInput, S: Shared, R: GridSpec, rKm: number,
         // Cape: the fine land cell nearest the tip that touches the sea.
         const txm = cellX(R, tip) / I.fine.cellM;
         const tym = cellY(R, tip) / I.fine.cellM;
-        const fn = I.fine.n;
-        const fc = nearestWhere(fn, txm, tym, 4 * S.f, (c) => {
+        const fine = I.fine;
+        const fc = nearestWhere(fine, txm, tym, 4 * S.f, (c) => {
           if (I.sea[c]) return false;
-          const x = c % fn;
-          return (x > 0 && I.sea[c - 1] === 1) || (x < fn - 1 && I.sea[c + 1] === 1) || (c >= fn && I.sea[c - fn] === 1) || (c < fn * fn - fn && I.sea[c + fn] === 1);
+          const b = fine.border[c];
+          for (let d = 0; d < 4; d++) {
+            const j = b === 0 ? c + fine.off4[d] : fine.nbr(c, fine.axialToRaster[d]);
+            if (j >= 0 && I.sea[j] === 1) return true;
+          }
+          return false;
         });
         if (fc >= 0) {
           const cx = cellX(I.fine, fc);
@@ -279,8 +277,7 @@ function detectPeninsulas(I: RegistryInput, S: Shared, R: GridSpec, rKm: number,
 
 /** Isthmuses: narrow land necks (≤ 40 km) between two land cores of ≥ 3000 km². */
 function detectIsthmuses(I: RegistryInput, S: Shared, R: GridSpec, rKm: number, out: Candidate[]): void {
-  const m = R.n;
-  const t = mergeTree(S.dSea, S.land, m, true, 0.05);
+  const t = mergeTree(S.dSea, S.land, R, true, 0.05);
   const found: Candidate[] = [];
   const core = 12 / rKm;
   for (let k = 0; k < t.count; k++) {
@@ -291,10 +288,10 @@ function detectIsthmuses(I: RegistryInput, S: Shared, R: GridSpec, rKm: number, 
     if (t.peakV[k] < 2 * t.colV[k]) continue;
     if (t.area[k] * rKm * rKm < 3000 || t.area[p] * rKm * rKm < 3000) continue;
     const c = t.col[k];
-    const [vx, vy] = gradAt(S.dSea, m, c);
+    const [vx, vy] = gradAt(S.dSea, R, c);
     const ax = cellX(R, c);
     const ay = cellY(R, c);
-    const fa = nearestWhere(I.fine.n, ax / I.fine.cellM, ay / I.fine.cellM, 3 * S.f, (q) => !I.sea[q]);
+    const fa = nearestWhere(I.fine, ax / I.fine.cellM, ay / I.fine.cellM, 3 * S.f, (q) => !I.sea[q]);
     const x = fa >= 0 ? cellX(I.fine, fa) : ax;
     const y = fa >= 0 ? cellY(I.fine, fa) : ay;
     found.push({

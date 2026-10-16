@@ -1,4 +1,5 @@
 import { Noise2 } from '../../shared/noise';
+import { blockGrid, cellIndex, cellX, cellY } from '../grid/grid';
 import { B } from '../stages/plates';
 import {
   areaFactor, cellOf, centreOf, DiskSet, forDisk, localMax, plateCellAt, poisson, ringMean, settleFixed, shuffle, Outline, snapshot, sstep, stampRadial,
@@ -79,8 +80,8 @@ export function applyVolcanic(c: LandformCtx): void {
       // Volcanic front: most centres sit ~120–180 km behind the trench.
       if (srng.float() > Math.exp(-(((d - 150) / 55) ** 2))) continue;
       cands.push({
-        x: ((pc % P.n) + srng.float()) * P.cellKm,
-        y: (Math.floor(pc / P.n) + srng.float()) * P.cellKm,
+        x: (cellX(c.platesGrid, pc) + srng.float()) * P.cellKm,
+        y: (cellY(c.platesGrid, pc) + srng.float()) * P.cellKm,
         island,
       });
     }
@@ -252,7 +253,7 @@ export function applyVolcanic(c: LandformCtx): void {
     const nRift = Math.min(poisson(frng, (riftKm / 1000) * 2 * Math.min(3, vol)), riftCells.length);
     for (let k = 0; k < nRift * 4 && fieldSites.length < nRift; k++) {
       const pc = riftCells[frng.int(riftCells.length)];
-      fieldSites.push({ x: ((pc % P.n) + frng.float()) * P.cellKm, y: (Math.floor(pc / P.n) + frng.float()) * P.cellKm });
+      fieldSites.push({ x: (cellX(c.platesGrid, pc) + frng.float()) * P.cellKm, y: (cellY(c.platesGrid, pc) + frng.float()) * P.cellKm });
     }
     for (const v of centres) {
       if (frng.float() > (v.kind === 'shield-volcano' ? 0.7 : 0.15)) continue;
@@ -350,14 +351,16 @@ function detectHotspotHeads(c: LandformCtx, occupied: DiskSet): { x: number; y: 
   const { n, h } = c;
   const P = c.plates;
   const bc = Math.max(1, Math.round(20 / c.cellKm));
-  const nb = Math.ceil(n / bc);
+  const bg = blockGrid(c.grid, bc);
+  const nb = bg.n;
   const bMax = new Float32Array(nb * nb).fill(-Infinity);
   const bIdx = new Int32Array(nb * nb);
   for (let y = 0; y < n; y++) {
-    const by = Math.floor(y / bc) * nb;
+    const by = cellIndex(bg, 0, Math.floor(y / bc));
+    const row = cellIndex(c.grid, 0, y);
     for (let x = 0; x < n; x++) {
       const b = by + Math.floor(x / bc);
-      const i = y * n + x;
+      const i = row + x;
       if (h[i] > bMax[b]) {
         bMax[b] = h[i];
         bIdx[b] = i;
@@ -367,13 +370,13 @@ function detectHotspotHeads(c: LandformCtx, occupied: DiskSet): { x: number; y: 
   const peaks: { x: number; y: number; h: number }[] = [];
   for (let by = 0; by < nb; by++) {
     for (let bx = 0; bx < nb; bx++) {
-      const b = by * nb + bx;
+      const b = cellIndex(bg, bx, by);
       const v = bMax[b];
       if (v < 200) continue;
       let isMax = true;
       for (let j = Math.max(0, by - 2); j <= Math.min(nb - 1, by + 2) && isMax; j++) {
         for (let i = Math.max(0, bx - 2); i <= Math.min(nb - 1, bx + 2); i++) {
-          const o = j * nb + i;
+          const o = cellIndex(bg, i, j);
           if (o !== b && (bMax[o] > v || (bMax[o] === v && o < b))) {
             isMax = false;
             break;

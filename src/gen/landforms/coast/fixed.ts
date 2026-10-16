@@ -1,8 +1,5 @@
-import { components8, DX8, DY8 } from './grid';
-
-// Local copies: hot loops should not read the imported bindings.
-const DX = Int8Array.from(DX8);
-const DY = Int8Array.from(DY8);
+import type { Grid } from '../../grid/grid';
+import { components8 } from './grid';
 
 /**
  * Re-derives the base-level mask after coastal edits: `fixed` = 1 exactly on water (h ≤ 0) that is
@@ -12,11 +9,11 @@ const DY = Int8Array.from(DY8);
  * (fixed 0), and newly drowned cells joined to the sea (rias) become sea (fixed 1). 8-connectivity
  * matches the D8 routing of the hydrology stage.
  */
-export function reconcileFixed(h: Float32Array, fixedBefore: Uint8Array, hBefore: Float32Array, n: number): Uint8Array {
-  const N = n * n;
+export function reconcileFixed(h: Float32Array, fixedBefore: Uint8Array, hBefore: Float32Array, g: Grid): Uint8Array {
+  const { cells: N, border } = g;
   const oldSea = new Uint8Array(N);
   for (let i = 0; i < N; i++) oldSea[i] = fixedBefore[i] && hBefore[i] <= 0 ? 1 : 0;
-  const { label, sizes } = components8(oldSea, n);
+  const { label, sizes } = components8(oldSea, g);
   const deepest = new Int32Array(sizes.length).fill(-1);
   const out = new Uint8Array(N);
   const queue = new Int32Array(N);
@@ -26,9 +23,7 @@ export function reconcileFixed(h: Float32Array, fixedBefore: Uint8Array, hBefore
     if (l < 0 || h[i] > 0) continue;
     const d = deepest[l];
     if (d < 0 || h[i] < h[d]) deepest[l] = i;
-    const x = i % n;
-    const y = (i - x) / n;
-    if (x === 0 || y === 0 || x === n - 1 || y === n - 1) {
+    if (border[i]) {
       out[i] = 1;
       queue[qt++] = i;
     }
@@ -39,33 +34,27 @@ export function reconcileFixed(h: Float32Array, fixedBefore: Uint8Array, hBefore
       queue[qt++] = d;
     }
   }
-  flood(h, out, queue, qt, n);
+  flood(h, out, queue, qt, g);
   // Open map edges (mapEdge = continent) stay base level on land.
   for (let i = 0; i < N; i++) {
     if (!fixedBefore[i] || hBefore[i] <= 0) continue;
-    const x = i % n;
-    const y = (i - x) / n;
-    if (x === 0 || y === 0 || x === n - 1 || y === n - 1) out[i] = 1;
+    if (border[i]) out[i] = 1;
   }
   return out;
 }
 
 /** Flood over water cells (h ≤ 0, 8-connected) from the `top` seeds on `stack`, marking `out`. */
-function flood(h: Float32Array, out: Uint8Array, stack: Int32Array, seeds: number, n: number): void {
-  const N = n * n;
+function flood(h: Float32Array, out: Uint8Array, stack: Int32Array, seeds: number, g: Grid): void {
+  const { cells: N, border, off8Axial, axialToRaster } = g;
   const water = new Uint8Array(N);
   for (let i = 0; i < N; i++) water[i] = h[i] <= 0 && !out[i] ? 1 : 0;
   let top = seeds;
   while (top > 0) {
     const c = stack[--top];
-    const x = c % n;
-    const y = (c - x) / n;
+    const b = border[c];
     for (let k = 0; k < 8; k++) {
-      const nx = x + DX[k];
-      const ny = y + DY[k];
-      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-      const j = ny * n + nx;
-      if (water[j]) {
+      const j = b === 0 ? c + off8Axial[k] : g.nbr(c, axialToRaster[k]);
+      if (j >= 0 && water[j]) {
         water[j] = 0;
         out[j] = 1;
         stack[top++] = j;

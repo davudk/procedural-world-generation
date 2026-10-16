@@ -1,5 +1,6 @@
 import { Noise2 } from '../../shared/noise';
 import type { Rng } from '../../shared/rng';
+import { cellIndex, cellX, cellY, coarser } from '../grid/grid';
 import { components } from '../grid/ops';
 import type { LandformCtx } from './types';
 
@@ -8,9 +9,6 @@ import type { LandformCtx } from './types';
  * radial stamps with sub-cell supersampling, coarse noise fields, and the `fixed` bookkeeping that
  * every pass runs after editing heights. Positions are in km from the north-west corner.
  */
-
-export const DX8 = [1, -1, 0, 0, 1, 1, -1, -1];
-export const DY8 = [0, 0, 1, -1, 1, -1, 1, -1];
 
 /** Poisson draw (Knuth for small λ, rounded normal approximation above 30). */
 export function poisson(rng: Rng, lambda: number): number {
@@ -86,13 +84,12 @@ export function cellOf(c: LandformCtx, x: number, y: number): number {
   const n = c.n;
   const cx = Math.min(n - 1, Math.max(0, Math.floor(x / c.cellKm)));
   const cy = Math.min(n - 1, Math.max(0, Math.floor(y / c.cellKm)));
-  return cy * n + cx;
+  return cellIndex(c.grid, cx, cy);
 }
 
 /** Centre of macro cell `i` in km. */
 export function centreOf(c: LandformCtx, i: number): { x: number; y: number } {
-  const x = i % c.n;
-  return { x: (x + 0.5) * c.cellKm, y: ((i - x) / c.n + 0.5) * c.cellKm };
+  return { x: (cellX(c.grid, i) + 0.5) * c.cellKm, y: (cellY(c.grid, i) + 0.5) * c.cellKm };
 }
 
 /** Plates-grid cell containing (x, y) km. */
@@ -100,7 +97,7 @@ export function plateCellAt(c: LandformCtx, x: number, y: number): number {
   const P = c.plates;
   const px = Math.min(P.n - 1, Math.max(0, Math.floor(x / P.cellKm)));
   const py = Math.min(P.n - 1, Math.max(0, Math.floor(y / P.cellKm)));
-  return py * P.n + px;
+  return cellIndex(c.platesGrid, px, py);
 }
 
 /** Aridity index P / PET (≈ 0 hyper-arid, < 0.2 arid, < 0.5 semi-arid, > 0.65 humid). */
@@ -130,7 +127,8 @@ export function localMax(c: LandformCtx, x: number, y: number, r: number): numbe
   for (let j = y0; j <= y1; j++) {
     for (let i = x0; i <= x1; i++) {
       if (((i + 0.5) * ck - x) ** 2 + ((j + 0.5) * ck - y) ** 2 > r * r) continue;
-      if (c.h[j * n + i] > c.h[best]) best = j * n + i;
+      const q = cellIndex(c.grid, i, j);
+      if (c.h[q] > c.h[best]) best = q;
     }
   }
   return best;
@@ -138,24 +136,21 @@ export function localMax(c: LandformCtx, x: number, y: number, r: number): numbe
 
 /** h[i] minus the mean of its 8 neighbours (negative in valleys/channels). Border cells: 0. */
 export function concavity(c: LandformCtx, i: number): number {
-  const n = c.n;
-  const x = i % n;
-  const y = (i - x) / n;
-  if (x === 0 || y === 0 || x === n - 1 || y === n - 1) return 0;
+  const { border, off8: o } = c.grid;
+  if (border[i]) return 0;
   const h = c.h;
-  const m = (h[i - 1] + h[i + 1] + h[i - n] + h[i + n] + h[i - n - 1] + h[i - n + 1] + h[i + n - 1] + h[i + n + 1]) / 8;
+  // Raster offsets, summed W E N S NW NE SW SE.
+  const m = (h[i + o[3]] + h[i + o[4]] + h[i + o[1]] + h[i + o[6]] + h[i + o[0]] + h[i + o[2]] + h[i + o[5]] + h[i + o[7]]) / 8;
   return h[i] - m;
 }
 
 /** True if cell i drains somewhere: it is base level, on the border, or has a strictly lower 8-neighbour. */
 export function drains(c: LandformCtx, i: number): boolean {
-  const n = c.n;
   if (c.fixed[i]) return true;
-  const x = i % n;
-  const y = (i - x) / n;
-  if (x === 0 || y === 0 || x === n - 1 || y === n - 1) return true;
+  const { border, off8Axial } = c.grid;
+  if (border[i]) return true;
   const z = c.h[i];
-  for (let k = 0; k < 8; k++) if (c.h[i + DY8[k] * n + DX8[k]] < z) return true;
+  for (let k = 0; k < 8; k++) if (c.h[i + off8Axial[k]] < z) return true;
   return false;
 }
 
@@ -182,7 +177,7 @@ export function stampRadial(
   let touched = 0;
   for (let j = y0; j <= y1; j++) {
     for (let i = x0; i <= x1; i++) {
-      const cell = j * n + i;
+      const cell = cellIndex(c.grid, i, j);
       let sum = 0;
       let cnt = 0;
       for (let sy = 0; sy < ss; sy++) {
@@ -233,7 +228,7 @@ export function forDisk(c: LandformCtx, x: number, y: number, r: number, cb: (ce
       const dx = (i + 0.5) * ck - x;
       const dy = (j + 0.5) * ck - y;
       const d = Math.hypot(dx, dy);
-      if (d <= r) cb(j * n + i, d, dx, dy);
+      if (d <= r) cb(cellIndex(c.grid, i, j), d, dx, dy);
     }
   }
 }
@@ -283,12 +278,13 @@ function sampleLattice(c: LandformCtx, lat: Float32Array, m: number, step: numbe
     const ty = fy - j0;
     const r0 = j0 * m;
     const r1 = r0 + m;
+    const row = cellIndex(c.grid, 0, y);
     for (let x = 0; x < n; x++) {
       const i0 = xi[x];
       const tx = xt[x];
       const a = lat[r0 + i0] + (lat[r0 + i0 + 1] - lat[r0 + i0]) * tx;
       const b = lat[r1 + i0] + (lat[r1 + i0 + 1] - lat[r1 + i0]) * tx;
-      out[y * n + x] = a + (b - a) * ty;
+      out[row + x] = a + (b - a) * ty;
     }
   }
   return out;
@@ -303,8 +299,9 @@ export function strataField(c: LandformCtx): Float32Array {
   if (b.n === n) return b.strata;
   const out = new Float32Array(n * n);
   for (let y = 0; y < n; y++) {
-    const by = Math.min(b.n - 1, Math.floor(((y + 0.5) * b.n) / n)) * b.n;
-    for (let x = 0; x < n; x++) out[y * n + x] = b.strata[by + Math.min(b.n - 1, Math.floor(((x + 0.5) * b.n) / n))];
+    const by = Math.min(b.n - 1, Math.floor(((y + 0.5) * b.n) / n));
+    const row = cellIndex(c.grid, 0, y);
+    for (let x = 0; x < n; x++) out[row + x] = b.strata[cellIndex(c.baseGrid, Math.min(b.n - 1, Math.floor(((x + 0.5) * b.n) / n)), by)];
   }
   return out;
 }
@@ -319,11 +316,13 @@ export function coarsen(c: LandformCtx, a: Float32Array): { g: Float32Array; m: 
   while (f > 1 && n % f !== 0) f--;
   if (f === 1) return { g: a.slice(), m: n, f };
   const m = n / f;
+  const cg = coarser(c.grid, f);
   const g = new Float32Array(m * m);
   const inv = 1 / (f * f);
   for (let y = 0; y < n; y++) {
-    const r = Math.floor(y / f) * m;
-    for (let x = 0; x < n; x++) g[r + Math.floor(x / f)] += a[y * n + x];
+    const r = cellIndex(cg, 0, Math.floor(y / f));
+    const row = cellIndex(c.grid, 0, y);
+    for (let x = 0; x < n; x++) g[r + Math.floor(x / f)] += a[row + x];
   }
   for (let i = 0; i < m * m; i++) g[i] *= inv;
   return { g, m, f };
@@ -334,10 +333,11 @@ export function refineCoarse(c: LandformCtx, g: Float32Array, m: number, f: numb
   if (f === 1) return g;
   // Coarse cell centres sit at (k + 0.5)·f macro cells; shift so lattice point 0 is at the corner.
   const step = f * c.cellKm;
+  const cg = coarser(c.grid, f);
   const lat = new Float32Array((m + 2) * (m + 2));
   for (let j = 0; j < m + 2; j++) {
     const sj = Math.min(m - 1, Math.max(0, j - 1));
-    for (let i = 0; i < m + 2; i++) lat[j * (m + 2) + i] = g[sj * m + Math.min(m - 1, Math.max(0, i - 1))];
+    for (let i = 0; i < m + 2; i++) lat[j * (m + 2) + i] = g[cellIndex(cg, Math.min(m - 1, Math.max(0, i - 1)), sj)];
   }
   // Lattice point (i, j) ↔ coarse centre (i − 1 + 0.5)·step = (i − 0.5)·step; sample at x + 0.5·step.
   const n = c.n;
@@ -346,6 +346,7 @@ export function refineCoarse(c: LandformCtx, g: Float32Array, m: number, f: numb
     const fy = ((y + 0.5) * c.cellKm) / step + 0.5;
     const j0 = Math.min(m, Math.floor(fy));
     const ty = fy - j0;
+    const row = cellIndex(c.grid, 0, y);
     for (let x = 0; x < n; x++) {
       const fx = ((x + 0.5) * c.cellKm) / step + 0.5;
       const i0 = Math.min(m, Math.floor(fx));
@@ -354,7 +355,7 @@ export function refineCoarse(c: LandformCtx, g: Float32Array, m: number, f: numb
       const r1 = r0 + m + 2;
       const a = lat[r0 + i0] + (lat[r0 + i0 + 1] - lat[r0 + i0]) * tx;
       const b = lat[r1 + i0] + (lat[r1 + i0 + 1] - lat[r1 + i0]) * tx;
-      out[y * n + x] = a + (b - a) * ty;
+      out[row + x] = a + (b - a) * ty;
     }
   }
   return out;
@@ -379,15 +380,14 @@ export function snapshot(c: LandformCtx): Snapshot {
  * Unchanged cells are left exactly as the earlier stages set them. Returns cells newly drowned.
  */
 export function settleFixed(c: LandformCtx, s: Snapshot): number {
-  const { n, h, fixed } = c;
-  const N = n * n;
+  const { grid: g, h, fixed } = c;
+  const { cells: N, border, off4, axialToRaster } = g;
+  // 4-neighbour k (axial order) of cell i, −1 off the map.
+  const nb4 = (i: number, k: number): number => (border[i] === 0 ? i + off4[k] : g.nbr(i, axialToRaster[k]));
   const pending: number[] = [];
   for (let i = 0; i < N; i++) {
     if (h[i] === s.h[i]) continue;
-    const x = i % n;
-    const y = (i - x) / n;
-    const border = x === 0 || y === 0 || x === n - 1 || y === n - 1;
-    if (s.fixed[i] && border && s.h[i] > 0) {
+    if (s.fixed[i] && border[i] && s.h[i] > 0) {
       fixed[i] = 1;
       continue;
     }
@@ -403,10 +403,13 @@ export function settleFixed(c: LandformCtx, s: Snapshot): number {
   for (const i of pending) isPending[i] = 1;
   const stack: number[] = [];
   for (const i of pending) {
-    const x = i % n;
-    if ((x > 0 && fixed[i - 1]) || (x < n - 1 && fixed[i + 1]) || (i >= n && fixed[i - n]) || (i < N - n && fixed[i + n])) {
-      isPending[i] = 2;
-      stack.push(i);
+    for (let k = 0; k < 4; k++) {
+      const j = nb4(i, k);
+      if (j >= 0 && fixed[j]) {
+        isPending[i] = 2;
+        stack.push(i);
+        break;
+      }
     }
   }
   let drowned = 0;
@@ -414,9 +417,9 @@ export function settleFixed(c: LandformCtx, s: Snapshot): number {
     const i = stack.pop()!;
     fixed[i] = 1;
     drowned++;
-    const x = i % n;
-    const nb = [x > 0 ? i - 1 : -1, x < n - 1 ? i + 1 : -1, i >= n ? i - n : -1, i < N - n ? i + n : -1];
-    for (const j of nb) {
+    // Order-free: the flood marks every pending cell connected to the sea, whatever the visit order.
+    for (let k = 0; k < 4; k++) {
+      const j = nb4(i, k);
       if (j >= 0 && isPending[j] === 1) {
         isPending[j] = 2;
         stack.push(j);
@@ -429,15 +432,17 @@ export function settleFixed(c: LandformCtx, s: Snapshot): number {
 
 /** Connected regions (4-neighbour) of `mask`, with cell count and centroid (km) per region. */
 export function regions(c: LandformCtx, mask: Uint8Array): { label: Int32Array; size: number[]; cx: number[]; cy: number[] } {
-  const { label, sizes } = components(mask, c.n);
+  const { label, sizes } = components(mask, c.grid);
   const cx = new Array<number>(sizes.length).fill(0);
   const cy = new Array<number>(sizes.length).fill(0);
-  for (let i = 0; i < label.length; i++) {
-    const l = label[i];
-    if (l < 0) continue;
-    const x = i % c.n;
-    cx[l] += (x + 0.5) * c.cellKm;
-    cy[l] += ((i - x) / c.n + 0.5) * c.cellKm;
+  for (let y = 0; y < c.n; y++) {
+    const row = cellIndex(c.grid, 0, y);
+    for (let x = 0; x < c.n; x++) {
+      const l = label[row + x];
+      if (l < 0) continue;
+      cx[l] += (x + 0.5) * c.cellKm;
+      cy[l] += (y + 0.5) * c.cellKm;
+    }
   }
   for (let l = 0; l < sizes.length; l++) {
     cx[l] /= sizes[l];

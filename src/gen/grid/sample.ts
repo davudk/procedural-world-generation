@@ -1,14 +1,17 @@
-/** Sampling of square row-major grids at world positions given as fractions of the world [0, 1). */
+/** Sampling of world grids at positions given as fractions of the world [0, 1) (flat). */
+import type { Grid } from './grid';
 
 /** Index of the cell containing (u, v), clamped to the grid. */
-export function cellAt(n: number, u: number, v: number): number {
+export function cellAt(g: Grid, u: number, v: number): number {
+  const n = g.n;
   const x = Math.min(n - 1, Math.max(0, Math.floor(u * n)));
   const y = Math.min(n - 1, Math.max(0, Math.floor(v * n)));
   return y * n + x;
 }
 
 /** Bilinear sample with cell-centred values and clamped edges. */
-export function bilinear(a: Float32Array, n: number, u: number, v: number): number {
+export function bilinear(a: Float32Array, g: Grid, u: number, v: number): number {
+  const n = g.n;
   const fx = Math.min(n - 1, Math.max(0, u * n - 0.5));
   const fy = Math.min(n - 1, Math.max(0, v * n - 0.5));
   const x0 = Math.floor(fx);

@@ -1,7 +1,9 @@
 import { BIOME, BIOMES, type BiomeId } from '../../shared/biomes';
 import type { Noise2 } from '../../shared/noise';
+import type { Grid } from '../grid/grid';
 import { smoothstep } from '../grid/ops';
-import { coarseFbm, gaussBlur } from './fields';
+import { gaussBlur } from '../grid/smooth';
+import { coarseFbm } from './fields';
 import { elaTemperature, LAPSE } from './tables';
 
 /** waterClass codes of the hydrology stage (mirrors WATER in stages/hydro.ts). */
@@ -26,8 +28,7 @@ const MOUTH_Q = 50;
 const MOUTH_KM = 15;
 
 export interface BiomeInput {
-  n: number;
-  cellKm: number;
+  grid: Grid;
   /** Macro DEM (m). */
   h: Float32Array;
   temp: Float32Array;
@@ -67,9 +68,13 @@ for (const b of [
  * aridity and perennial-snow rasters.
  */
 export function classifyBiomes(inp: BiomeInput): BiomeFields {
-  const { n, cellKm, h, temp, tAmp, precip, pSummer, pet, fog, coastKm, waterClass, discharge, elaShift, noise } = inp;
-  const N = n * n;
-  const cellM = cellKm * 1000;
+  const { grid, h, temp, tAmp, precip, pSummer, pet, fog, coastKm, waterClass, discharge, elaShift, noise } = inp;
+  const { cells: N, cellKm, cellM, off8, off4, border } = grid;
+  // Raster D8 slots of the four axial neighbours.
+  const oW = off8[3];
+  const oE = off8[4];
+  const oN = off8[1];
+  const oS = off8[6];
   const scale = Math.pow(cellM / SLOPE_REF_M, SLOPE_ROUGHNESS);
   const rockTan = Math.tan((38 * Math.PI) / 180) / scale;
   const mixTan = Math.tan((30 * Math.PI) / 180) / scale;
@@ -81,77 +86,83 @@ export function classifyBiomes(inp: BiomeInput): BiomeFields {
   const sea = new Uint8Array(N);
   for (let i = 0; i < N; i++) sea[i] = waterClass[i] === W_OCEAN ? 1 : 0;
   const seaShare = Float32Array.from(sea);
-  gaussBlur(seaShare, n, 8 / cellKm);
+  gaussBlur(seaShare, grid, 8 / cellKm);
   const mouth = new Float32Array(N);
-  for (let y = 1; y < n - 1; y++) {
-    for (let x = 1; x < n - 1; x++) {
-      const i = y * n + x;
-      if (sea[i] || discharge[i] < MOUTH_Q) continue;
-      if (sea[i - 1] || sea[i + 1] || sea[i - n] || sea[i + n]) mouth[i] = 1;
-    }
+  // Interior cells only: the map edge has no full neighbourhood.
+  for (let i = 0; i < N; i++) {
+    if (border[i] || sea[i] || discharge[i] < MOUTH_Q) continue;
+    if (sea[i + off4[0]] || sea[i + off4[1]] || sea[i + off4[2]] || sea[i + off4[3]]) mouth[i] = 1;
   }
   // Three box passes of radius ≈ σ reach ±3σ: the blurred mask is non-zero within ~MOUTH_KM.
-  gaussBlur(mouth, n, MOUTH_KM / 3 / cellKm);
+  gaussBlur(mouth, grid, MOUTH_KM / 3 / cellKm);
 
   // Jittered inputs (±1.5 °C, ±20 % P at 20–40 km) break isotherms into lobes; 4–8 km canopy mosaic.
-  const n1 = coarseFbm(noise, n, cellKm, 30, 3, 3.1);
-  const n2 = coarseFbm(noise, n, cellKm, 30, 3, 57.3);
-  const mosaic = coarseFbm(noise, n, cellKm, 8, 1, 91.9, 4);
+  const n1 = coarseFbm(noise, grid, 30, 3, 3.1);
+  const n2 = coarseFbm(noise, grid, 30, 3, 57.3);
+  const mosaic = coarseFbm(noise, grid, 8, 1, 91.9, 4);
 
   const raw = new Uint8Array(N);
   const canopy = new Float32Array(N);
   const aridity = new Float32Array(N);
   const snow = new Float32Array(N);
   const rockMix = new Float32Array(N);
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      const i = y * n + x;
-      const wc = waterClass[i];
-      // PET floor: Holdridge PET is 0 when every month freezes, which would make aridity jump to its
-      // clamp along that line (a visible seam in the colour LUT). Cold biome rules don't use aridity.
-      aridity[i] = Math.min(10, precip[i] / Math.max(PET_FLOOR_MM, pet[i]));
-      if (wc === W_OCEAN || wc === W_LAKE || wc === W_RIVER || wc === W_SALT_LAKE) {
-        raw[i] = BIOME.WATER;
-        continue;
-      }
-      const hp = Math.max(0, h[i]);
-      const T = temp[i] + 3 * n1[i];
-      const P = precip[i] * Math.exp(0.4 * n2[i]);
-      const A = tAmp[i];
-      const Tw = T + A;
-      const Tc = T - A;
-      const ps = pSummer[i];
-      const ai = P / Math.max(1, pet[i]);
-
-      const iceT = (Tw - 1) - (elaTemperature(P) + elaShift);
-      snow[i] = smoothstep(1, -1, iceT);
-
-      const xl = x > 0 ? i - 1 : i;
-      const xr = x < n - 1 ? i + 1 : i;
-      const yu = y > 0 ? i - n : i;
-      const yd = y < n - 1 ? i + n : i;
-      const gx = (h[xr] - h[xl]) / ((xr - xl) * cellM);
-      const gy = (h[yd] - h[yu]) / (((yd - yu) / n) * cellM);
-      const slope = Math.sqrt(gx * gx + gy * gy);
-      if (slope > mixTan) rockMix[i] = Math.min(1, (Math.atan(slope) - Math.atan(mixTan)) / (Math.atan(rockTan) - Math.atan(mixTan)));
-
-      let b: BiomeId;
-      if (iceT < 0) b = BIOME.ICE;
-      else if (slope > rockTan) b = BIOME.ROCK;
-      else if (coastKm[i] <= coastMaxKm && h[i] < coastH && slope < flatTan) {
-        const sheltered = seaShare[i] < 0.3 || mouth[i] > 1e-3;
-        // Cold-season SST proxy: sea-level temperature minus about half the land half-range.
-        const sstCold = T + LAPSE * hp - 0.5 * A;
-        if (sheltered && Tc >= 16 && sstCold >= 20) b = BIOME.MANGROVE;
-        else b = sheltered ? BIOME.SALT_MARSH : BIOME.BEACH;
-      } else if (wc === W_PLAYA) b = BIOME.SALT_FLAT;
-      else if (wc === W_WETLAND) b = wetlandType(T, ai, waterClass, n, x, y);
-      else b = zonal(T, Tw, Tc, A, P, ps, ai, hp, fog[i] === 1);
-      raw[i] = b;
+  for (let i = 0; i < N; i++) {
+    const wc = waterClass[i];
+    // PET floor: Holdridge PET is 0 when every month freezes, which would make aridity jump to its
+    // clamp along that line (a visible seam in the colour LUT). Cold biome rules don't use aridity.
+    aridity[i] = Math.min(10, precip[i] / Math.max(PET_FLOOR_MM, pet[i]));
+    if (wc === W_OCEAN || wc === W_LAKE || wc === W_RIVER || wc === W_SALT_LAKE) {
+      raw[i] = BIOME.WATER;
+      continue;
     }
+    const hp = Math.max(0, h[i]);
+    const T = temp[i] + 3 * n1[i];
+    const P = precip[i] * Math.exp(0.4 * n2[i]);
+    const A = tAmp[i];
+    const Tw = T + A;
+    const Tc = T - A;
+    const ps = pSummer[i];
+    const ai = P / Math.max(1, pet[i]);
+
+    const iceT = (Tw - 1) - (elaTemperature(P) + elaShift);
+    snow[i] = smoothstep(1, -1, iceT);
+
+    // Central differences, one-sided where a neighbour is missing.
+    let xl = i + oW;
+    let xr = i + oE;
+    let yu = i + oN;
+    let yd = i + oS;
+    if (border[i]) {
+      const nb = (k: number): number => {
+        const j = grid.nbr(i, k);
+        return j < 0 ? i : j;
+      };
+      xl = nb(3);
+      xr = nb(4);
+      yu = nb(1);
+      yd = nb(6);
+    }
+    const gx = (h[xr] - h[xl]) / (((xr !== i ? 1 : 0) + (xl !== i ? 1 : 0)) * cellM);
+    const gy = (h[yd] - h[yu]) / (((yd !== i ? 1 : 0) + (yu !== i ? 1 : 0)) * cellM);
+    const slope = Math.sqrt(gx * gx + gy * gy);
+    if (slope > mixTan) rockMix[i] = Math.min(1, (Math.atan(slope) - Math.atan(mixTan)) / (Math.atan(rockTan) - Math.atan(mixTan)));
+
+    let b: BiomeId;
+    if (iceT < 0) b = BIOME.ICE;
+    else if (slope > rockTan) b = BIOME.ROCK;
+    else if (coastKm[i] <= coastMaxKm && h[i] < coastH && slope < flatTan) {
+      const sheltered = seaShare[i] < 0.3 || mouth[i] > 1e-3;
+      // Cold-season SST proxy: sea-level temperature minus about half the land half-range.
+      const sstCold = T + LAPSE * hp - 0.5 * A;
+      if (sheltered && Tc >= 16 && sstCold >= 20) b = BIOME.MANGROVE;
+      else b = sheltered ? BIOME.SALT_MARSH : BIOME.BEACH;
+    } else if (wc === W_PLAYA) b = BIOME.SALT_FLAT;
+    else if (wc === W_WETLAND) b = wetlandType(T, ai, waterClass, grid, i);
+    else b = zonal(T, Tw, Tc, A, P, ps, ai, hp, fog[i] === 1);
+    raw[i] = b;
   }
 
-  const biome = majority(raw, n);
+  const biome = majority(raw, grid);
 
   for (let i = 0; i < N; i++) {
     const b = biome[i];
@@ -212,34 +223,33 @@ function monthsAbove10(T: number, A: number): number {
  * 3×3 majority filter over the zonal classes (research 03 §3.4): a cell switches to the most common
  * filterable class around it when that class outnumbers its own; ties keep the cell.
  */
-function majority(raw: Uint8Array, n: number): Uint8Array {
+function majority(raw: Uint8Array, g: Grid): Uint8Array {
+  const { cells: N, off8, border } = g;
   const out = raw.slice();
   const count = new Uint8Array(BIOMES.length);
-  for (let y = 1; y < n - 1; y++) {
-    for (let x = 1; x < n - 1; x++) {
-      const i = y * n + x;
-      const self = raw[i];
-      if (!FILTERABLE[self]) continue;
-      let best = self;
-      for (let dy = -n; dy <= n; dy += n) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const b = raw[i + dy + dx];
-          if (FILTERABLE[b]) count[b]++;
-        }
-      }
-      let bestN = count[self];
-      for (let dy = -n; dy <= n; dy += n) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const b = raw[i + dy + dx];
-          if (count[b] > bestN) {
-            best = b;
-            bestN = count[b];
-          }
-        }
-      }
-      for (let dy = -n; dy <= n; dy += n) for (let dx = -1; dx <= 1; dx++) count[raw[i + dy + dx]] = 0;
-      out[i] = best;
+  // Interior cells only: the map edge has no full 3×3 window.
+  for (let i = 0; i < N; i++) {
+    if (border[i]) continue;
+    const self = raw[i];
+    if (!FILTERABLE[self]) continue;
+    let best = self;
+    count[self]++;
+    for (let k = 0; k < 8; k++) {
+      const b = raw[i + off8[k]];
+      if (FILTERABLE[b]) count[b]++;
     }
+    // The cell itself never beats its own count, so only the neighbours can win (raster order).
+    let bestN = count[self];
+    for (let k = 0; k < 8; k++) {
+      const b = raw[i + off8[k]];
+      if (count[b] > bestN) {
+        best = b;
+        bestN = count[b];
+      }
+    }
+    count[self] = 0;
+    for (let k = 0; k < 8; k++) count[raw[i + off8[k]]] = 0;
+    out[i] = best;
   }
   return out;
 }
@@ -248,17 +258,14 @@ function majority(raw: Uint8Array, n: number): Uint8Array {
  * Wetland typing (research 02 §7): warm humid → swamp (forested); cold → fen where fed by groundwater
  * or open water (next to a lake or river), otherwise rain-fed bog; everything else → marsh.
  */
-function wetlandType(T: number, ai: number, wc: ArrayLike<number>, n: number, x: number, y: number): BiomeId {
+function wetlandType(T: number, ai: number, wc: ArrayLike<number>, g: Grid, i: number): BiomeId {
   if (T >= 18 && ai >= 1) return BIOME.SWAMP;
   if (T < 6) {
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        const c = wc[ny * n + nx];
-        if (c === W_LAKE || c === W_RIVER) return BIOME.FEN;
-      }
+    for (let k = 0; k < 8; k++) {
+      const j = g.border[i] === 0 ? i + g.off8[k] : g.nbr(i, k);
+      if (j < 0) continue;
+      const c = wc[j];
+      if (c === W_LAKE || c === W_RIVER) return BIOME.FEN;
     }
     return BIOME.BOG;
   }

@@ -40,7 +40,7 @@ export const biomeStage: StageDef = {
     const { n, cellKm } = cl;
     if (t.n !== n || hy.n !== n) throw new Error(`biome: grids differ (${t.n}, ${n}, ${hy.n})`);
     const f = classifyBiomes({
-      n, cellKm, h: t.h, temp: cl.temp, tAmp: cl.tAmp, precip: cl.precip, pSummer: cl.pSummer, pet: cl.pet, fog: cl.fog, coastKm: cl.coastKm,
+      grid: ctx.grid(n), h: t.h, temp: cl.temp, tAmp: cl.tAmp, precip: cl.precip, pSummer: cl.pSummer, pet: cl.pet, fog: cl.fog, coastKm: cl.coastKm,
       waterClass: hy.waterClass, discharge: hy.discharge,
       // glaciation 1 = the Ohmura relation as is; each unit moves the ELA by 2 °C (~300 m).
       elaShift: 2 * (ctx.num('glaciation') - 1),

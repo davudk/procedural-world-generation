@@ -1,5 +1,6 @@
 import type { Range } from '../../shared/config/types';
 import type { Rng } from '../../shared/rng';
+import type { Grid } from '../grid/grid';
 import type { BaseExtra } from '../stages/base';
 import type { ClimateExtra } from '../stages/climate';
 import type { PlatesExtra } from '../stages/plates';
@@ -24,6 +25,10 @@ export interface Feature {
  * that the stage exports as layers for rendering/biomes.
  */
 export interface LandformCtx {
+  grid: Grid;
+  /** Grids of the plates and base stage rasters (`plates.n`, `base.n` cells per edge). */
+  platesGrid: Grid;
+  baseGrid: Grid;
   n: number;
   cellKm: number;
   worldKm: number;

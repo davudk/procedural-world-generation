@@ -1,11 +1,8 @@
 import { Noise2 } from '../../../shared/noise';
+import { cellX, cellY, tryCellIndex } from '../../grid/grid';
 import type { LandformCtx } from '../types';
 import { COAST, type CoastInfo } from './classify';
-import { DiskSet, DX8, DY8, labelList, line4, poisson, shuffle } from './grid';
-
-// Local copies: hot loops should not read the imported bindings.
-const DX = Int8Array.from(DX8);
-const DY = Int8Array.from(DY8);
+import { DiskSet, labelList, line4, poisson, shuffle } from './grid';
 
 /** Share of eligible low sandy coast fronted by barrier islands at density 1 (Earth: ~10–15 % of all coasts). */
 const BARRIER_SHARE = 0.32;
@@ -18,6 +15,9 @@ const SPIT_SPACING_KM = 25;
 /** Tombolos per 1000 km of sandy and sheltered coast at density 1 (F16: rare). */
 const TOMBOLO_RATE = 0.4;
 const TOMBOLO_CAP = 3;
+
+/** Raster neighbour slots (side, diagonal below) for the west and east sides, in that order. */
+const SIDES = [[3, 5], [4, 7]] as const;
 
 export interface BarrierResult {
   islands: number;
@@ -37,8 +37,10 @@ export function placeBarriers(
   c: LandformCtx, info: CoastInfo, dist: Float32Array, nearest: Int32Array, edited: Uint8Array,
   beach: Uint8Array, marsh: Uint8Array, landCells: number,
 ): BarrierResult {
-  const { n, cellKm, h } = c;
-  const N = n * n;
+  const { grid: g, n, cellKm, h } = c;
+  const { cells: N, border, off8, off8Axial, axialToRaster } = g;
+  // Neighbour k of cell i in axial order (E W S N SE NE SW NW), −1 off the map.
+  const nb = (i: number, k: number): number => (border[i] === 0 ? i + off8Axial[k] : g.nbr(i, axialToRaster[k]));
   const { sea, cells, slot, cls, wave, shelf, landShare } = info;
   const rng = c.rng('coastal', 'barriers');
   const noise = new Noise2(rng.nextU32());
@@ -57,8 +59,8 @@ export function placeBarriers(
     if (cls[k] !== COAST.SANDY || wave[k] < 0.18 || wave[k] > 1.1) continue;
     // Mainland shores only (not islets), and not deep inside bays.
     if (shelf[k] < -Math.max(45, 10 * cellKm) || landShare[k] > 0.7 || landShare[k] < 0.3) continue;
-    const xk = (i % n) * cellKm;
-    const yk = Math.floor(i / n) * cellKm;
+    const xk = cellX(g, i) * cellKm;
+    const yk = cellY(g, i) * cellKm;
     seg[k] = noise.fbm(xk / 110, yk / 110, 2);
     eligible[k] = 1;
     eligVals.push(seg[k]);
@@ -74,8 +76,8 @@ export function placeBarriers(
   for (let k = 0; k < M; k++) {
     if (!eligible[k] || seg[k] <= thr) continue;
     const i = cells[k];
-    const xk = (i % n) * cellKm;
-    const yk = Math.floor(i / n) * cellKm;
+    const xk = cellX(g, i) * cellKm;
+    const yk = cellY(g, i) * cellKm;
     const dKm = 3.5 + 5.5 * (0.5 + 0.5 * noise.noise(xk / 60 + 17.3, yk / 60 - 4.1));
     offset[k] = Math.max(2, Math.round(dKm / cellKm));
   }
@@ -93,8 +95,8 @@ export function placeBarriers(
     const d = dist[j];
     if (Math.abs(d - off) <= 0.65) {
       if (h[j] < maxDepth) continue;
-      const xk = (j % n) * cellKm;
-      const yk = Math.floor(j / n) * cellKm;
+      const xk = cellX(g, j) * cellKm;
+      const yk = cellY(g, j) * cellKm;
       // Tidal inlets: gaps where a short-wavelength noise peaks.
       if (noise.noise(xk / inletKm + 91.7, yk / inletKm + 13.9) > 0.5) continue;
       bar[j] = 1;
@@ -109,14 +111,15 @@ export function placeBarriers(
   const nBar = barList.length;
   for (let t = 0; t < nBar; t++) {
     const a = barList[t];
-    const x = a % n;
-    const y = (a - x) / n;
-    if (y >= n - 1) continue;
-    for (const sx of [-1, 1]) {
-      if (x + sx < 0 || x + sx >= n) continue;
-      const side = a + sx;
-      const below = a + n;
-      if (!bar[below + sx] || bar[side] || bar[below]) continue;
+    // Raster neighbours: S, then W / SW and E / SE.
+    const ra = border[a] === 0;
+    const below = ra ? a + off8[6] : g.nbr(a, 6);
+    if (below < 0) continue;
+    for (const [kSide, kDiag] of SIDES) {
+      const side = ra ? a + off8[kSide] : g.nbr(a, kSide);
+      if (side < 0) continue;
+      const diag = ra ? a + off8[kDiag] : g.nbr(a, kDiag);
+      if (!bar[diag] || bar[side] || bar[below]) continue;
       const pick = sea[side] && !lagoon[side] ? side : below;
       if (sea[pick] && !bar[pick]) {
         bar[pick] = 1;
@@ -127,22 +130,19 @@ export function placeBarriers(
   const label = new Int32Array(N).fill(-1);
   // Drop specks: a barrier island is at least ~4 km long.
   const minBar = Math.max(2, Math.round(4 / cellKm));
-  const barSizes0 = labelList(barList, bar, n, label);
+  const barSizes0 = labelList(barList, bar, g, label);
   for (const j of barList) if (barSizes0[label[j]] < minBar) bar[j] = 0;
   barList = barList.filter((j) => bar[j] === 1);
   label.fill(-1);
-  const lagSizes = labelList(lagList, lagoon, n, label);
+  const lagSizes = labelList(lagList, lagoon, g, label);
   const fronted = new Uint8Array(lagSizes.length);
   for (const j of barList) {
     lagoon[j] = 0;
-    const x = j % n;
-    const y = (j - x) / n;
     for (let d = 0; d < 8; d++) {
-      const xx = x + DX[d];
-      const yy = y + DY[d];
-      if (xx < 0 || yy < 0 || xx >= n || yy >= n) continue;
-      const l = label[yy * n + xx];
-      if (l >= 0 && lagoon[yy * n + xx]) fronted[l] = 1;
+      const q = nb(j, d);
+      if (q < 0) continue;
+      const l = label[q];
+      if (l >= 0 && lagoon[q]) fronted[l] = 1;
     }
   }
   // Keep only lagoon water actually fronted by a barrier – drop strays.
@@ -155,26 +155,22 @@ export function placeBarriers(
     h[j] = Math.min(-0.5, Math.max(h[j], -4));
     edited[j] = 1;
     // Salt marsh / tidal flats on the landward shore of lagoons (F18).
-    const x = j % n;
-    const y = (j - x) / n;
     for (let d = 0; d < 8; d++) {
-      const xx = x + DX[d];
-      const yy = y + DY[d];
-      if (xx < 0 || yy < 0 || xx >= n || yy >= n) continue;
-      const q = yy * n + xx;
+      const q = nb(j, d);
+      if (q < 0) continue;
       if (!sea[q] && !bar[q] && h[q] > 0 && h[q] < 12) marsh[q] = 255;
     }
   }
   for (const j of barList) {
-    const xk = (j % n) * cellKm;
-    const yk = Math.floor(j / n) * cellKm;
+    const xk = cellX(g, j) * cellKm;
+    const yk = cellY(g, j) * cellKm;
     h[j] = 1.5 + 4 * (0.5 + 0.5 * noise.noise(xk / 3 + 5.5, yk / 3 - 7.7));
     edited[j] = 1;
     beach[j] = 255;
     marsh[j] = 0;
   }
   label.fill(-1);
-  const barSizes = labelList(barList, bar, n, label);
+  const barSizes = labelList(barList, bar, g, label);
   let islands = 0;
   {
     const K = barSizes.length;
@@ -184,8 +180,8 @@ export function placeBarriers(
     const by1 = new Int32Array(K).fill(-1);
     for (const j of barList) {
       const l = label[j];
-      const x = j % n;
-      const y = (j - x) / n;
+      const x = cellX(g, j);
+      const y = cellY(g, j);
       bx0[l] = Math.min(bx0[l], x);
       bx1[l] = Math.max(bx1[l], x);
       by0[l] = Math.min(by0[l], y);
@@ -229,8 +225,8 @@ export function placeBarriers(
     if (Math.abs(wt) < 0.25) continue;
     let dx = Math.sign(wt) * tx;
     let dy = Math.sign(wt) * ty;
-    const x0 = i % n;
-    const y0 = (i - x0) / n;
+    const x0 = cellX(g, i);
+    const y0 = cellY(g, i);
     const pxk = (x0 + 0.5) * cellKm;
     const pyk = (y0 + 0.5) * cellKm;
     if (!spitDisk.free(pxk, pyk)) continue;
@@ -249,12 +245,11 @@ export function placeBarriers(
         const sa = Math.sin(a);
         [dx, dy] = [dx * ca - dy * sa, dx * sa + dy * ca];
       }
-      const cx = Math.floor(fx);
-      const cy = Math.floor(fy);
-      if (cx < 1 || cy < 1 || cx >= n - 1 || cy >= n - 1) break;
-      const j = cy * n + cx;
+      // Stop at the map's edge row (interior cells only).
+      const j = tryCellIndex(g, Math.floor(fx), Math.floor(fy));
+      if (j < 0 || border[j]) break;
       if (j !== prev) {
-        const seg4 = line4(n, prev, j).slice(1);
+        const seg4 = line4(g, prev, j).slice(1);
         for (const q of seg4) {
           if (path.length === 0 && !sea[q]) continue;
           if (!sea[q] || edited[q] || h[q] < spitDepth || (path.length >= 2 && dist[q] < 1.9)) {
@@ -294,13 +289,9 @@ export function placeBarriers(
     let big = false;
     for (let t = 0; t < seen.length && !big; t++) {
       const q = seen[t];
-      const x = q % n;
-      const y = (q - x) / n;
       for (let d = 0; d < 8; d++) {
-        const xx = x + DX[d];
-        const yy = y + DY[d];
-        if (xx < 0 || yy < 0 || xx >= n || yy >= n) continue;
-        const j = yy * n + xx;
+        const j = nb(q, d);
+        if (j < 0) continue;
         if (!isLand(j) || comp[j] === -3) continue;
         if (comp[j] === -2 || seen.length >= maxIsland) {
           big = true;
@@ -323,14 +314,12 @@ export function placeBarriers(
     if (!isLand(j) || edited[j]) continue;
     const l = explore(j);
     if (l < 0) continue;
-    const x = j % n;
-    const y = (j - x) / n;
     for (let d = 0; d < 8; d++) {
+      // March s cells from j in direction d.
+      let q = j;
       for (let s = 1; s <= reach; s++) {
-        const xx = x + DX[d] * s;
-        const yy = y + DY[d] * s;
-        if (xx < 0 || yy < 0 || xx >= n || yy >= n) break;
-        const q = yy * n + xx;
+        q = nb(q, d);
+        if (q < 0) break;
         if (isLand(q)) {
           const k2 = info.classOf[q];
           if (s >= 2 && (k2 === COAST.SANDY || k2 === COAST.SHELTERED) && explore(q) === -2) {
@@ -349,7 +338,7 @@ export function placeBarriers(
   let tombolos = 0;
   for (const t of tCand) {
     if (tombolos >= wantT) break;
-    const path = line4(n, t.a, t.b).filter((q) => sea[q]);
+    const path = line4(g, t.a, t.b).filter((q) => sea[q]);
     if (path.some((q) => edited[q])) continue;
     for (const q of path) {
       h[q] = 1 + rng.float();
@@ -357,10 +346,10 @@ export function placeBarriers(
       beach[q] = 255;
     }
     tombolos++;
-    const ax = (t.a % n) + 0.5;
-    const ay = Math.floor(t.a / n) + 0.5;
-    const bx = (t.b % n) + 0.5;
-    const by = Math.floor(t.b / n) + 0.5;
+    const ax = cellX(g, t.a) + 0.5;
+    const ay = cellY(g, t.a) + 0.5;
+    const bx = cellX(g, t.b) + 0.5;
+    const by = cellY(g, t.b) + 0.5;
     c.features.push({
       type: 'tombolo', x: ((ax + bx) / 2) * cellKm * 1000, y: ((ay + by) / 2) * cellKm * 1000,
       size: Math.hypot(bx - ax, by - ay) * cellKm * 1000,

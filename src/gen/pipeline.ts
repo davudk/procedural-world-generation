@@ -2,6 +2,7 @@ import type { Range, Resolved, StageId, Value } from '../shared/config/types';
 import { hashValue, rngFor } from '../shared/hash';
 import { copyVectors, type FromWorker, type GenMode, type Layer, type Vectors } from '../shared/protocol';
 import type { Rng } from '../shared/rng';
+import { flatGrid, type Grid, type MapEdge } from './grid/grid';
 
 export interface StageOutput {
   layers: Layer[];
@@ -26,6 +27,12 @@ export interface StageCtx {
   /** Independent RNG stream for this stage (CONFIG.md §6). */
   rng(...keys: (string | number)[]): Rng;
   input(id: StageId): StageOutput;
+  /**
+   * The world grid with n cells per face edge (research 10 §2), built once per resolution and shared
+   * by every stage. The stage must read `worldSize`; its boundary (`outlets`, `hasOutside`) follows
+   * `mapEdge`, which a stage must also declare before it relies on the boundary.
+   */
+  grid(n: number): Grid;
   /** Yields to the event loop (so newer requests can cancel this one) and reports progress. */
   checkpoint(): Promise<void>;
 }
@@ -57,6 +64,8 @@ interface CacheEntry {
  */
 export class Pipeline {
   private readonly cache = new Map<StageId, CacheEntry>();
+  /** Grids are immutable, so they are kept across runs, keyed by size, world width and map edge. */
+  private readonly grids = new Map<string, Grid>();
 
   constructor(readonly stages: readonly StageDef[]) {
     const seen = new Set<StageId>();
@@ -142,6 +151,18 @@ export class Pipeline {
         const c = this.cache.get(id);
         if (!c) throw new Error(`input ${id} missing`);
         return c.out;
+      },
+      grid: (n) => {
+        const worldKm = get('worldSize') as number;
+        const edge = resolved.values.mapEdge as MapEdge;
+        const key = `${n}:${worldKm}:${edge}`;
+        let g = this.grids.get(key);
+        if (!g) {
+          if (this.grids.size >= 8) this.grids.clear();
+          g = flatGrid(n, worldKm / n, edge);
+          this.grids.set(key, g);
+        }
+        return g;
       },
       checkpoint: async () => {
         await yieldToEventLoop();

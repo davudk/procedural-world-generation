@@ -1,5 +1,6 @@
+import type { Grid } from '../grid/grid';
 import { MinHeap } from '../grid/heap';
-import { DIST, DX, DY, offsets, stepDown } from './grid8';
+import { DIST, stepDown } from './grid8';
 
 export interface BreachResult {
   /** Closed depressions found (flat minima merged). */
@@ -20,7 +21,7 @@ export interface BreachResult {
  */
 export function breachShallow(
   h: Float32Array,
-  n: number,
+  g: Grid,
   fixed: Uint8Array,
   maxDepth: number,
   maxCells: number,
@@ -28,25 +29,20 @@ export function breachShallow(
   areaScale?: Float32Array,
   minCells = 1.5,
 ): BreachResult {
-  const N = n * n;
-  const off = offsets(n);
+  const { cells: N, off8: off, border } = g;
   const stamp = new Int32Array(N).fill(-1);
   const parent = new Int32Array(N);
   const mark = new Int32Array(N).fill(-1);
   const heap = new MinHeap(64);
-  const inside = (c: number, k: number): boolean => {
-    const x = (c % n) + DX[k];
-    const y = Math.floor(c / n) + DY[k];
-    return x >= 0 && y >= 0 && x < n && y < n;
-  };
   const isMin = (i: number): boolean => {
-    const x = i % n;
-    const y = (i - x) / n;
-    if (x > 0 && y > 0 && x < n - 1 && y < n - 1) {
+    if (border[i] === 0) {
       for (let k = 0; k < 8; k++) if (h[i + off[k]] < h[i]) return false;
       return true;
     }
-    for (let k = 0; k < 8; k++) if (inside(i, k) && h[i + off[k]] < h[i]) return false;
+    for (let k = 0; k < 8; k++) {
+      const j = g.nbr(i, k);
+      if (j >= 0 && h[j] < h[i]) return false;
+    }
     return true;
   };
   let pits = 0;
@@ -74,9 +70,11 @@ export function breachShallow(
       }
       level = h[c];
       if (level - base >= dMax || ++flooded > cMax) break;
+      const b = border[c];
       for (let k = 0; k < 8; k++) {
-        if (!inside(c, k)) continue;
-        const j = c + off[k];
+        let j: number;
+        if (b === 0) j = c + off[k];
+        else if ((j = g.nbr(c, k)) < 0) continue;
         if (stamp[j] === p) continue;
         stamp[j] = p;
         parent[j] = c;
@@ -107,9 +105,11 @@ export function breachShallow(
     while (c >= 0 && !fixed[c]) {
       let best = -1;
       let bestS = 0;
+      const b = border[c];
       for (let k = 0; k < 8; k++) {
-        if (!inside(c, k)) continue;
-        const j = c + off[k];
+        let j: number;
+        if (b === 0) j = c + off[k];
+        else if ((j = g.nbr(c, k)) < 0) continue;
         if (mark[j] === p) continue;
         const s = (natural - h[j]) / DIST[k];
         if (s > bestS) {

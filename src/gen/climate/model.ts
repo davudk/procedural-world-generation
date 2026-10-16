@@ -1,8 +1,10 @@
 import type { Noise2 } from '../../shared/noise';
+import { cellIndex, coarser, type Grid } from '../grid/grid';
 import { chamferDistance, smoothstep } from '../grid/ops';
+import { downsample, gaussBlur, upsample, warp } from '../grid/smooth';
 import { advectMarine, advectMoisture, buildStencil } from './advect';
 import { sstAnomaly } from './currents';
-import { coarseFbm, downsample, expNeg, gaussBlur, upsample, warp } from './fields';
+import { coarseFbm, expNeg } from './fields';
 import { ampLand, ampOcean, capacity, circulation, HALF_YEAR, LAPSE, zonalT } from './tables';
 import { windField, type Wind, type WindOptions } from './wind';
 
@@ -85,6 +87,7 @@ export interface ClimateFields {
 
 /** Inputs of the seasonal sweeps, on the sweep grid. */
 interface SweepGrid {
+  grid: Grid;
   n: number;
   cellKm: number;
   sea: Uint8Array;
@@ -120,12 +123,12 @@ interface SweepOut {
 export async function computeClimate(
   h: Float32Array,
   fixed: Uint8Array,
-  n: number,
-  cellKm: number,
+  grid: Grid,
   p: ClimateParams,
   noise: Noise2,
   checkpoint: () => Promise<void>,
 ): Promise<ClimateFields> {
+  const { n, cellKm } = grid;
   const N = n * n;
   const stats: Record<string, number> = {};
   let tLap = performance.now();
@@ -138,17 +141,20 @@ export async function computeClimate(
   // 1. Full-resolution masks and latitude, then the sweep grid.
   const sea = new Uint8Array(N);
   for (let i = 0; i < N; i++) sea[i] = fixed[i] && h[i] <= 0 ? 1 : 0;
-  const lat = coarseFbm(noise, n, cellKm, 500, 3, 0.37);
+  const lat = coarseFbm(noise, grid, 500, 3, 0.37);
   for (let y = 0; y < n; y++) {
     const base = p.latNorth + ((p.latSouth - p.latNorth) * (y + 0.5)) / n;
     // fBm rarely leaves ±0.5, so ×2 gives the research's ±warp degrees.
-    for (let x = 0; x < n; x++) lat[y * n + x] = base + 2 * p.latitudeWarp * lat[y * n + x];
+    for (let x = 0; x < n; x++) {
+      const i = cellIndex(grid, x, y);
+      lat[i] = base + 2 * p.latitudeWarp * lat[i];
+    }
   }
-  const coastKm = chamferDistance(sea, n);
+  const coastKm = chamferDistance(sea, grid);
   for (let i = 0; i < N; i++) coastKm[i] *= cellKm;
   let f = 1;
   while (f * 2 * cellKm <= SWEEP_KM && n % (f * 2) === 0 && n / (f * 2) >= 64) f *= 2;
-  const g = sweepGrid(sea, h, lat, n, cellKm, f, p);
+  const g = sweepGrid(sea, h, lat, grid, f, p);
   stats.sweepGrid = g.n;
   lap('setup');
   await checkpoint();
@@ -158,8 +164,8 @@ export async function computeClimate(
   tLap = performance.now();
 
   // 3. Post-processing on the sweep grid (storm-scale spreading, seasonality), then full resolution.
-  gaussBlur(sw.ps, g.n, 8 / g.cellKm);
-  gaussBlur(sw.pw, g.n, 8 / g.cellKm);
+  gaussBlur(sw.ps, g.grid, 8 / g.cellKm);
+  gaussBlur(sw.pw, g.grid, 8 / g.cellKm);
   const pC = new Float32Array(g.n * g.n);
   const psC = new Float32Array(g.n * g.n);
   for (let i = 0; i < pC.length; i++) {
@@ -167,22 +173,22 @@ export async function computeClimate(
     pC[i] = tot / 2;
     psC[i] = tot > 1e-6 ? sw.ps[i] / tot : 0.5;
   }
-  gaussBlur(psC, g.n, MIX_SEASON_KM / g.cellKm);
+  gaussBlur(psC, g.grid, MIX_SEASON_KM / g.cellKm);
   for (let i = 0; i < g.anom.length; i++) if (g.sea[i]) sw.a[i] = g.anom[i];
-  gaussBlur(sw.m, g.n, MIX_MARINE_KM / g.cellKm);
-  gaussBlur(sw.a, g.n, MIX_MARINE_KM / g.cellKm);
+  gaussBlur(sw.m, g.grid, MIX_MARINE_KM / g.cellKm);
+  gaussBlur(sw.a, g.grid, MIX_MARINE_KM / g.cellKm);
   // fBm rarely leaves ±0.5, so ×2 gives ±WARP_KM.
-  const wx = coarseFbm(noise, g.n, g.cellKm, WARP_WAVE_KM, 2, 63.1);
-  const wy = coarseFbm(noise, g.n, g.cellKm, WARP_WAVE_KM, 2, 77.9);
+  const wx = coarseFbm(noise, g.grid, WARP_WAVE_KM, 2, 63.1);
+  const wy = coarseFbm(noise, g.grid, WARP_WAVE_KM, 2, 77.9);
   for (let i = 0; i < wx.length; i++) {
     wx[i] *= (2 * WARP_KM) / g.cellKm;
     wy[i] *= (2 * WARP_KM) / g.cellKm;
   }
   const up = (cIn: Float32Array, bend = false): Float32Array => {
-    const c = bend ? warp(cIn, g.n, wx, wy) : cIn;
+    const c = bend ? warp(cIn, g.grid, wx, wy) : cIn;
     if (f === 1) return c;
     const out = new Float32Array(N);
-    upsample(c, g.n, f, out);
+    upsample(c, g.grid, f, out);
     return out;
   };
   const precip = up(pC);
@@ -190,7 +196,7 @@ export async function computeClimate(
   const marine = up(sw.m, true);
   const sstAnom = up(sw.a, true);
   const fogF = up(sw.fog);
-  const tex = coarseFbm(noise, n, cellKm, 120, 3, 41.7);
+  const tex = coarseFbm(noise, grid, 120, 3, 41.7);
   const temp = new Float32Array(N);
   const tAmp = new Float32Array(N);
   const pet = new Float32Array(N);
@@ -212,18 +218,19 @@ export async function computeClimate(
   }
   const windDeg = new Float32Array(N);
   for (let y = 0; y < n; y++) {
-    const r = Math.floor(y / f) * g.n;
     for (let x = 0; x < n; x++) {
-      const c = r + Math.floor(x / f);
+      const c = cellIndex(g.grid, Math.floor(x / f), Math.floor(y / f));
       const d = (Math.atan2(sw.wx[c], -sw.wy[c]) * 180) / Math.PI;
-      windDeg[y * n + x] = d < 0 ? d + 360 : d;
+      windDeg[cellIndex(grid, x, y)] = d < 0 ? d + 360 : d;
     }
   }
   lap('post');
   return { sea, lat, temp, tAmp, precip, pSummer, pet, marine, coastKm, sstAnom, fog, windDeg, stats };
 }
 
-function sweepGrid(sea: Uint8Array, h: Float32Array, lat: Float32Array, n: number, cellKm: number, f: number, p: ClimateParams): SweepGrid {
+function sweepGrid(sea: Uint8Array, h: Float32Array, lat: Float32Array, grid: Grid, f: number, p: ClimateParams): SweepGrid {
+  const { n, cellKm } = grid;
+  const sg = coarser(grid, f);
   const m = n / f;
   const M = m * m;
   const seaF = new Float32Array(n * n);
@@ -232,15 +239,15 @@ function sweepGrid(sea: Uint8Array, h: Float32Array, lat: Float32Array, n: numbe
     seaF[i] = sea[i];
     land[i] = sea[i] ? 0 : Math.max(0, h[i]);
   }
-  const fr = f === 1 ? seaF : downsample(seaF, n, f);
+  const fr = f === 1 ? seaF : downsample(seaF, grid, f);
   const gs = new Uint8Array(M);
   for (let i = 0; i < M; i++) gs[i] = fr[i] >= 0.5 ? 1 : 0;
-  const gh = f === 1 ? land : downsample(land, n, f);
-  const glat = f === 1 ? lat : downsample(lat, n, f);
+  const gh = f === 1 ? land : downsample(land, grid, f);
+  const glat = f === 1 ? lat : downsample(lat, grid, f);
   const ck = cellKm * f;
   const hs = gh.slice();
-  gaussBlur(hs, m, 5 / ck);
-  const coastKm = chamferDistance(gs, m);
+  gaussBlur(hs, sg, 5 / ck);
+  const coastKm = chamferDistance(gs, sg);
   const tsl = new Float32Array(M);
   const ampL = new Float32Array(M);
   const ampO = new Float32Array(M);
@@ -251,13 +258,13 @@ function sweepGrid(sea: Uint8Array, h: Float32Array, lat: Float32Array, n: numbe
     ampL[i] = ampLand.at(glat[i]) * p.seasonality;
     ampO[i] = ampOcean.at(glat[i]) * p.seasonality;
   }
-  const anom = p.oceanCurrents ? sstAnomaly(gs, glat, m, ck, !p.outsideOcean) : new Float32Array(M);
-  return { n: m, cellKm: ck, sea: gs, lat: glat, h: gh, hs, coastKm, tsl, ampL, ampO, anom };
+  const anom = p.oceanCurrents ? sstAnomaly(gs, glat, sg, !p.outsideOcean) : new Float32Array(M);
+  return { grid: sg, n: m, cellKm: ck, sea: gs, lat: glat, h: gh, hs, coastKm, tsl, ampL, ampO, anom };
 }
 
 async function sweeps(g: SweepGrid, p: ClimateParams, noise: Noise2, stats: Record<string, number>, checkpoint: () => Promise<void>): Promise<SweepOut> {
-  const { n, cellKm, sea, lat, h, hs, coastKm, tsl, ampL, ampO, anom } = g;
-  const N = n * n;
+  const { grid, cellKm, sea, lat, h, hs, coastKm, tsl, ampL, ampO, anom } = g;
+  const N = grid.cells;
   // Hothouse worlds (flat gradients) also flatten the circulation contrast (research 03 §7.4).
   const sContrast = Math.min(1.2, Math.max(0.5, 0.25 + 0.75 * p.gradient));
   const p0 = 1200 * p.humidity;
@@ -288,10 +295,10 @@ async function sweeps(g: SweepGrid, p: ClimateParams, noise: Noise2, stats: Reco
     const summer = season === 0;
     const sgn = summer ? 1 : -1;
     const shift = (summer ? SUMMER_SHIFT : WINTER_SHIFT) * p.seasonality;
-    const wind = coarseWind(lat, n, cellKm, coarseFbm(noise, n, cellKm, 300, 2, summer ? 11.3 : 23.9), {
+    const wind = coarseWind(lat, grid, coarseFbm(noise, grid, 300, 2, summer ? 11.3 : 23.9), {
       shiftDeg: shift, noiseRad: (2 * p.windNoise * Math.PI) / 180, overrideDeg: p.windOverrideAngle, overrideStrength: p.windOverrideStrength,
     });
-    const st = buildStencil(wind, n, cellKm);
+    const st = buildStencil(wind, grid);
     for (let i = 0; i < N; i++) {
       out.wx[i] += wind.gx[i];
       out.wy[i] += wind.gy[i];
@@ -302,9 +309,7 @@ async function sweeps(g: SweepGrid, p: ClimateParams, noise: Noise2, stats: Reco
     // lines: air from aloft, at the sweep's first-guess values (set in the prep loop below).
     divLine.fill(0);
     for (const i of st.sources) {
-      const x = i % n;
-      const y = (i - x) / n;
-      if (x !== 0 && y !== 0 && x !== n - 1 && y !== n - 1) {
+      if (!grid.hasOutside || !grid.border[i]) {
         divLine[i] = 1;
         bm[i] = sea[i] ? 1 : expNeg(coastKm[i] / L_MARINE);
         continue;
@@ -364,22 +369,22 @@ async function sweeps(g: SweepGrid, p: ClimateParams, noise: Noise2, stats: Reco
  */
 function coarseWind(
   lat: Float32Array,
-  n: number,
-  cellKm: number,
+  grid: Grid,
   dirNoise: Float32Array,
   o: Omit<WindOptions, 'noise'> & { noiseRad: number },
 ): Wind {
+  const { n, cellKm } = grid;
   let f = 1;
   while (f * 2 * cellKm <= 8 && n % (f * 2) === 0 && n / (f * 2) >= 16) f *= 2;
-  const m = n / f;
-  const noise = f === 1 ? dirNoise : downsample(dirNoise, n, f);
+  const noise = f === 1 ? dirNoise : downsample(dirNoise, grid, f);
   for (let i = 0; i < noise.length; i++) noise[i] *= o.noiseRad;
-  const c = windField(f === 1 ? lat : downsample(lat, n, f), { shiftDeg: o.shiftDeg, noise, overrideDeg: o.overrideDeg, overrideStrength: o.overrideStrength });
+  const c = windField(f === 1 ? lat : downsample(lat, grid, f), { shiftDeg: o.shiftDeg, noise, overrideDeg: o.overrideDeg, overrideStrength: o.overrideStrength });
   if (f === 1) return c;
+  const cg = coarser(grid, f);
   const gx = new Float32Array(n * n);
   const gy = new Float32Array(n * n);
-  upsample(c.gx, m, f, gx);
-  upsample(c.gy, m, f, gy);
+  upsample(c.gx, cg, f, gx);
+  upsample(c.gy, cg, f, gy);
   return { gx, gy };
 }
 

@@ -114,6 +114,7 @@ export function countCrossings(g: RiverGraph, bin: number): number {
     return d1 * d2 < 0 && d3 * d4 < 0;
   };
   const seen = new Set<number>();
+  const nodes = g.n;
   let count = 0;
   for (const list of bins.values()) {
     for (let p = 0; p < list.length; p++) {
@@ -123,7 +124,7 @@ export function countCrossings(g: RiverGraph, bin: number): number {
         const di = g.down[i];
         const dj = g.down[j];
         if (i === dj || j === di || di === dj) continue;
-        const pk = Math.min(i, j) * g.n + Math.max(i, j);
+        const pk = Math.min(i, j) * nodes + Math.max(i, j);
         if (seen.has(pk)) continue;
         if (cross(g.x[i], g.y[i], g.x[di], g.y[di], g.x[j], g.y[j], g.x[dj], g.y[dj])) {
           seen.add(pk);

@@ -1,5 +1,6 @@
+import { cellIndex, coarser, cellX as colOf, cellY as rowOf, onFace } from '../grid/grid';
 import { chamferDistance } from '../grid/ops';
-import { blockMean, cellX, cellY, DX8, DY8, insideDistance, label, labelAngle, mergeTree, nearestWhere, resolveOwners, type GridSpec } from './grid';
+import { blockMean, cellAtM, cellX, cellY, insideDistance, label, labelAngle, mergeTree, nearestWhere, resolveOwners, type GridSpec } from './grid';
 import { gradAt } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
 
@@ -20,15 +21,14 @@ const STRAIT_SIDE_KM2 = 2000;
  */
 export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const R = S.reg;
-  const m = R.n;
-  const MM = m * m;
+  const MM = R.cells;
   const rKm = R.cellM / 1000;
   const rKm2 = rKm * rKm;
   const seaR = new Uint8Array(MM);
   for (let i = 0; i < MM; i++) seaR[i] = 1 - S.land[i];
 
   // ── Basins and straits ──
-  const t = mergeTree(S.dLand, seaR, m, false, 0.05);
+  const t = mergeTree(S.dLand, seaR, R, false, 0.05);
   const keep = new Uint8Array(t.count);
   for (let k = 0; k < t.count; k++) {
     const big = t.area[k] * rKm2 >= SEA_MIN_KM2 && t.peakV[k] * rKm >= SEA_MIN_DEPTH_KM;
@@ -44,9 +44,8 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
     basin[i] = b;
     if (b < 0) continue;
     bArea[b]++;
-    const x = i % m;
-    const y = (i - x) / m;
-    if (x === 0 || y === 0 || x === m - 1 || y === m - 1) edge[b] = 1;
+    // Touches the map edge (flat; research 10 §5.11 replaces this rule on a closed surface).
+    if (R.border[i]) edge[b] = 1;
   }
   const basins: number[] = [];
   for (let k = 0; k < t.count; k++) if (keep[k] && bArea[k] > 0) basins.push(k);
@@ -73,7 +72,7 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
     if (widthKm > STRAIT_MAX_KM || t.peakV[k] < 2 * t.colV[k] || t.peakV[k] * rKm < 10) continue;
     if (t.area[k] * rKm2 < STRAIT_SIDE_KM2 || t.area[p] * rKm2 < STRAIT_SIDE_KM2) continue;
     const c = t.col[k];
-    const [vx, vy] = gradAt(S.dLand, m, c);
+    const [vx, vy] = gradAt(S.dLand, R, c);
     const [x, y] = snapSea(I, S, cellX(R, c), cellY(R, c));
     straits.push({
       kind: 'strait', x, y, angle: labelAngle(-vy, vx), extentM: Math.max(3 * widthKm, 15) * 1000,
@@ -104,7 +103,7 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
 
 /** Nearest sea cell of the macro grid to a map position, as map metres. */
 function snapSea(I: RegistryInput, S: Shared, x: number, y: number): [number, number] {
-  const fc = nearestWhere(I.fine.n, x / I.fine.cellM, y / I.fine.cellM, 4 * S.f, (c) => I.sea[c] === 1);
+  const fc = nearestWhere(I.fine, x / I.fine.cellM, y / I.fine.cellM, 4 * S.f, (c) => I.sea[c] === 1);
   return fc >= 0 ? [cellX(I.fine, fc), cellY(I.fine, fc)] : [x, y];
 }
 
@@ -124,13 +123,13 @@ function embayments(
   I: RegistryInput, S: Shared, R: GridSpec, fac: number, radKm: number, minKm2: number, basin: Int32Array, basinArea: Float64Array,
   parent: Embayments | null,
 ): Embayments {
-  const m = R.n / fac;
-  const g: GridSpec = { n: m, cellM: R.cellM * fac };
+  const g = coarser(R, fac);
+  const MM = g.cells;
   const gKm = g.cellM / 1000;
-  const share = fac === 1 ? S.landShare : blockMean(S.landShare, R.n, fac);
-  const land = new Uint8Array(m * m);
-  for (let i = 0; i < m * m; i++) land[i] = share[i] >= 0.5 ? 1 : 0;
-  const dl = fac === 1 ? S.dLand : chamferDistance(land, m);
+  const share = fac === 1 ? S.landShare : blockMean(S.landShare, R, fac);
+  const land = new Uint8Array(MM);
+  for (let i = 0; i < MM; i++) land[i] = share[i] >= 0.5 ? 1 : 0;
+  const dl = fac === 1 ? S.dLand : chamferDistance(land, g);
   const rad = radKm / gKm;
   const DIRS = 16;
   const cosT = new Float64Array(DIRS);
@@ -139,18 +138,19 @@ function embayments(
     cosT[d] = Math.cos((2 * Math.PI * d) / DIRS);
     sinT[d] = Math.sin((2 * Math.PI * d) / DIRS);
   }
-  const emb = new Uint8Array(m * m);
-  for (let i = 0; i < m * m; i++) {
+  const emb = new Uint8Array(MM);
+  // Rays march straight lines in cells (planar; research 10 §5.11 marches great circles on a sphere).
+  for (let i = 0; i < MM; i++) {
     if (land[i] || dl[i] > rad) continue;
-    const x0 = (i % m) + 0.5;
-    const y0 = Math.floor(i / m) + 0.5;
+    const x0 = colOf(g, i) + 0.5;
+    const y0 = rowOf(g, i) + 0.5;
     let hits = 0;
     for (let d = 0; d < DIRS; d++) {
       for (let s = 1; s <= rad; s += 0.75) {
         const x = Math.floor(x0 + cosT[d] * s);
         const y = Math.floor(y0 + sinT[d] * s);
-        if (x < 0 || y < 0 || x >= m || y >= m) break;
-        if (land[y * m + x]) {
+        if (!onFace(g, x, y)) break;
+        if (land[cellIndex(g, x, y)]) {
           hits++;
           break;
         }
@@ -159,22 +159,19 @@ function embayments(
     }
     if (hits >= 11) emb[i] = 1;
   }
-  const comps = label(emb, m, false);
-  const inside = insideDistance(emb, m);
+  const comps = label(emb, g, false);
+  const inside = insideDistance(emb, g);
   const pole = new Int32Array(comps.count).fill(-1);
   const opens = new Uint8Array(comps.count);
-  for (let i = 0; i < m * m; i++) {
+  const { off4, border, axialToRaster } = g;
+  for (let i = 0; i < MM; i++) {
     const k = comps.label[i];
     if (k < 0) continue;
     if (pole[k] < 0 || inside[i] > inside[pole[k]]) pole[k] = i;
-    const x = i % m;
-    const y = (i - x) / m;
+    const b = border[i];
     for (let d = 0; d < 4; d++) {
-      const nx = x + DX8[d];
-      const ny = y + DY8[d];
-      if (nx < 0 || ny < 0 || nx >= m || ny >= m) continue;
-      const nc = ny * m + nx;
-      if (!land[nc] && !emb[nc]) opens[k] = 1;
+      const nc = b === 0 ? i + off4[d] : g.nbr(i, axialToRaster[d]);
+      if (nc >= 0 && !land[nc] && !emb[nc]) opens[k] = 1;
     }
   }
   const list: Candidate[] = [];
@@ -185,12 +182,10 @@ function embayments(
     const px = cellX(g, pole[k]);
     const py = cellY(g, pole[k]);
     // A gulf that is most of a named sea basin is that sea; a bay that is most of a gulf is that gulf.
-    const rc = Math.min(R.n - 1, Math.floor(py / R.cellM)) * R.n + Math.min(R.n - 1, Math.floor(px / R.cellM));
-    const b = basin[rc];
+    const b = basin[cellAtM(R, px, py)];
     if (b >= 0 && basinArea[b] * (R.cellM / 1000) ** 2 < 2.5 * areaKm2) continue;
     if (parent) {
-      const pc = Math.min(parent.g.n - 1, Math.floor(py / parent.g.cellM)) * parent.g.n + Math.min(parent.g.n - 1, Math.floor(px / parent.g.cellM));
-      const pk = parent.lab[pc];
+      const pk = parent.lab[cellAtM(parent.g, px, py)];
       if (pk >= 0 && parent.area[pk] * (parent.g.cellM / 1000) ** 2 < 2.5 * areaKm2) continue;
     }
     const [x, y] = snapSea(I, S, px, py);
@@ -205,14 +200,15 @@ function embayments(
 
 /** One fjord per connected trough of the glacial fjord mask; path from the head to the mouth. */
 function detectFjords(I: RegistryInput, out: Candidate[]): void {
-  const { n, cellM } = I.fine;
+  const fine = I.fine;
+  const { cells: N, cellM, off8Axial: off, border, axialToRaster } = fine;
   const fj = I.landforms.fjord;
-  const comps = label(fj, n, true);
+  const comps = label(fj, fine, true);
   if (comps.count === 0) return;
   const cellsOf: number[][] = Array.from({ length: comps.count }, () => []);
-  for (let i = 0; i < n * n; i++) if (comps.label[i] >= 0) cellsOf[comps.label[i]].push(i);
-  const dist = new Float32Array(n * n).fill(Infinity);
-  const prev = new Int32Array(n * n).fill(-1);
+  for (let i = 0; i < N; i++) if (comps.label[i] >= 0) cellsOf[comps.label[i]].push(i);
+  const dist = new Float32Array(N).fill(Infinity);
+  const prev = new Int32Array(N).fill(-1);
   const found: Candidate[] = [];
   let totalKm = 0;
   for (let k = 0; k < comps.count; k++) {
@@ -220,13 +216,10 @@ function detectFjords(I: RegistryInput, out: Candidate[]): void {
     if (cells.length < 3) continue;
     const queue: number[] = [];
     for (const c of cells) {
-      const x = c % n;
-      const y = (c - x) / n;
+      const b = border[c];
       for (let d = 0; d < 4; d++) {
-        const nx = x + DX8[d];
-        const ny = y + DY8[d];
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        const nc = ny * n + nx;
+        const nc = b === 0 ? c + off[d] : fine.nbr(c, axialToRaster[d]);
+        if (nc < 0) continue;
         if (I.sea[nc] && !fj[nc]) {
           dist[c] = 0;
           queue.push(c);
@@ -237,14 +230,10 @@ function detectFjords(I: RegistryInput, out: Candidate[]): void {
     if (queue.length === 0) continue;
     for (let qi = 0; qi < queue.length; qi++) {
       const c = queue[qi];
-      const x = c % n;
-      const y = (c - x) / n;
+      const b = border[c];
       for (let d = 0; d < 8; d++) {
-        const nx = x + DX8[d];
-        const ny = y + DY8[d];
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        const nc = ny * n + nx;
-        if (comps.label[nc] !== k) continue;
+        const nc = b === 0 ? c + off[d] : fine.nbr(c, axialToRaster[d]);
+        if (nc < 0 || comps.label[nc] !== k) continue;
         const nd = dist[c] + (d < 4 ? 1 : Math.SQRT2);
         if (nd < dist[nc] - 1e-6) {
           dist[nc] = nd;

@@ -1,5 +1,6 @@
 import { hashMix } from '../../shared/hash';
 import { RIVER } from '../../shared/protocol';
+import { tryCellIndex, cellIndex, cellX, cellY, type Grid } from '../grid/grid';
 import { smoothstep } from '../grid/ops';
 import type { GraphBuilder } from './graph';
 import { kinoshita, sinuosity, targetSinuosity, thetaForAmplitude, thetaForSinuosity, THETA_MAX } from './meander';
@@ -17,8 +18,7 @@ const RAPIDS_SLOPE = 0.01;
 const ROOM_MAX = 6;
 
 export interface GeometryInput {
-  n: number;
-  cellM: number;
+  grid: Grid;
   seed: number;
   /** Water surface used for routing (terrain, lakes at level). */
   S: Float32Array;
@@ -55,13 +55,13 @@ export interface CellChannel {
 
 /** Per channel cell: width, depth, smoothed slope, waterfall/rapids and climate flags. */
 export function channelCells(g: GeometryInput): CellChannel {
-  const { n, cellM, S, rcv, q, aridity, temp, jx, jy, net, donStart, donList, area } = g;
-  const N = n * n;
+  const { grid, S, rcv, q, aridity, temp, jx, jy, net, donStart, donList, area } = g;
+  const { cells: N, cellM } = grid;
   const { chan, strahler } = net;
   const raw = new Float32Array(N);
   const dist = (a: number, b: number): number => {
-    const dx = (b % n) - (a % n) + jx[b] - jx[a];
-    const dy = Math.floor(b / n) - Math.floor(a / n) + jy[b] - jy[a];
+    const dx = cellX(grid, b) - cellX(grid, a) + jx[b] - jx[a];
+    const dy = cellY(grid, b) - cellY(grid, a) + jy[b] - jy[a];
     return Math.hypot(dx, dy) * cellM;
   };
   for (let i = 0; i < N; i++) {
@@ -123,19 +123,20 @@ export function channelCells(g: GeometryInput): CellChannel {
  * reach (research 02 §4.2 "constrain to the floodplain").
  */
 export function meanderRoom(g: GeometryInput, cc: CellChannel): Float32Array {
-  const { n, cellM, S, h, rcv, fixed, lakeId, net, jx, jy } = g;
+  const { grid, S, h, rcv, fixed, lakeId, net, jx, jy } = g;
+  const { cells: N, cellM } = grid;
   const { chan, reachOfCell } = net;
-  const room = new Float32Array(n * n);
-  for (let i = 0; i < n * n; i++) {
+  const room = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
     if (!chan[i]) continue;
     const r = rcv[i];
-    const x = i % n;
-    const y = (i - x) / n;
+    const x = cellX(grid, i);
+    const y = cellY(grid, i);
     let dx = 1;
     let dy = 0;
     if (r !== i) {
-      dx = (r % n) - x + jx[r] - jx[i];
-      dy = Math.floor(r / n) - y + jy[r] - jy[i];
+      dx = cellX(grid, r) - x + jx[r] - jx[i];
+      dy = cellY(grid, r) - y + jy[r] - jy[i];
       const l = Math.hypot(dx, dy) || 1;
       dx /= l;
       dy /= l;
@@ -144,13 +145,11 @@ export function meanderRoom(g: GeometryInput, cc: CellChannel): Float32Array {
     let best = ROOM_MAX;
     for (const side of [-1, 1]) {
       for (let k = 1; k < best; k++) {
-        const sx = Math.round(x - side * k * dy);
-        const sy = Math.round(y + side * k * dx);
-        if (sx < 0 || sy < 0 || sx >= n || sy >= n) {
+        const j = tryCellIndex(grid, Math.round(x - side * k * dy), Math.round(y + side * k * dx));
+        if (j < 0) {
           best = Math.min(best, k - 0.5);
           break;
         }
-        const j = sy * n + sx;
         if (j === i) continue;
         if (fixed[j] || lakeId[j] >= 0) {
           best = Math.min(best, k - 1);
@@ -251,11 +250,12 @@ export interface RiverBuild {
  * minimum so zWater and zBed never increase downstream.
  */
 export function buildRivers(g: GeometryInput, cc: CellChannel, room: Float32Array, lakeCount: number, gb: GraphBuilder): RiverBuild {
-  const { n, cellM, S, h, fixed, lakeId, lakeLevel, rcv, q, area, jx, jy, net, spacing, sigmaMax, seed } = g;
+  const { grid, S, h, fixed, lakeId, lakeLevel, rcv, q, area, jx, jy, net, spacing, sigmaMax, seed } = g;
+  const { n, cellM } = grid;
   const { strahler } = net;
   const nr = net.start.length;
-  const posX = (c: number): number => ((c % n) + 0.5 + jx[c]) * cellM;
-  const posY = (c: number): number => (Math.floor(c / n) + 0.5 + jy[c]) * cellM;
+  const posX = (c: number): number => (cellX(grid, c) + 0.5 + jx[c]) * cellM;
+  const posY = (c: number): number => (cellY(grid, c) + 0.5 + jy[c]) * cellM;
   const firstNode = new Int32Array(nr).fill(-1);
   const outletNode = new Int32Array(lakeCount).fill(-1);
   const outletQ = new Float64Array(lakeCount).fill(-1);
@@ -263,7 +263,7 @@ export function buildRivers(g: GeometryInput, cc: CellChannel, room: Float32Arra
   const wetCell = (x: number, y: number): boolean => {
     const cx = Math.min(n - 1, Math.max(0, Math.floor(x / cellM)));
     const cy = Math.min(n - 1, Math.max(0, Math.floor(y / cellM)));
-    const c = cy * n + cx;
+    const c = cellIndex(grid, cx, cy);
     return fixed[c] === 1 || lakeId[c] >= 0;
   };
 

@@ -1,10 +1,7 @@
+import { cellX, cellY, forWindow } from '../../grid/grid';
 import type { LandformCtx } from '../types';
 import { COAST, type CoastInfo } from './classify';
-import { DiskSet, DX8, DY8, poisson, shuffle } from './grid';
-
-// Local copies: hot loops should not read the imported bindings.
-const DX = Int8Array.from(DX8);
-const DY = Int8Array.from(DY8);
+import { DiskSet, poisson, shuffle } from './grid';
 
 /** Rias per 1000 km of eligible (hilly, ice-free) coast at coastRoughness 1.25 and density 1. */
 const RIA_RATE = 1.2;
@@ -19,7 +16,13 @@ const RIA_SPACING_KM = 40;
  * ice nearby, or a deep trough offshore) are skipped: the glacial stage owns those.
  */
 export function placeRias(c: LandformCtx, info: CoastInfo, edited: Uint8Array): number {
-  const { n, cellKm, h, ice } = c;
+  const { grid: g, cellKm, h, ice } = c;
+  const { border, off8Axial, axialToRaster } = g;
+  // Interior neighbour k of cell i in axial order (E W S N SE NE SW NW), −1 off the map or on its edge row.
+  const inner = (i: number, k: number): number => {
+    const j = border[i] === 0 ? i + off8Axial[k] : g.nbr(i, axialToRaster[k]);
+    return j >= 0 && border[j] === 0 ? j : -1;
+  };
   const { sea, cells, cls, relief } = info;
   const rng = c.rng('coastal', 'rias');
   const ring = Math.max(1, Math.round(3 / cellKm));
@@ -31,27 +34,19 @@ export function placeRias(c: LandformCtx, info: CoastInfo, edited: Uint8Array): 
     if (Math.abs(c.climate.lat[i]) > 58) continue;
     eligibleKm += cellKm;
     if (h[i] > 30) continue;
-    const x = i % n;
-    const y = (i - x) / n;
     // Valley mouth: the surrounding land within ~3 km stands well above the cell; no ice, no trough.
     let sum = 0;
     let cnt = 0;
     let iceMax = 0;
     let deep = 0;
-    for (let dy = -ring - 1; dy <= ring + 1; dy++) {
-      for (let dx = -ring - 1; dx <= ring + 1; dx++) {
-        const xx = x + dx;
-        const yy = y + dy;
-        if (xx < 0 || yy < 0 || xx >= n || yy >= n) continue;
-        const j = yy * n + xx;
-        iceMax = Math.max(iceMax, ice[j]);
-        if (sea[j]) deep = Math.min(deep, h[j]);
-        else if (Math.max(Math.abs(dx), Math.abs(dy)) >= ring) {
-          sum += h[j];
-          cnt++;
-        }
+    forWindow(g, i, ring + 1, (j, dx, dy) => {
+      iceMax = Math.max(iceMax, ice[j]);
+      if (sea[j]) deep = Math.min(deep, h[j]);
+      else if (Math.max(Math.abs(dx), Math.abs(dy)) >= ring) {
+        sum += h[j];
+        cnt++;
       }
-    }
+    });
     if (iceMax > 0.02 || deep < -250 || cnt === 0) continue;
     const conc = sum / cnt - h[i];
     if (conc < 25) continue;
@@ -66,28 +61,23 @@ export function placeRias(c: LandformCtx, info: CoastInfo, edited: Uint8Array): 
   const pool = cand.slice(0, Math.max(want * 4, Math.ceil(cand.length / 2)));
   shuffle(rng, pool);
   const disk = new DiskSet(RIA_SPACING_KM);
-  const visited = new Uint8Array(n * n);
+  const visited = new Uint8Array(g.cells);
   let made = 0;
   const maxSteps = Math.max(3, Math.round(35 / cellKm));
   for (const { i } of pool) {
     if (made >= want) break;
-    const px = ((i % n) + 0.5) * cellKm;
-    const py = (Math.floor(i / n) + 0.5) * cellKm;
+    const px = (cellX(g, i) + 0.5) * cellKm;
+    const py = (cellY(g, i) + 0.5) * cellKm;
     if (!disk.free(px, py)) continue;
     const level = rng.range(25, 70);
     const path = [i];
     visited[i] = 1;
     let cur = i;
     while (path.length < maxSteps) {
-      const x = cur % n;
-      const y = (cur - x) / n;
       let best = -1;
       for (let d = 0; d < 8; d++) {
-        const xx = x + DX[d];
-        const yy = y + DY[d];
-        if (xx < 1 || yy < 1 || xx >= n - 1 || yy >= n - 1) continue;
-        const j = yy * n + xx;
-        if (sea[j] || visited[j] || c.fixed[j]) continue;
+        const j = inner(cur, d);
+        if (j < 0 || sea[j] || visited[j] || c.fixed[j]) continue;
         if (best < 0 || h[j] < h[best]) best = j;
       }
       if (best < 0 || h[best] >= level || h[best] < h[cur] - 2 || ice[best] > 0.02) break;
@@ -106,14 +96,9 @@ export function placeRias(c: LandformCtx, info: CoastInfo, edited: Uint8Array): 
     }
     // Widen: low side cells drown too where the same level puts them under water.
     for (const j of path) {
-      const x = j % n;
-      const y = (j - x) / n;
       for (let d = 0; d < 8; d++) {
-        const xx = x + DX[d];
-        const yy = y + DY[d];
-        if (xx < 1 || yy < 1 || xx >= n - 1 || yy >= n - 1) continue;
-        const q = yy * n + xx;
-        if (sea[q] || c.fixed[q] || h[q] <= 0) continue;
+        const q = inner(j, d);
+        if (q < 0 || sea[q] || c.fixed[q] || h[q] <= 0) continue;
         if (h[q] - level <= -1) {
           h[q] = h[q] - level;
           edited[q] = 1;
