@@ -160,7 +160,7 @@ export const PARAMS: readonly ParamDef[] = [
     deps: [], auto: (c) => c.bias('seaLevelRise'),
   }),
   choice({
-    id: 'mapEdge', label: 'Beyond the map', level: 1, section: 'structure', stage: 'base',
+    id: 'mapEdge', label: 'Beyond the map', level: 1, section: 'structure', stage: 'plates',
     help: 'Ocean keeps everything inside the map; continent lets rivers drain off-map and dry air arrive.',
     options: [
       { value: 'ocean', label: 'Ocean' },
@@ -187,14 +187,14 @@ export const PARAMS: readonly ParamDef[] = [
     },
   }),
   spread({
-    id: 'rangeLength', label: 'Range length', level: 2, section: 'mountains', stage: 'stamps',
+    id: 'rangeLength', label: 'Range length', level: 2, section: 'mountains', stage: 'base',
     help: 'Length of collision ranges. Grows with plate size, since boundaries are longer.',
     min: 20, max: 4000, step: 10, unit: 'km', log: true, integer: true,
     deps: ['meanPlateDiameter'],
     auto: (c) => r(Math.round(0.55 * c.num('meanPlateDiameter')), Math.round(1.2 * c.num('meanPlateDiameter'))),
   }),
   spread({
-    id: 'rangeWidth', label: 'Range width', level: 2, section: 'mountains', stage: 'stamps',
+    id: 'rangeWidth', label: 'Range width', level: 2, section: 'mountains', stage: 'base',
     help: 'Width of the uplifted belt across a range.',
     min: 10, max: 800, step: 5, unit: 'km', log: true, integer: true,
     deps: ['rangeLength', 'tectonicActivity'],
@@ -204,7 +204,7 @@ export const PARAMS: readonly ParamDef[] = [
     },
   }),
   spread({
-    id: 'peakHeight', label: 'Peak height', level: 2, section: 'mountains', stage: 'lem',
+    id: 'peakHeight', label: 'Peak height', level: 2, section: 'mountains', stage: 'base',
     help: 'Spread of the highest summits of each range. Drives uplift in the erosion model.',
     min: 200, max: 9000, step: 50, unit: 'm', integer: true,
     deps: ['tectonicActivity', 'geologicAge', 'worldSize'],
@@ -217,7 +217,7 @@ export const PARAMS: readonly ParamDef[] = [
     },
   }),
   num({
-    id: 'plateauChance', label: 'Plateau chance', level: 2, section: 'mountains', stage: 'stamps',
+    id: 'plateauChance', label: 'Plateau chance', level: 2, section: 'mountains', stage: 'base',
     help: 'Chance that a continental collision builds a high plateau behind it.',
     min: 0, max: 1, step: 0.01,
     deps: ['tectonicActivity', 'worldSize', 'peakHeight'],
@@ -396,7 +396,7 @@ export const PARAMS: readonly ParamDef[] = [
 
   // ── L3 Advanced ─────────────────────────────────────────────────────────────────────────
   choice({
-    id: 'lemGrid', label: 'Erosion grid', level: 3, section: 'advanced', stage: 'lem',
+    id: 'lemGrid', label: 'Erosion grid', level: 3, section: 'advanced', stage: 'base',
     help: 'Resolution of the landscape-evolution model.',
     options: [
       { value: '256', label: '256²' },
@@ -407,7 +407,7 @@ export const PARAMS: readonly ParamDef[] = [
     auto: (c) => (c.str('quality') === 'fast' ? '256' : c.str('quality') === 'high' && c.num('worldSize') > 2048 ? '1024' : '512'),
   }),
   choice({
-    id: 'macroGrid', label: 'Macro grid', level: 3, section: 'advanced', stage: 'base',
+    id: 'macroGrid', label: 'Macro grid', level: 3, section: 'advanced', stage: 'refine',
     help: 'Resolution of hydrology, climate and biomes.',
     options: [
       { value: '512', label: '512²' },

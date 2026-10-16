@@ -69,4 +69,20 @@ export class Noise2 {
     }
     return sum / norm;
   }
+
+  /** Ridged multifractal-style noise in [0, 1]: sharp crests where the base noise crosses zero. */
+  ridged(x: number, y: number, octaves = 4, lacunarity = 2.0, gain = 0.5): number {
+    let sum = 0;
+    let amp = 1;
+    let norm = 0;
+    let f = 1;
+    for (let o = 0; o < octaves; o++) {
+      const r = 1 - Math.abs(this.noise(x * f + o * 7.31, y * f + o * 13.7));
+      sum += amp * r * r;
+      norm += amp;
+      amp *= gain;
+      f *= lacunarity;
+    }
+    return sum / norm;
+  }
 }

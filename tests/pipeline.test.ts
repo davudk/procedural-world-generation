@@ -22,13 +22,16 @@ const ran = (events: FromWorker[]): string[] =>
 describe('pipeline caching', () => {
   it('re-runs only stages whose read parameters or inputs changed', async () => {
     const p = new Pipeline(STAGES);
-    expect(ran(await run(p, spec()))).toEqual(['plates', 'base']);
+    const ALL = ['plates', 'base', 'stamps', 'lem', 'refine'];
+    expect(ran(await run(p, spec()))).toEqual(ALL);
     expect(ran(await run(p, spec()))).toEqual([]);
     // continentalShare is read by plates, so both stages re-run; coastRoughness only by base.
-    expect(ran(await run(p, spec({ continentalShare: 0.6 })))).toEqual(['plates', 'base']);
-    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4 })))).toEqual(['base']);
+    expect(ran(await run(p, spec({ continentalShare: 0.6 })))).toEqual(ALL);
+    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4 })))).toEqual(ALL.slice(1));
+    // Sea-level rise only affects the last stage.
+    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50 })))).toEqual(['refine']);
     // A parameter no stage reads yet regenerates nothing.
-    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, humidity: 2 })))).toEqual([]);
+    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50, humidity: 2 })))).toEqual([]);
   });
 
   it('rejects undeclared parameter reads and out-of-order inputs', async () => {
@@ -65,10 +68,37 @@ describe('determinism', () => {
     for (const landFraction of [0.15, 0.4, 0.65]) {
       const p = new Pipeline(STAGES);
       const events = await run(p, spec({ landFraction }));
-      const base = events.find((e) => e.type === 'stage-done' && e.stage === 'base');
-      if (base?.type !== 'stage-done') throw new Error('no base stage');
+      const base = events.find((e) => e.type === 'stage-done' && e.stage === 'refine');
+      if (base?.type !== 'stage-done') throw new Error('no refine stage');
       expect(Math.abs(base.stats.landFraction - landFraction)).toBeLessThan(0.02);
       expect(base.outcomes.continentCount).toBeGreaterThanOrEqual(1);
     }
   });
+});
+
+describe('M1 tectonics and erosion', () => {
+  it('meets the continent and mountain-range targets in most worlds', async () => {
+    let continentsMet = 0;
+    let rangesMet = 0;
+    const seeds = 8;
+    for (let seed = 1; seed <= seeds; seed++) {
+      const r = resolve(spec({}, seed));
+      const out: Record<string, number> = {};
+      await new Pipeline(STAGES).run(r, 'preview', 1, (m) => {
+        if (m.type === 'stage-done') Object.assign(out, m.outcomes);
+      }, () => false);
+      if (out.continentCount === r.drawn.continentCount) continentsMet++;
+      if (Math.abs(out.mountainRangeCount - r.drawn.mountainRangeCount) <= 1) rangesMet++;
+    }
+    expect(continentsMet / seeds).toBeGreaterThanOrEqual(0.75);
+    expect(rangesMet / seeds).toBeGreaterThanOrEqual(0.75);
+  }, 60_000);
+
+  it('erodes mountains toward the requested peak heights', async () => {
+    const events = await run(new Pipeline(STAGES), spec({ peakHeight: [3000, 4000] }, 3));
+    const refine = events.find((e) => e.type === 'stage-done' && e.stage === 'refine');
+    if (refine?.type !== 'stage-done') throw new Error('no refine stage');
+    expect(refine.stats.highestPeakM).toBeGreaterThan(2000);
+    expect(refine.stats.highestPeakM).toBeLessThan(7000);
+  }, 30_000);
 });

@@ -27,6 +27,8 @@ let selected = readStored(LAYER_KEY) ?? 'elevation';
 let fittedFor = -1;
 let buildTimer = 0;
 const stageEls = new Map<StageId, HTMLElement>();
+/** Realised 🎯 targets of the current run; later stages refine earlier values. */
+let outcomes: Record<string, number> = {};
 
 const cam = new Camera();
 const view = new RasterView(canvas);
@@ -84,6 +86,7 @@ function regenerate(): void {
 function startGen(mode: GenMode): void {
   if (mode === 'build') clearTimeout(buildTimer);
   for (const el of stageEls.values()) el.className = 'stage';
+  outcomes = {};
   gen.generate(resolve(spec), mode);
 }
 
@@ -100,7 +103,8 @@ function onGenEvent(msg: FromWorker): void {
         .map(([k, v]) => `${k}: ${fmtNum(v)}`)
         .join('\n');
       for (const l of msg.layers) layers.set(l.id, l);
-      panel.setOutcomes(msg.outcomes);
+      outcomes = { ...outcomes, ...msg.outcomes };
+      panel.setOutcomes(outcomes);
       refreshLayerList();
       showSelected();
       break;

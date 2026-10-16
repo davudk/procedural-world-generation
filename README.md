@@ -10,10 +10,13 @@ A configurable procedural world generator in the browser. It builds a finite reg
 
 The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 
-**Status: milestone M0 (scaffold).** It includes:
-- the hierarchical config system;
-- the staged generation pipeline;
-- placeholder plate and elevation stages;
+**Status: milestone M1 (macro terrain).** It includes:
+- the hierarchical config system and the staged generation pipeline;
+- tectonic plates with motion and boundary classes;
+- continents grown to a target count;
+- uplift and erodibility maps;
+- volcanoes, hotspot chains and old craters;
+- a stream-power erosion model that carves dendritic mountain ranges;
 - a 2D raster debug viewer.
 
 The 3D renderer arrives in M2. See [docs/PLAN.md](docs/PLAN.md) for the full plan.

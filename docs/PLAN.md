@@ -561,3 +561,32 @@ Each research note lists its sources with URLs. The core references are:
 | Base elevation, 1024² | ~340 ms |
 
 **Known gap:** the 🎯 continent target is reported but not yet steered. The placeholder base stage can realise 1 continent where 3–5 were requested. M1 adds best-of-N steering.
+
+### M1 — Macro terrain (2026-10-16)
+
+**What landed:**
+- **S1 Plates:** noise-weighted plate growth, rigid motion, boundary classification (collision, subduction, island arc, rift, ridge, transform), boundary segments, and a distance field with nearest-boundary propagation.
+- **S2 Base:** the warped continental signed distance gives the coastline. Shelf, slope, rise and abyss profiles; trenches, ridges and rifts; uplift `U` per segment calibrated from the peak-height spread; erodibility `K` with provinces, cratons, hard intrusions and strata.
+- **S3 Stamps:** hotspot chains, arc volcanoes and old craters.
+- **S4 Erosion:** the Braun & Willett solver at 512².
+- **S5 Refine:** bicubic upsample to 1024², 30 more erosion iterations, then the post-erosion sea-level rise.
+
+**Decisions made while building:**
+- **Continents are grown independently of plates.** Each continent is a separate noisy, anisotropic Dijkstra region with a ~100 km gap enforced by coarse ownership blocks, so the 🎯 continent count is met directly (11 of 12 test seeds). A continent can straddle plates, so collisions inside it raise fold belts.
+- **Best-of-N plate motions:** 8 candidates per world in build mode, 3 in preview, scored against the mountain-range and rift targets.
+- **Erosion calibration:** `RELIEF_CALIBRATION = 1.2`. A steady-state strip measures 1.25× the analytic relief with the default diffusion and talus.
+- **Quiet zones:** background hill uplift is patchy, so about a third of the land stays as low plains (PLAN §4).
+- **Smoothing:** the uplift map is blurred about 10 km so ranges taper at segment ends. The deep ocean is blurred about 18 km so per-segment ridge profiles don't leave facets.
+- **Bug found:** `distanceField` must keep its distances in float64. Comparing them against float32-rounded stored values re-queued cells forever.
+
+**Timings (dev build, Apple Silicon):**
+
+| Mode | Plates | Base | Volcanoes & craters | Erosion | Refine | Total |
+|---|---|---|---|---|---|---|
+| Build, default world | ~50 ms | ~280 ms | ~30 ms | ~2.4 s (512², 90 iterations) | ~2.6 s (1024², 27 iterations) | ~5.4 s |
+| Preview | | | | | | ~0.55 s |
+
+**Known gaps:**
+- Faint straight edges remain on continental shelves near some plate boundaries (trench profiles inside the unblurred shelf band).
+- Fresh volcanoes, calderas and fjords arrive in M6.
+- Rainfall-weighted erosion arrives with the climate pre-pass (P2).
