@@ -1,6 +1,7 @@
 import type { Layer, LayerKind } from '../../shared/protocol';
 import { compileProgram, uniforms } from '../gl/util';
 import { COLORMAPS_GLSL } from '../glsl/colormaps';
+import { DETAIL_GLSL, type DetailUniforms } from '../glsl/detail';
 import { waterSurface } from '../heightField';
 import { BIOME } from '../../shared/biomes';
 import { buildBiomeLut, buildBiomePalette, LUT_SIZE, type Palette } from './biomeLut';
@@ -60,8 +61,10 @@ layout(location = 1) in vec4 a_node;      // rel x, rel y, size, level
 layout(location = 2) in vec2 a_morph;     // morph start, end (m)
 uniform mat4 u_viewProj;
 uniform float u_exag;
+uniform float u_pxScale;  // metres per pixel per metre of distance: 2·tan(fovY/2)/viewH
 ${HEIGHT_GLSL}
-out vec3 v_world;     // absolute world xy, raw elevation (m)
+${DETAIL_GLSL}
+out vec3 v_world;     // absolute world xy (z unused: the FS recomputes the height per pixel)
 out float v_dist;
 void main() {
   float size = a_node.z;
@@ -73,9 +76,13 @@ void main() {
   vec2 g = a_grid - fract(a_grid * 0.5) * 2.0 * k;
   vec2 rel = a_node.xy + g / ${GRID}.0 * size;
   vec2 w = rel + u_origin.xy;
-  float z = surfaceHeight(w) * u_exag;     // water lid: sea at 0, lakes at their level
+  // Geometry can't hold wavelengths under ~2 vertex spacings: the footprint is at least the spacing,
+  // and grows with the morph factor so detail octaves fade together with vertex snapping.
+  float spacing = size / ${GRID}.0;
+  float foot = max(d0 * u_pxScale, spacing * (1.0 + k));
+  float z = terrainSurface(w, foot) * u_exag;   // water lid: sea at 0, lakes at their level
   vec3 pos = vec3(rel, z - u_origin.z);
-  v_world = vec3(w, rawHeight(w));
+  v_world = vec3(w, 0.0);
   v_dist = length(pos);
   gl_Position = u_viewProj * vec4(pos, 1.0);
 }`;
@@ -102,12 +109,16 @@ uniform sampler2D u_lut;     // biome colour LUT over (T, aridity), and its dry-
 uniform sampler2D u_lutDry;
 uniform sampler2D u_biomePal; // 32×1 biome colours (biome map mode)
 uniform int u_hasSurface;
+uniform sampler2D u_sunVis;  // horizon pass: r = sun visibility
+uniform sampler2D u_ao;      // horizon pass: r/g = ambient occlusion in g
+uniform int u_hasLight;
 uniform int u_palette;       // 0 biome LUT (satellite / stylised), 1 hypsometric
 uniform sampler2D u_layer;   // optional draped layer
 uniform ivec2 u_layerSize;
 uniform int u_layerMode;     // 0 realistic, 1 categorical, 2 scalar, 3 biome palette
 uniform float u_layerMin, u_layerMax;
 ${HEIGHT_GLSL}
+${DETAIL_GLSL}
 ${COLORMAPS_GLSL}
 out vec4 o;
 
@@ -133,7 +144,7 @@ float fbm3(vec2 p) { return 0.5 * vnoise(p) + 0.3 * vnoise(p * 2.03 + 7.1) + 0.2
 
 // Biome colour from climate (research 03 §3.4, §5.3): LUT over jittered (T, aridity), dry-summer
 // blend, colour variation at three scales, canopy, then overrides (sand, marsh, rock, snow).
-vec3 landColor(vec2 w, float h, vec3 n, float pxFoot) {
+vec3 landColor(vec2 w, float h, vec3 n, float pxFoot, vec2 grad) {
   vec2 uv = vec2(w.x, u_size - w.y) / u_size;
   vec4 cl = texture(u_climate, uv);
   vec4 cv = texture(u_cover, uv);
@@ -148,14 +159,14 @@ vec3 landColor(vec2 w, float h, vec3 n, float pxFoot) {
   c *= 1.0 - 0.1 * cl.a;                                         // dense canopy reads darker
   c = mix(c, vec3(0.86, 0.80, 0.66), smoothstep(0.15, 0.7, cv.b) * 0.9);   // beach / dunes / salt
   c = mix(c, vec3(0.24, 0.32, 0.22), smoothstep(0.15, 0.8, cv.a) * 0.5);   // marsh / bog / mangrove
-  float slope = length(gradAt(w));
+  float slope = length(grad);
   float rock = max(smoothstep(0.2, 0.75, cv.g), smoothstep(0.35, 0.75, slope));
   vec3 rockCol = vec3(0.44, 0.42, 0.40) * (0.85 + 0.3 * fbm3(w / 6000.0));
   c = mix(c, rockCol, rock * 0.85);
   // Snow lingers on poleward (north-facing) and gentle slopes; elevation noise breaks the snowline.
-  float snow = cv.r + 0.15 * n.y + 0.35 * (fbm3(w / 7000.0) - 0.5) + 0.15 * (vnoise(w / 1800.0) - 0.5) * fine
+  float snow = 0.85 * cv.r + 0.15 * n.y + 0.35 * (fbm3(w / 7000.0) - 0.5) + 0.15 * (vnoise(w / 1800.0) - 0.5) * fine
     - 0.3 * smoothstep(0.6, 1.2, slope);
-  c = mix(c, vec3(0.93, 0.95, 0.98), smoothstep(0.3, 0.75, snow) * 0.92);
+  c = mix(c, vec3(0.90, 0.92, 0.96), smoothstep(0.35, 0.95, snow) * 0.85);
   return c;
 }
 
@@ -172,34 +183,64 @@ float layerAt(vec2 w, bool nearest) {
 void main() {
   vec2 w = v_world.xy;
   // Per-pixel height: the vertex-interpolated value shows coarse LOD triangles in water colour.
-  float h = rawHeight(w);
+  float pxFoot0 = length(fwidth(w));
+  vec3 ds = detailSample(w, pxFoot0);
+  float h = ds.x;
   vec2 wp = vec2(w.x, u_size - w.y) / u_size * float(u_hn);
   float cls = u_hasClass == 1 ? texelFetch(u_wclass, clamp(ivec2(floor(wp)), ivec2(0), ivec2(u_hn - 1)), 0).r : (h < 0.0 ? 1.0 : 0.0);
   float wl = waterLevelAt(w);
   bool lake = cls > 1.5 && cls < 2.5 || cls > 5.5;
   bool water = u_hasWater == 1 ? wl > h && (lake || cls > 0.5 && cls < 1.5) : h < 0.0;
-  vec2 gr = gradAt(w);
+  // Mipmapped macro gradient far away, detail gradient (incl. fine octaves) close up.
+  vec2 gr = mix(gradAt(w), ds.yz, detailWeight(pxFoot0));
   vec3 n = normalize(vec3(-gr * u_normalExag, 1.0));
 
   vec3 col;
+  vec2 luv = vec2(w.x, u_size - w.y) / u_size;
+  float sunVis = u_hasLight == 1 ? texture(u_sunVis, luv).r : 1.0;
+  float ao = u_hasLight == 1 ? texture(u_ao, luv).g : 1.0;
   if (water && u_layerMode == 0) {
-    // Water: depth colour, soft sun glint, a bright line where it meets the shore.
+    // Water: depth colour, animated wave normals faded by footprint, Fresnel sky, sun glint, shore foam.
     float depth = lake ? max(0.0, wl - h) : -h;
+    float pxFoot = length(fwidth(w));
     vec3 shallow = vec3(0.24, 0.56, 0.62), deep = vec3(0.03, 0.10, 0.22);
     if (lake) { shallow = vec3(0.22, 0.48, 0.52); deep = vec3(0.05, 0.16, 0.24); }
     if (cls > 5.5) { shallow = vec3(0.55, 0.78, 0.76); deep = vec3(0.30, 0.58, 0.62); }
     col = mix(shallow, deep, pow(clamp(depth / (lake ? 400.0 : 4000.0), 0.0, 1.0), 0.35));
     col = mix(col, vec3(0.42, 0.68, 0.70), (1.0 - smoothstep(0.0, 60.0, depth)) * 0.6);
-    vec3 nw = normalize(vec3(0.02 * sin(w.x * 0.004 + u_time * 0.6), 0.02 * cos(w.y * 0.0043 - u_time * 0.5), 1.0));
-    float spec = pow(max(dot(reflect(-u_sun, nw), vec3(0.0, 0.0, 1.0)), 0.0), 60.0);
-    col += spec * 0.12;
-    float shore = 1.0 - smoothstep(0.0, max(4.0, fwidth(h) * 1.5), depth);
-    col = mix(col, vec3(0.80, 0.86, 0.85), shore * 0.5);
+    // Waves: three scrolling noise layers; each fades out once its wavelength is under ~4 px.
+    vec2 g = vec2(0.0);
+    float amp = 0.06;
+    float wl0 = 900.0;
+    for (int k = 0; k < 3; k++) {
+      float fade = 1.0 - smoothstep(wl0 / 8.0, wl0 / 4.0, pxFoot);
+      vec2 dir = vec2(cos(float(k) * 2.1 + 0.4), sin(float(k) * 2.1 + 0.4));
+      vec2 q = w / wl0 + dir * u_time * (0.05 + 0.03 * float(k));
+      float e = 0.07;
+      float c0 = vnoise(q);
+      g += fade * amp * vec2(vnoise(q + vec2(e, 0.0)) - c0, vnoise(q + vec2(0.0, e)) - c0) / e;
+      amp *= 0.6;
+      wl0 *= 0.33;
+    }
+    vec3 nw = normalize(vec3(-g, 1.0));
+    // View vector: positions are camera-relative, so the eye sits at u_origin.
+    vec3 V = normalize(vec3(u_origin.xy - w, u_origin.z));
+    float fres = 0.02 + 0.98 * pow(1.0 - max(dot(nw, V), 0.0), 5.0);
+    col = mix(col, u_hazeColor * 0.9, fres * 0.6);
+    float spec = pow(max(dot(reflect(-u_sun, nw), V), 0.0), 120.0);
+    col += spec * 0.5 * sunVis;
+    // Foam: a bright line at the shore at any zoom; moving surf bands when close.
+    // Shore line ~1.5 px wide at any zoom: depth / |d(depth)/dpx| is the distance to the shore in pixels.
+    float foam = 1.0 - smoothstep(0.5, 2.0, depth / max(fwidth(depth), 1e-3));
+    float bands = smoothstep(0.55, 0.9, sin(depth * 0.9 - u_time * 1.6 + 6.0 * vnoise(w / 120.0)));
+    foam = max(foam * 0.6, bands * (1.0 - smoothstep(0.0, 6.0, depth)) * (1.0 - smoothstep(4.0, 20.0, pxFoot)));
+    col = mix(col, vec3(0.86, 0.90, 0.90), foam);
+    col *= mix(0.85, 1.0, sunVis);
   } else {
     if (u_layerMode == 1) col = categorical(floor(layerAt(w, true) + 0.5));
     else if (u_layerMode == 2) col = viridis((layerAt(w, false) - u_layerMin) / max(1e-6, u_layerMax - u_layerMin));
     else if (u_layerMode == 3) col = pow(texelFetch(u_biomePal, ivec2(int(layerAt(w, true) + 0.5), 0), 0).rgb, vec3(1.1));
-    else if (u_hasSurface == 1 && u_palette == 0) col = landColor(w, h, n, length(fwidth(w)));
+    else if (u_hasSurface == 1 && u_palette == 0) col = landColor(w, h, n, pxFoot0, gr);
     else col = hypsometric(h);
     if (u_layerMode == 0 && u_hasClass == 1) {
       vec2 m = texture(u_masks, vec2(w.x, u_size - w.y) / u_size).rg;
@@ -210,6 +251,8 @@ void main() {
     float sky = 0.5 + 0.5 * n.z;
     // Biome colours are muted satellite tones: give them more light than the bright hypsometric tints.
     bool biomeLit = u_layerMode == 0 && u_hasSurface == 1 && u_palette == 0;
+    lambert *= sunVis;
+    sky *= mix(0.55, 1.0, ao);
     col *= biomeLit ? 0.30 * sky + 1.25 * lambert : 0.28 * sky + 0.95 * lambert;
   }
   col = mix(col, u_hazeColor, 1.0 - exp(-v_dist * u_haze));
@@ -219,6 +262,12 @@ void main() {
 const LAYER_MODE: Record<LayerKind, number> = { elevation: 0, categorical: 1, scalar: 2 };
 
 export interface TerrainFrame {
+  /** 2·tan(fovY/2)/viewH, for footprint-based detail fading in the VS. */
+  pxScale: number;
+  /** Detail-map uniforms (bound on units 13+), or null. */
+  detail: DetailUniforms | null;
+  /** Horizon-pass textures (sun visibility in r, AO in g), or null before the first pass. */
+  lighting: { sun: WebGLTexture; ao: WebGLTexture } | null;
   viewProj: Float32Array;
   origin: { x: number; y: number; z: number };
   instances: Float32Array;
@@ -265,9 +314,9 @@ export class TerrainPass {
   constructor(private readonly gl: WebGL2RenderingContext) {
     this.prog = compileProgram(gl, 'terrain', VS, FS);
     this.u = uniforms(gl, this.prog, [
-      'u_viewProj', 'u_exag', 'u_height', 'u_hn', 'u_size', 'u_origin', 'u_sun', 'u_normalExag', 'u_cell', 'u_haze', 'u_hazeColor',
+      'u_viewProj', 'u_exag', 'u_pxScale', 'u_height', 'u_hn', 'u_size', 'u_origin', 'u_sun', 'u_normalExag', 'u_cell', 'u_haze', 'u_hazeColor',
       'u_time', 'u_grad', 'u_water', 'u_hasWater', 'u_wclass', 'u_hasClass', 'u_masks', 'u_climate', 'u_cover', 'u_lut', 'u_lutDry',
-      'u_biomePal', 'u_hasSurface', 'u_palette', 'u_layer', 'u_layerSize', 'u_layerMode', 'u_layerMin', 'u_layerMax',
+      'u_biomePal', 'u_hasSurface', 'u_palette', 'u_sunVis', 'u_ao', 'u_hasLight', 'u_layer', 'u_layerSize', 'u_layerMode', 'u_layerMin', 'u_layerMax',
     ] as const);
 
     const verts = new Float32Array((GRID + 1) * (GRID + 1) * 2);
@@ -413,6 +462,7 @@ export class TerrainPass {
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, f.instances, 0, f.count * INSTANCE_FLOATS);
     gl.uniformMatrix4fv(this.u.u_viewProj, false, f.viewProj);
     gl.uniform1f(this.u.u_exag, f.exaggeration);
+    gl.uniform1f(this.u.u_pxScale, f.pxScale);
     gl.uniform3f(this.u.u_origin, f.origin.x, f.origin.y, f.origin.z);
     gl.uniform1i(this.u.u_hn, this.hn);
     gl.uniform1f(this.u.u_size, this.size);
@@ -459,6 +509,12 @@ export class TerrainPass {
     bind(10, this.paletteTex, this.u.u_biomePal);
     gl.uniform1i(this.u.u_hasSurface, this.hasSurface);
     gl.uniform1i(this.u.u_palette, this.palette === 'hypsometric' ? 1 : 0);
+    gl.uniform1i(this.u.u_hasLight, f.lighting ? 1 : 0);
+    if (f.lighting) {
+      bind(11, f.lighting.sun, this.u.u_sunVis);
+      bind(12, f.lighting.ao, this.u.u_ao);
+    }
+    if (f.detail) f.detail.bind(gl, this.prog, 13);
     gl.bindVertexArray(this.vao);
     gl.drawElementsInstanced(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_SHORT, 0, f.count);
     gl.bindVertexArray(null);

@@ -206,6 +206,13 @@ function showSelected(): void {
     world.setTerrain(elev, wl, cls && cls.stage === elev.stage ? cls : null);
     world.setRivers(rivers);
     minimap.setTerrain(elev, wl);
+    const wc = layers.get('waterClass');
+    const dis = layers.get('discharge');
+    world.setCreekWorld(
+      rivers && wc && dis && wc.stage === elev.stage && dis.stage === elev.stage
+        ? { elevation: elev, waterClass: wc, discharge: dis, rivers, seed: spec.seed }
+        : null,
+    );
   }
   // Realistic colouring needs the biome stage's rasters, which match the hydro-stage terrain grid.
   const biome = layers.get('biome');
@@ -217,6 +224,15 @@ function showSelected(): void {
     if (temperature && aridity && canopy && snow) {
       surfaceShown = biome;
       world.setSurface({ temperature, aridity, summerRain: layers.get('summerRain') ?? null, canopy, snow, biome });
+      const wl2 = layers.get('waterLevel');
+      const wc = layers.get('waterClass');
+      const dis = layers.get('discharge');
+      if (wl2 && wc && dis && elev.stage === 'hydro') {
+        world.buildDetail({
+          elevation: elev, waterLevel: wl2, waterClass: wc, discharge: dis, biome, rivers, seed: spec.seed,
+          size: resolve(spec).values.detailGrid === '2048' ? 2048 : 4096,
+        });
+      }
     }
   }
   const drape = l.id === 'elevation' ? null : l;

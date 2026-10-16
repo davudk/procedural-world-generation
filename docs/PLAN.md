@@ -715,3 +715,35 @@ Each research note lists its sources with URLs. The core references are:
 - The minimap still uses hypsometric colours.
 - No sea ice, terrain wind deflection, dunes behind beaches, or coastal sabkha yet.
 - The glacial carving stage (S7) is still M6.
+
+### M5 — Detail & light (2026-10-16)
+
+**What landed:**
+- **Detail heightmap** (`render/terrain/detail/*`), built on the GPU after generation and time-sliced per frame:
+  - Bicubic macro plus baked noise, with river channels and valleys MIN-carved as instanced capsules.
+  - Thermal erosion, tiled pipe-model hydraulic erosion, thermal again, then low-frequency re-anchoring.
+  - Shore clamps on every pass. A CPU fallback runs where `EXT_color_buffer_float` is missing.
+- **Shared height function:**
+  - GLSL (`glsl/detail.ts`): integer-hash noise on tile index plus offset, derivative-damped and ridged octaves faded by pixel footprint, amplitude capped below the water level.
+  - Its TypeScript port (`height/heightFn.ts`) is generated from the same constants, with a parity test.
+  - The camera uses `DetailGround` for picking.
+  - The vertex footprint is coupled to the CDLOD morph. CDLOD depth is 11 at 1024 km (16 m leaf spacing).
+- **Creeks** (`render/water/creeks/*`):
+  - Per-macro-cell deterministic growth (research 02 §8 option b): trunks along D8, Poisson-disk heads walking downhill on the detail terrain, and cells that never cross.
+  - An LRU-cached, time-sliced manager feeds a second ribbon pass; creeks fade in by drainage area.
+- **Lighting:**
+  - A horizon pass for sun visibility (soft penumbra) and 8-direction ambient occlusion, recomputed when the sun direction changes (map lighting follows the camera bearing).
+  - A gradient sky, and haze that scales with altitude.
+- **Water:** three footprint-faded animated wave layers, Fresnel sky reflection, sun glint, a shore line about 1.5 px wide at any zoom, and surf bands close up.
+
+**Measurements:**
+- Frame time p50 8.3 ms and p95 8.4 ms (120 Hz) while tilted at 18 m/px, with 109 CDLOD nodes and ~840k creek ribbon indices.
+- In the pane, the 4096² detail build took ~24 s of wall time after generation: 7.9 s of sliced CPU prep, 1,229 GPU passes and a 1 s readback. In node the prep measures ~0.65 s.
+- 122 tests pass.
+
+**Known gaps:**
+- **Detail build wall time.** The prep should move into the worker, with larger slices while the camera is idle.
+- **One-off GL error.** One `INVALID_OPERATION` is raised during the detail build; it does not recur per frame and has not been traced yet.
+- **Creek trunks** follow macro D8, so a faint 1 km structure can show.
+- **Hydraulic erosion constants** are untuned starting values.
+- **Snow** patches still have hard edges.
