@@ -2,7 +2,7 @@ import type { Rng } from '../../shared/rng';
 import { Noise2 } from '../../shared/noise';
 import type { Layer } from '../../shared/protocol';
 import { distanceField } from '../grid/distance';
-import { cellX, cellY, forWindow, mapEdgeDistance, type Grid } from '../grid/grid';
+import { blockGrid, cellIndex, cellX, cellY, forWindow, mapEdgeDistance, onFace, type Grid } from '../grid/grid';
 import { MinHeap } from '../grid/heap';
 import { cellAt } from '../grid/sample';
 import type { StageCtx, StageDef } from '../pipeline';
@@ -257,8 +257,8 @@ function growContinents(ctx: StageCtx, g: Grid): Int32Array {
   const label = new Int32Array(N).fill(-1);
   // Coarse ownership blocks keep continents ~CONTINENT_GAP_KM apart, so coast noise can't merge them.
   const bs = Math.max(2, Math.round(CONTINENT_GAP_KM / 3 / cellKm));
-  const nbk = Math.ceil(n / bs);
-  const blockOwner = new Int32Array(nbk * nbk).fill(-1);
+  const bg = blockGrid(g, bs);
+  const blockOwner = new Int32Array(bg.cells).fill(-1);
   const area = new Float64Array(count);
   const heap = new MinHeap(n * 4);
   for (let i = 0; i < count; i++) heap.push(0, cellAt(g, xs[i], ys[i]) * 16 + i);
@@ -270,9 +270,9 @@ function growContinents(ctx: StageCtx, g: Grid): Int32Array {
     if (label[c] !== -1 || area[L] >= target[L]) continue;
     const x = cellX(g, c);
     const y = cellY(g, c);
-    if (nearOtherContinent(blockOwner, nbk, Math.floor(x / bs), Math.floor(y / bs), L)) continue;
+    if (nearOtherContinent(blockOwner, bg, Math.floor(x / bs), Math.floor(y / bs), L)) continue;
     label[c] = L;
-    const blk = Math.floor(y / bs) * nbk + Math.floor(x / bs);
+    const blk = cellIndex(bg, Math.floor(x / bs), Math.floor(y / bs));
     if (blockOwner[blk] === -1) blockOwner[blk] = L;
     area[L]++;
     const b = border[c];
@@ -288,13 +288,13 @@ function growContinents(ctx: StageCtx, g: Grid): Int32Array {
   return label;
 }
 
-function nearOtherContinent(owner: Int32Array, nb: number, bx: number, by: number, L: number): boolean {
+function nearOtherContinent(owner: Int32Array, bg: Grid, bx: number, by: number, L: number): boolean {
   for (let dy = -3; dy <= 3; dy++) {
     for (let dx = -3; dx <= 3; dx++) {
       const x = bx + dx;
       const y = by + dy;
-      if (x < 0 || y < 0 || x >= nb || y >= nb) continue;
-      const o = owner[y * nb + x];
+      if (!onFace(bg, x, y)) continue;
+      const o = owner[cellIndex(bg, x, y)];
       if (o !== -1 && o !== L) return true;
     }
   }

@@ -28,7 +28,6 @@ const PATTERNS: [string, RegExp][] = [
 /** Allowed offending lines per file (relative to the repo root). May only shrink. */
 const ALLOW: Record<string, number> = {
   // stages
-  'src/gen/stages/plates.ts': 3,
   'src/gen/stages/stamps.ts': 1,
   // climate
   'src/gen/climate/fields.ts': 2,
