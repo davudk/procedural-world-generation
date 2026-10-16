@@ -9,7 +9,7 @@
  * Spherical worlds (research 10 §8, Phase 2) have their own fixture, recorded when the sphere stages
  * landed; re-record only those with
  *
- *   GOLDEN_UPDATE=1 npx vitest run --project golden -t sphere
+ *   GOLDEN_UPDATE=1 npx vitest run tests/golden.test.ts -t sphere
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';

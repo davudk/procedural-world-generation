@@ -1010,7 +1010,7 @@ Spherical worlds are being added as an option, with flat staying the default ([r
   - The sphere pipeline is deterministic and drains every land cell to the sea.
   - Config and URL rules.
 - `tests/sphereView.test.ts`: the projections.
-- Sphere goldens (4 previews) are in `tests/golden-sphere.json`; re-record with `GOLDEN_UPDATE=1 npx vitest run --project golden -t sphere`.
+- Sphere goldens (4 previews) are in `tests/golden-sphere.json`; re-record with `GOLDEN_UPDATE=1 npx vitest run tests/golden.test.ts -t sphere`.
 
 **Known gaps:**
 - On a water world, precipitation varies by up to ±17 % between longitudes. This is first-order upwind transport on cells that vary by √2, and the moisture sweeps use all 4 rounds.
