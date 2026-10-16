@@ -1,6 +1,6 @@
 .atlas {
   position: fixed;
-  top: 64px;
+  top: var(--topbar-h, 64px);
   left: 10px;
   bottom: 330px;
   width: min(300px, calc(100vw - 20px));
@@ -134,7 +134,24 @@
 
 @media (max-width: 760px) {
   .atlas {
-    top: 58px;
+    top: var(--topbar-h, 58px);
     bottom: 10px;
+  }
+}
+
+@media (pointer: coarse) {
+  .atlas-close {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  .atlas-search {
+    min-height: 40px;
+    font-size: 16px; /* below 16 px iOS zooms the page on focus */
+  }
+
+  .atlas-row {
+    min-height: 40px;
+    justify-content: center;
   }
 }

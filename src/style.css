@@ -173,6 +173,72 @@ body.mode-2d .exag {
   display: none;
 }
 
+/* Fold button of the layer box: collapsed, only the minimap and the inspector stay. */
+#layers-toggle {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font: inherit;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#layers-toggle::before {
+  content: '▾';
+}
+
+#layers.collapsed #layers-toggle::before {
+  content: '▸';
+}
+
+#layers.collapsed {
+  min-width: 0;
+  padding-right: 44px;
+}
+
+#layers.collapsed > :not(.minimap, #layers-toggle, #inspect) {
+  display: none;
+}
+
+body.mode-2d #layers.collapsed {
+  min-height: 40px;
+}
+
+/* Shown while the WebGL context is lost (M9): the world is rebuilt on restore. */
+.gl-lost {
+  position: fixed;
+  left: 50%;
+  top: 40%;
+  transform: translate(-50%, -50%);
+  max-width: calc(100vw - 40px);
+  padding: 12px 16px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  color: var(--warn);
+  z-index: 20;
+}
+
+.gl-lost.hidden {
+  display: none;
+}
+
+.gl-lost button {
+  margin-left: 8px;
+  min-height: 32px;
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+}
+
 @media (max-width: 760px) {
   :root {
     --panel-w: min(340px, calc(100vw - 20px));
@@ -180,6 +246,18 @@ body.mode-2d .exag {
 
   #topbar {
     right: 10px;
+    gap: 6px;
+    padding: 6px 8px;
+  }
+
+  .brand {
+    display: none;
+  }
+
+  /* The generation status takes its own line under the buttons. */
+  #progress {
+    flex: 1 1 100%;
+    text-align: left;
   }
 
   .drawer-only {
@@ -187,7 +265,7 @@ body.mode-2d .exag {
   }
 
   #panel {
-    top: 58px;
+    top: var(--topbar-h, 58px);
     transform: translateX(calc(100% + 20px));
     transition: transform 0.2s ease;
     z-index: 5;
@@ -197,7 +275,46 @@ body.mode-2d .exag {
     transform: none;
   }
 
+  #layers {
+    min-width: 0;
+    max-width: calc(100vw - 80px);
+  }
+
   #compass-host {
     right: 10px;
+  }
+}
+
+/* Finger-sized tap targets (≥ 40 px) where the primary pointer is coarse. */
+@media (pointer: coarse) {
+  #topbar button,
+  #topbar input,
+  #layers select {
+    min-height: 40px;
+  }
+
+  #topbar button {
+    min-width: 40px;
+  }
+
+  #seed {
+    font-size: 16px; /* below 16 px iOS zooms the page on focus */
+  }
+
+  #layers-toggle {
+    top: 4px;
+    right: 4px;
+    width: 40px;
+    height: 40px;
+  }
+
+  #layers.collapsed {
+    padding-right: 52px;
+  }
+
+  #compass-host,
+  #compass-host .compass {
+    width: 44px;
+    height: 44px;
   }
 }

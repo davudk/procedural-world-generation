@@ -1,20 +1,24 @@
 import './style.css';
+import { exportActions } from './app/export/exportActions';
 import { GenHost } from './app/genHost';
 import { CameraController, isTypingTarget } from './input/cameraController';
 import { OrbitController } from './input/orbitController';
 import { worldToMapKm } from './render/camera/ground';
 import { Camera } from './render/camera2d';
+import { FramePacer } from './render/framePacer';
 import { Minimap } from './render/minimap';
 import { RasterView, sampleLayer } from './render/rasterView';
+import { parseQualityChoice, pickQuality, probeDevice, type QualityChoice } from './render/quality';
 import { WorldView } from './render/worldView';
 import { fmtNum, resolve } from './shared/config/resolve';
 import type { WorldSpec } from './shared/config/types';
 import { queryToSpec, specToQuery } from './shared/config/url';
-import type { Landmark } from './shared/landmarks';
+import type { Landmark, WorldTraits } from './shared/landmarks';
 import type { FromWorker, GenMode, Layer, RiverGraph } from './shared/protocol';
 import { AtlasPanel, KIND_LABEL } from './ui/atlas';
 import { Compass } from './ui/compass';
 import { ConfigPanel } from './ui/configPanel';
+import { ExportMenu } from './ui/exportMenu';
 import { ViewControls } from './ui/viewControls';
 import { GenProgress } from './ui/genProgress';
 
@@ -23,6 +27,7 @@ const BUILD_IDLE_MS = 900;
 const LAYER_KEY = 'pwg.layer';
 const MODE_KEY = 'pwg.mode';
 const PALETTE_KEY = 'pwg.palette';
+const QUALITY_KEY = 'pwg.quality';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('view');
@@ -39,6 +44,7 @@ let fittedFor = -1;
 let buildTimer = 0;
 let rivers: RiverGraph | null = null;
 let landmarks: Landmark[] = [];
+let traits: WorldTraits | null = null;
 /** Realised 🎯 targets of the current run; later stages refine earlier values. */
 let outcomes: Record<string, number> = {};
 
@@ -50,7 +56,7 @@ const compass = new Compass($('compass-host'), world.cam);
 // Time of day, season and clouds (M9 view settings, stored locally; T animates the time).
 $('legend').before(new ViewControls($('layers'), (s) => Object.assign(world.view, s)).el);
 const cam = new Camera();
-const view = new RasterView(canvas);
+let view = new RasterView(canvas);
 const camCtl = new CameraController(canvas, cam, () => ({ w: currentWorldKm(), h: currentWorldKm() }));
 /** Debug handle for the console / browser automation. */
 Object.assign(window, { __pwg: { world, orbit, layers: () => layers } });
@@ -58,6 +64,81 @@ let mode: '3d' | '2d' = readStored(MODE_KEY) === '2d' ? '2d' : '3d';
 let terrainShown: { elev: Layer; water: Layer | null } | null = null;
 let surfaceShown: Layer | null = null;
 let drapeShown: Layer | null | undefined;
+
+// ── Mobile pass: quality tier, idle frame cap, context loss, export (M9) ──────────────────
+
+const device = probeDevice(world.gl);
+// `?quality=low|medium|high` overrides for this page load; the Export menu's choice is remembered.
+let qualityChoice: QualityChoice = parseQualityChoice(new URLSearchParams(location.search).get('quality')) ?? parseQualityChoice(readStored(QUALITY_KEY)) ?? 'auto';
+const applyQuality = (): void => {
+  world.setQuality(pickQuality(qualityChoice, device));
+  document.body.dataset.quality = world.quality.tier;
+  pacer.wake();
+};
+const pacer = new FramePacer(world.quality.idleFps);
+applyQuality();
+
+const glLostEl = document.createElement('div');
+glLostEl.className = 'gl-lost hidden';
+glLostEl.setAttribute('role', 'status');
+document.body.append(glLostEl);
+let glLostTimer = 0;
+world.onContextChange = (lost) => {
+  glLostEl.classList.toggle('hidden', !lost);
+  clearTimeout(glLostTimer);
+  if (lost) {
+    glLostEl.textContent = 'Graphics context lost — restoring…';
+    // Some browsers never restore (e.g. after repeated GPU resets): offer a reload.
+    glLostTimer = window.setTimeout(() => {
+      glLostEl.innerHTML = 'Graphics context lost. <button type="button">Reload</button>';
+      glLostEl.querySelector('button')!.addEventListener('click', () => location.reload());
+    }, 6000);
+    return;
+  }
+  // WorldView rebuilt its passes; the 2D raster view shares the context and is rebuilt here.
+  view = new RasterView(canvas);
+  const l = layers.get(shownLayerId());
+  if (l) view.setLayer(l);
+  pacer.wake();
+};
+
+new ExportMenu(document.body, $('export-toggle'), {
+  actions: exportActions({
+    world,
+    spec: () => spec,
+    mode: () => mode,
+    layer: (id) => layers.get(id),
+    shownLayer: () => layers.get(shownLayerId()),
+    landmarks: () => landmarks,
+    traits: () => traits,
+  }),
+  quality: {
+    value: qualityChoice,
+    options: [['auto', 'Auto'], ['high', 'High'], ['medium', 'Medium'], ['low', 'Low (mobile)']],
+    onChange(v) {
+      qualityChoice = parseQualityChoice(v) ?? 'auto';
+      writeStored(QUALITY_KEY, qualityChoice);
+      applyQuality();
+    },
+    note: () => {
+      const q = world.quality;
+      return `${q.tier}: ${q.msaa ? `${q.msaa}× MSAA` : 'no MSAA'}, ≤ ${q.maxPixelRatio}× pixels, ${q.maxDetail}² detail (next build)`;
+    },
+  },
+});
+
+// Panels below the top bar follow its height (it wraps to two or three rows on phones).
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty('--topbar-h', `${Math.ceil($('topbar').getBoundingClientRect().bottom) + 8}px`);
+}).observe($('topbar'));
+const layersEl = $('layers');
+const setLayersCollapsed = (c: boolean): void => {
+  layersEl.classList.toggle('collapsed', c);
+  $('layers-toggle').setAttribute('aria-expanded', String(!c));
+};
+// Phones start with the layer box folded to the minimap and inspector.
+setLayersCollapsed(window.matchMedia('(max-width: 760px)').matches);
+$('layers-toggle').addEventListener('click', () => setLayersCollapsed(!layersEl.classList.contains('collapsed')));
 
 const panel = new ConfigPanel($('panel'), spec, {
   onSpecChange(next, final) {
@@ -81,7 +162,9 @@ const atlas = new AtlasPanel(document.body, {
 });
 
 // Tapping a label selects it and flies there; the hover cursor shows labels are clickable.
+// A tap also fills the inspector (touch screens have no hover).
 orbit.onTap = (sx, sy) => {
+  inspect(sx, sy);
   const l = world.labels.hitTest(sx, sy);
   if (l) {
     const size = world.hf?.size ?? 1024e3;
@@ -179,6 +262,7 @@ function onGenEvent(msg: FromWorker): void {
       }
       if (msg.vectors?.landmarks) {
         landmarks = msg.vectors.landmarks;
+        traits = msg.vectors.traits ?? null;
         world.setLandmarks(landmarks);
         atlas.set(landmarks, msg.vectors.traits ?? null);
       }
@@ -230,6 +314,7 @@ function showSelected(): void {
   const l = layers.get(shownLayerId());
   if (!l) return;
   view.setLayer(l);
+  pacer.wake();
   const elev = layers.get('elevation');
   // Water rasters only match the elevation produced by the same stage.
   const water = layers.get('waterLevel');
@@ -272,7 +357,7 @@ function showSelected(): void {
       if (wl2 && wc && dis && elev.stage === 'hydro') {
         world.buildDetail({
           elevation: elev, waterLevel: wl2, waterClass: wc, discharge: dis, biome, rivers, seed: spec.seed,
-          size: resolve(spec).values.detailGrid === '2048' ? 2048 : 4096,
+          size: resolve(spec).values.detailGrid === '2048' || world.quality.maxDetail === 2048 ? 2048 : 4096,
         });
       }
     }
@@ -352,6 +437,12 @@ function currentWorldKm(): number {
 // ── Frame loop ────────────────────────────────────────────────────────────────────────────
 
 let last = performance.now();
+const view2dMatrix = new Float32Array(9);
+let view2dKey = '';
+/**
+ * Input and camera easing run every animation frame; drawing is paced (M9): full rate while anything
+ * moves, `idleFps` when only animated water changes, nothing in the static 2D view.
+ */
 function frame(now: number): void {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
@@ -359,19 +450,26 @@ function frame(now: number): void {
     world.resize();
     orbit.update(dt);
     world.cam.update(dt);
-    world.draw(now / 1000);
-    minimap.draw();
-    compass.update();
+    if (pacer.shouldDraw(now, world.needsFrame, true)) {
+      world.draw(now / 1000);
+      minimap.draw();
+      compass.update();
+    }
   } else {
     view.resize(cam);
     camCtl.update(dt);
-    view.draw(cam);
+    const key = `${cam.viewMatrix(view2dMatrix).join(',')}|${canvas.width}x${canvas.height}`;
+    if (pacer.shouldDraw(now, key !== view2dKey, false)) {
+      view2dKey = key;
+      view.draw(cam);
+    }
   }
   requestAnimationFrame(frame);
 }
 
 function setMode(m: '3d' | '2d'): void {
   mode = m;
+  pacer.wake();
   writeStored(MODE_KEY, m);
   orbit.enabled = m === '3d';
   camCtl.enabled = m === '2d';

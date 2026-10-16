@@ -8,6 +8,7 @@ import type { Palette } from './terrain/biomeLut';
 import { DetailUniforms } from './glsl/detail';
 import { DetailGround, HeightFn } from './height/heightFn';
 import { HorizonPass } from './lighting/horizon';
+import { qualitySettings, pixelRatio, type QualitySettings } from './quality';
 import { LabelLayer } from './labels/labelLayer';
 import { DetailMap, type DetailInput } from './terrain/detail/detailMap';
 import { SkyPass } from './lighting/sky';
@@ -17,7 +18,6 @@ import { TerrainPass, type SurfaceLayers } from './terrain/terrainPass';
 import { CreekManager } from './water/creeks/creekManager';
 import { RiverPass } from './water/rivers';
 
-const MSAA = 4;
 /** Cloud base above sea level (m, before exaggeration). */
 const CLOUD_BASE = 3200;
 /** Cloud drift (m/s); time-of-day animation runs the clouds faster too. */
@@ -36,9 +36,15 @@ class FlatGround implements GroundQuery {
   }
 }
 
+type CreekWorld = { elevation: Layer; waterClass: Layer; discharge: Layer; rivers: RiverGraph; seed: number };
+type LandformMasks = { reef: Layer | null; erg: Layer | null; crater: Layer | null; cliff: Layer | null; n: number };
+
 /**
  * The 3D world view (M2): CDLOD terrain with a water lid, orbit camera, reversed-Z where
- * EXT_clip_control exists, and 4× MSAA into a float-depth framebuffer that is blitted to the canvas.
+ * EXT_clip_control exists, and MSAA (per quality tier) into a float-depth framebuffer blitted to the canvas.
+ *
+ * Every GPU object lives in the passes created by `initGpu()`; the inputs they were fed are kept here
+ * as CPU copies, so a lost WebGL context is rebuilt on `webglcontextrestored` without a reload (M9).
  */
 export class WorldView {
   readonly gl: WebGL2RenderingContext;
@@ -48,24 +54,47 @@ export class WorldView {
   /** Geometric vertical exaggeration (user setting). */
   exaggeration = 1.5;
   nodes = 0;
+  /** Render quality (DPR cap, MSAA, CDLOD density); set with `setQuality`. */
+  quality: QualitySettings = qualitySettings('high');
+  /** True between `webglcontextlost` and the rebuild on `webglcontextrestored`. */
+  contextLost = false;
+  /** Called after a context loss (true) and after the rebuild (false). */
+  onContextChange?: ((lost: boolean) => void) | undefined;
   private readonly selector = new CdlodSelector();
-  private readonly terrain: TerrainPass;
-  readonly rivers: RiverPass;
-  readonly creekPass: RiverPass;
+  // GPU passes: re-created by initGpu() after a context loss.
+  private terrain!: TerrainPass;
+  rivers!: RiverPass;
+  creekPass!: RiverPass;
   readonly creeks = new CreekManager();
-  private readonly horizon: HorizonPass;
-  private readonly sky: SkyPass;
-  private readonly clouds: CloudPass;
+  private horizon!: HorizonPass;
+  private sky!: SkyPass;
+  private clouds!: CloudPass;
   /** Time of day, season and clouds (M9 view settings; the defaults keep the pre-M9 look). */
   view: ViewSettings = { ...DEFAULT_VIEW };
   private cloudDrift: [number, number] = [0, 0];
   private lastTime = -1;
-  private readonly detail: DetailMap;
-  private readonly detailU: DetailUniforms;
+  private detail!: DetailMap;
+  private detailU!: DetailUniforms;
   private detailSeen = -1;
   private ground: DetailGround | null = null;
-  readonly labels: LabelLayer;
-  private creekWorld: { elevation: Layer; waterClass: Layer; discharge: Layer; rivers: RiverGraph; seed: number } | null = null;
+  labels!: LabelLayer;
+  private creekWorld: CreekWorld | null = null;
+  // CPU copies of everything uploaded, replayed after a context loss.
+  private readonly src: {
+    terrain: [Layer, Layer | null, Layer | null] | null;
+    surface: SurfaceLayers | null;
+    masks: LandformMasks | null;
+    rivers: RiverGraph | null;
+    landmarks: readonly Landmark[];
+    highlight: number | null;
+    drape: Layer | null;
+    detail: DetailInput | null;
+  } = { terrain: null, surface: null, masks: null, rivers: null, landmarks: [], highlight: null, drape: null, detail: null };
+  /** Camera and viewport state of the last drawn frame (to skip redraws when nothing changed). */
+  private drawnKey = '';
+  /** Set by uploads; cleared by draw(). */
+  private dirty = true;
+  private fbSamples = -1;
   private readonly viewProj = new Float32Array(16);
   private readonly planes = new Float64Array(24);
   private fbo: WebGLFramebuffer | null = null;
@@ -82,12 +111,33 @@ export class WorldView {
     const gl = canvas.getContext('webgl2', { antialias: false, alpha: true, premultipliedAlpha: false, depth: false, powerPreference: 'high-performance' });
     if (!gl) throw new Error('WebGL2 is not available in this browser.');
     this.gl = gl;
-    const clip = gl.getExtension('EXT_clip_control') as { clipControlEXT(o: number, d: number): void; LOWER_LEFT_EXT: number; ZERO_TO_ONE_EXT: number } | null;
-    if (clip) clip.clipControlEXT(clip.LOWER_LEFT_EXT, clip.ZERO_TO_ONE_EXT);
-    this.reversedZ = clip !== null;
+    this.reversedZ = this.enableClipControl();
     this.cam = new OrbitCamera(new FlatGround(1024e3));
     this.cam.reversedZ = this.reversedZ;
+    this.initGpu();
+    // Without preventDefault() on the loss the browser never restores the context.
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this.contextLost = true;
+      this.onContextChange?.(true);
+    });
+    canvas.addEventListener('webglcontextrestored', () => this.restore());
+  }
+
+  /** Reversed-Z through EXT_clip_control (extension state is per context, so this re-runs on restore). */
+  private enableClipControl(): boolean {
+    const clip = this.gl.getExtension('EXT_clip_control') as { clipControlEXT(o: number, d: number): void; LOWER_LEFT_EXT: number; ZERO_TO_ONE_EXT: number } | null;
+    if (clip) clip.clipControlEXT(clip.LOWER_LEFT_EXT, clip.ZERO_TO_ONE_EXT);
+    return clip !== null;
+  }
+
+  /** Creates every pass, and so every GPU object, for the current context (again after a restore). */
+  private initGpu(): void {
+    const gl = this.gl;
+    const palette = this.terrain?.palette;
+    const labelsOn = this.labels?.enabled ?? true;
     this.terrain = new TerrainPass(gl);
+    if (palette) this.terrain.palette = palette;
     this.rivers = new RiverPass(gl);
     this.creekPass = new RiverPass(gl);
     // Creeks fade in at the zooms the camera can reach (the manager must use the same constant).
@@ -97,32 +147,96 @@ export class WorldView {
     this.sky = new SkyPass(gl);
     this.detail = new DetailMap(gl);
     this.detailU = new DetailUniforms(this.detail);
+    this.detailSeen = -1;
     this.labels = new LabelLayer(gl);
-
-    // ── M9 atmosphere passes. The cloud pass holds no data of its own: its climate texture is
-    // TerrainPass.climate2 (rebuilt by setSurface) and everything else is per-frame uniforms.
+    // The cloud pass holds no data of its own: its climate texture is TerrainPass.climate2 (rebuilt
+    // by setSurface, which restore() replays) and everything else is per-frame uniforms.
     this.clouds = new CloudPass(gl);
+    this.labels.enabled = labelsOn;
+    this.fbo = this.colorRb = this.depthRb = null;
+    this.fbW = this.fbH = 0;
+    this.fbSamples = -1;
+  }
+
+  /** Context restored: new passes, then re-upload the last world from the CPU copies. */
+  private restore(): void {
+    if (this.gl.isContextLost()) return; // lost again: wait for the next restore event
+    // A restored context normally keeps its extensions; if not, depth would be inverted, so say so.
+    if (this.enableClipControl() !== this.reversedZ) console.warn('EXT_clip_control availability changed after a context restore');
+    this.contextLost = false;
+    this.initGpu();
+    const s = this.src;
+    if (s.terrain) this.uploadTerrain(...s.terrain, true);
+    this.terrain.setSurface(s.surface);
+    this.terrain.setLandformMasks(s.masks);
+    this.terrain.setDrape(s.drape);
+    this.rivers.setRivers(s.rivers, this.hf?.size ?? 0);
+    this.labels.setLandmarks(s.landmarks, this.hf?.size ?? 1024e3);
+    this.labels.highlight(s.highlight);
+    this.setCreekWorld(this.creekWorld);
+    if (s.detail) this.detail.build(s.detail);
+    this.dirty = true;
+    this.onContextChange?.(false);
+  }
+
+  setQuality(q: QualitySettings): void {
+    this.quality = q;
+    this.dirty = true;
   }
 
   /** Starts building the close-zoom detail map (time-sliced in draw()). */
   buildDetail(input: DetailInput): void {
+    this.src.detail = input;
     this.ground = null;
-    this.detail.build(input);
+    this.dirty = true;
+    if (!this.contextLost) this.detail.build(input);
+  }
+
+  /**
+   * True when the next frame would differ from the last one drawn: the camera or viewport moved, an
+   * eased motion or a label fade runs, the detail map is building, or data was uploaded. Animated
+   * water alone does not count (the caller throttles those frames).
+   */
+  get needsFrame(): boolean {
+    if (this.contextLost) return false;
+    return this.dirty || this.cam.moving || this.labels.animating || this.detail.building || this.viewKey() !== this.drawnKey;
+  }
+
+  private viewKey(): string {
+    const c = this.cam;
+    const t = c.target;
+    return `${t.x}|${t.y}|${t.z}|${c.distance}|${c.pitch}|${c.bearing}|${this.canvas.width}x${this.canvas.height}|${this.exaggeration}`;
   }
 
   /** Terrain elevation plus optional water level / water class rasters (same grid). */
   setTerrain(layer: Layer, water: Layer | null = null, wclass: Layer | null = null): void {
-    const prepared = water !== null && water.w === layer.w ? prepareWater(layer, water, wclass && wclass.w === layer.w ? wclass : null) : null;
-    const hf = new HeightField(layer, prepared?.level ?? null);
-    hf.exaggeration = this.exaggeration;
-    this.hf = hf;
+    this.src.terrain = [layer, water, wclass];
+    const hf = this.uploadTerrain(layer, water, wclass);
     this.cam.setGround(hf);
-    this.terrain.setTerrain(layer, prepared);
-    this.horizon.setSurface(hf.surface, hf.n, hf.size);
     if (this.fittedSize !== hf.size) {
       this.fittedSize = hf.size;
       this.cam.fitWorld();
     }
+  }
+
+  /**
+   * Builds the CPU height field (or keeps the current one after a context restore, since the camera's
+   * ground refers to it) and, while the context is alive, uploads the terrain textures.
+   */
+  private uploadTerrain(layer: Layer, water: Layer | null, wclass: Layer | null, keepHf = false): HeightField {
+    const prepared = water !== null && water.w === layer.w ? prepareWater(layer, water, wclass && wclass.w === layer.w ? wclass : null) : null;
+    let hf = this.hf;
+    if (!hf || !keepHf) {
+      hf = new HeightField(layer, prepared?.level ?? null);
+      hf.exaggeration = this.exaggeration;
+      this.hf = hf;
+    }
+    this.dirty = true;
+    if (!this.contextLost) {
+      this.terrain.setTerrain(layer, prepared);
+      this.horizon.setSurface(hf.surface, hf.n, hf.size);
+    }
+    return hf;
   }
 
   setExaggeration(x: number): void {
@@ -131,27 +245,33 @@ export class WorldView {
   }
 
   setSurface(s: SurfaceLayers | null): void {
-    this.terrain.setSurface(s);
+    this.src.surface = s;
+    this.dirty = true;
+    if (!this.contextLost) this.terrain.setSurface(s);
   }
 
-  setLandformMasks(m: { reef: Layer | null; erg: Layer | null; crater: Layer | null; cliff: Layer | null; n: number } | null): void {
-    this.terrain.setLandformMasks(m);
+  setLandformMasks(m: LandformMasks | null): void {
+    this.src.masks = m;
+    this.dirty = true;
+    if (!this.contextLost) this.terrain.setLandformMasks(m);
   }
 
   setPalette(p: Palette | 'hypsometric'): void {
     this.terrain.palette = p;
+    this.dirty = true;
   }
 
   /**
    * Inputs for close-zoom creeks: hydro-stage layers on the terrain grid plus the macro river graph.
    * `heightAt` must not depend on the view (research 07 §2.1).
    */
-  setCreekWorld(w: { elevation: Layer; waterClass: Layer; discharge: Layer; rivers: RiverGraph; seed: number } | null): void {
+  setCreekWorld(w: CreekWorld | null): void {
     this.creekWorld = w;
+    this.dirty = true;
     const hf = this.hf;
     if (!w || !hf || w.elevation.w !== hf.n) {
       this.creeks.setWorld(null, () => 0);
-      this.creekPass.setRivers(null, 0);
+      if (!this.contextLost) this.creekPass.setRivers(null, 0);
       return;
     }
     const size = hf.size;
@@ -164,7 +284,7 @@ export class WorldView {
       // A fixed footprint keeps creeks independent of the view (research 07 §2.1).
       this.ground ? ((g) => (xm: number, ym: number) => g.detailHeightAt(xm, size - ym, 30))(this.ground) : (xm, ym) => hf.elevationAt(xm, size - ym),
     );
-    this.creekPass.setRivers(null, size);
+    if (!this.contextLost) this.creekPass.setRivers(null, size);
   }
 
   /** Feeds the creek manager with the current view (map metres) and uploads new creek ribbons. */
@@ -190,24 +310,32 @@ export class WorldView {
 
   /** Named landmarks for labels (wired to the label layer once it exists). */
   setLandmarks(list: readonly Landmark[]): void {
+    this.src.landmarks = list;
+    this.dirty = true;
     this.labels.setLandmarks(list, this.hf?.size ?? 1024e3);
   }
 
   highlightLandmark(id: number | null): void {
+    this.src.highlight = id;
+    this.dirty = true;
     this.labels.highlight(id);
   }
 
   setRivers(graph: RiverGraph | null): void {
-    this.rivers.setRivers(graph, this.hf?.size ?? 0);
+    this.src.rivers = graph;
+    this.dirty = true;
+    if (!this.contextLost) this.rivers.setRivers(graph, this.hf?.size ?? 0);
   }
 
   setDrape(layer: Layer | null): void {
-    this.terrain.setDrape(layer);
+    this.src.drape = layer;
+    this.dirty = true;
+    if (!this.contextLost) this.terrain.setDrape(layer);
   }
 
-  /** Resizes the drawing buffer to CSS size × DPR and tells the camera. */
+  /** Resizes the drawing buffer to CSS size × pixel ratio (per quality tier) and tells the camera. */
   resize(): void {
-    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this.dpr = pixelRatio(this.quality, window.devicePixelRatio || 1);
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
     this.cam.viewW = w;
@@ -220,8 +348,32 @@ export class WorldView {
     }
   }
 
-  draw(timeSec: number): void {
+  /**
+   * Draws one frame and reads it back as RGBA8 (row 0 at the top), labels included. The canvas has no
+   * preserved drawing buffer, so the read happens in the same task as the draw, before compositing.
+   */
+  capture(timeSec: number): { width: number; height: number; pixels: Uint8Array } | null {
+    if (this.contextLost) return null;
+    this.draw(timeSec);
     const gl = this.gl;
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    const raw = new Uint8Array(W * H * 4);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, raw);
+    // GL rows run bottom-up: flip, and force opaque alpha.
+    const pixels = new Uint8Array(W * H * 4);
+    const row = W * 4;
+    for (let y = 0; y < H; y++) pixels.set(raw.subarray((H - 1 - y) * row, (H - y) * row), y * row);
+    for (let i = 3; i < pixels.length; i += 4) pixels[i] = 255;
+    return { width: W, height: H, pixels };
+  }
+
+  draw(timeSec: number): void {
+    if (this.contextLost) return;
+    const gl = this.gl;
+    this.dirty = false;
+    this.drawnKey = this.viewKey();
     this.stepDetail();
     const W = this.canvas.width;
     const H = this.canvas.height;
@@ -250,7 +402,7 @@ export class WorldView {
       const pxPerRad = cam.viewH / (2 * Math.tan(cam.fovY / 2));
       const maxDepth = Math.ceil(Math.log2(hf.size / (GRID * 16)));
       const boundsPad = this.detail.ready ? this.detail.boundsPad * this.exaggeration : 50;
-      this.nodes = this.selector.select(hf, eye, eye, this.planes, { maxDepth, vertexPx: 3, pxPerRad, boundsPad });
+      this.nodes = this.selector.select(hf, eye, eye, this.planes, { maxDepth, vertexPx: this.quality.vertexPx, pxPerRad, boundsPad });
       if (this.ground) this.ground.pxFoot = Math.max(cam.metresPerPixel(), hf.size / 2 ** maxDepth / GRID);
       const altitude = Math.max(1, eye.z - hf.heightAt(eye.x, eye.y));
       const tilt = Math.sin(cam.pitch);
@@ -338,14 +490,15 @@ export class WorldView {
   }
 
   private ensureTargets(w: number, h: number): void {
-    if (this.fbo && w === this.fbW && h === this.fbH) return;
     const gl = this.gl;
+    const samples = Math.max(0, Math.min(this.quality.msaa, gl.getParameter(gl.MAX_SAMPLES) as number));
+    if (this.fbo && w === this.fbW && h === this.fbH && samples === this.fbSamples) return;
     if (!this.fbo) {
       this.fbo = gl.createFramebuffer();
       this.colorRb = gl.createRenderbuffer();
       this.depthRb = gl.createRenderbuffer();
     }
-    const samples = Math.min(MSAA, gl.getParameter(gl.MAX_SAMPLES) as number);
+    // samples = 0 allocates single-sample storage; the blit to the canvas is then a plain copy.
     gl.bindRenderbuffer(gl.RENDERBUFFER, this.colorRb);
     gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA8, w, h);
     gl.bindRenderbuffer(gl.RENDERBUFFER, this.depthRb);
@@ -356,6 +509,7 @@ export class WorldView {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.fbW = w;
     this.fbH = h;
+    this.fbSamples = samples;
   }
 }
 
