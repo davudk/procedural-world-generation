@@ -1,5 +1,5 @@
 import type { Rng } from '../../shared/rng';
-import { cellIndex, cellX, cellY, forWindow, isDiagonalStep, type Grid } from '../grid/grid';
+import { cellIndex, cellX, cellY, isDiagonalStep, tryCellIndex, type Grid } from '../grid/grid';
 import { boxBlur, components, smoothstep } from '../grid/ops';
 import { LAND_MIN } from '../lem/streamPower';
 import { CorridorSources, corridorCarve, softenCarve } from './corridor';
@@ -304,15 +304,22 @@ class Stamper {
     const r = Math.floor(rc);
     const inv = rc > 0 ? 1 / rc : 0;
     const span = edge - floor;
-    forWindow(g, c, r, (i, dx, dy) => {
-      const d2 = dx * dx + dy * dy;
-      if (d2 > rc * rc) return;
-      if (fixed[i] && !sea) return;
-      const t = Math.sqrt(d2) * inv;
-      let target = floor + span * (pow === 2 ? t * t : t ** pow);
-      if (ref && target < ref[i] - maxCut) target = ref[i] - maxCut;
-      if (target < h[i]) h[i] = target;
-    });
+    // Plain loops rather than forWindow: tongues stamp once per glacier cell.
+    const cx = cellX(g, c);
+    const cy = cellY(g, c);
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const i = tryCellIndex(g, cx + dx, cy + dy);
+        if (i < 0) continue;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > rc * rc) continue;
+        if (fixed[i] && !sea) continue;
+        const t = Math.sqrt(d2) * inv;
+        let target = floor + span * (pow === 2 ? t * t : t ** pow);
+        if (ref && target < ref[i] - maxCut) target = ref[i] - maxCut;
+        if (target < h[i]) h[i] = target;
+      }
+    }
   }
 }
 
