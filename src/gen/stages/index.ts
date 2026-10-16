@@ -7,9 +7,10 @@ import { hydroStage } from './hydro';
 import { landformsStage } from './landforms';
 import { lemStage, refineStage } from './lem';
 import { platesStage } from './plates';
+import { registryStage } from './registry';
 import { stampsStage } from './stamps';
 
 /** Stages in pipeline order (PLAN.md §3). */
 export const STAGES: readonly StageDef[] = [
-  platesStage, baseStage, stampsStage, lemStage, refineStage, climateStage, glacialStage, landformsStage, hydroStage, biomeStage,
+  platesStage, baseStage, stampsStage, lemStage, refineStage, climateStage, glacialStage, landformsStage, hydroStage, biomeStage, registryStage,
 ];

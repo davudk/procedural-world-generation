@@ -22,18 +22,18 @@ const ran = (events: FromWorker[]): string[] =>
 describe('pipeline caching', () => {
   it('re-runs only stages whose read parameters or inputs changed', async () => {
     const p = new Pipeline(STAGES);
-    const ALL = ['plates', 'base', 'stamps', 'lem', 'refine', 'climate', 'glacial', 'landforms', 'hydro', 'biome'];
+    const ALL = ['plates', 'base', 'stamps', 'lem', 'refine', 'climate', 'glacial', 'landforms', 'hydro', 'biome', 'registry'];
     expect(ran(await run(p, spec()))).toEqual(ALL);
     expect(ran(await run(p, spec()))).toEqual([]);
     // continentalShare is read by plates, so both stages re-run; coastRoughness only by base.
     expect(ran(await run(p, spec({ continentalShare: 0.6 })))).toEqual(ALL);
     expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4 })))).toEqual(ALL.slice(1));
     // Sea-level rise starts at refine.
-    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50 })))).toEqual(['refine', 'climate', 'glacial', 'landforms', 'hydro', 'biome']);
+    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50 })))).toEqual(['refine', 'climate', 'glacial', 'landforms', 'hydro', 'biome', 'registry']);
     // Humidity only reaches climate and what depends on it.
-    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50, humidity: 2 })))).toEqual(['climate', 'glacial', 'landforms', 'hydro', 'biome']);
-    // A parameter no stage reads yet regenerates nothing.
-    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50, humidity: 2, heroCount: [4, 4] })))).toEqual([]);
+    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50, humidity: 2 })))).toEqual(['climate', 'glacial', 'landforms', 'hydro', 'biome', 'registry']);
+    // Hero count only affects the landmark registry.
+    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50, humidity: 2, heroCount: [4, 4] })))).toEqual(['registry']);
     }, 60_000);
 
   it('rejects undeclared parameter reads and out-of-order inputs', async () => {

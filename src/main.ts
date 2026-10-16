@@ -10,7 +10,9 @@ import { WorldView } from './render/worldView';
 import { fmtNum, resolve } from './shared/config/resolve';
 import type { StageId, WorldSpec } from './shared/config/types';
 import { queryToSpec, specToQuery } from './shared/config/url';
+import type { Landmark } from './shared/landmarks';
 import type { FromWorker, GenMode, Layer, RiverGraph } from './shared/protocol';
+import { AtlasPanel, KIND_LABEL } from './ui/atlas';
 import { Compass } from './ui/compass';
 import { ConfigPanel } from './ui/configPanel';
 
@@ -35,6 +37,7 @@ let fittedFor = -1;
 let buildTimer = 0;
 const stageEls = new Map<StageId, HTMLElement>();
 let rivers: RiverGraph | null = null;
+let landmarks: Landmark[] = [];
 /** Realised 🎯 targets of the current run; later stages refine earlier values. */
 let outcomes: Record<string, number> = {};
 
@@ -61,6 +64,34 @@ const panel = new ConfigPanel($('panel'), spec, {
   },
 });
 
+const atlas = new AtlasPanel(document.body, {
+  onSelect(l) {
+    const size = world.hf?.size ?? 1024e3;
+    // Frame the feature: its extent spans about half the screen height.
+    const d = Math.max(9000, (l.extentM * 2) / (2 * Math.tan(world.cam.fovY / 2)));
+    world.cam.flyTo(l.x, size - l.y, d);
+    world.highlightLandmark(l.id);
+  },
+  onHover(l) {
+    world.highlightLandmark(l ? l.id : null);
+  },
+});
+
+// Tapping a label selects it and flies there; the hover cursor shows labels are clickable.
+orbit.onTap = (sx, sy) => {
+  const l = world.labels.hitTest(sx, sy);
+  if (l) {
+    const size = world.hf?.size ?? 1024e3;
+    world.highlightLandmark(l.id);
+    world.cam.flyTo(l.x, size - l.y, Math.max(9000, (l.extentM * 2) / (2 * Math.tan(world.cam.fovY / 2))));
+  } else {
+    world.highlightLandmark(null);
+  }
+};
+canvas.addEventListener('pointermove', (e) => {
+  if (mode === '3d') canvas.style.cursor = world.labels.hitTest(e.offsetX, e.offsetY) ? 'pointer' : '';
+});
+
 const gen = new GenHost(onGenEvent);
 
 seedInput.value = String(spec.seed);
@@ -76,6 +107,7 @@ $('dice').addEventListener('click', () => setSeed(randomSeed()));
 $('build').addEventListener('click', () => startGen('build'));
 $('panel-toggle').addEventListener('click', () => $('panel').classList.toggle('open'));
 $('mode').addEventListener('click', () => setMode(mode === '3d' ? '2d' : '3d'));
+$('atlas-toggle').addEventListener('click', () => atlas.toggle());
 const paletteSelect = $<HTMLSelectElement>('palette');
 paletteSelect.value = readStored(PALETTE_KEY) ?? 'satellite';
 const applyPalette = (): void => {
@@ -99,6 +131,7 @@ window.addEventListener('keydown', (e) => {
   if (isTypingTarget(e.target) || e.metaKey || e.ctrlKey) return;
   if (e.code === 'KeyB') startGen('build');
   if (e.code === 'KeyV') setMode(mode === '3d' ? '2d' : '3d');
+  if (e.code === 'KeyA') atlas.toggle();
   if (e.code === 'Home' && mode === '2d') fitView();
 });
 canvas.addEventListener('pointermove', (e) => inspect(e.offsetX, e.offsetY));
@@ -142,6 +175,11 @@ function onGenEvent(msg: FromWorker): void {
       if (msg.vectors?.rivers) {
         rivers = msg.vectors.rivers;
         world.setRivers(rivers);
+      }
+      if (msg.vectors?.landmarks) {
+        landmarks = msg.vectors.landmarks;
+        world.setLandmarks(landmarks);
+        atlas.set(landmarks, msg.vectors.traits ?? null);
       }
       outcomes = { ...outcomes, ...msg.outcomes };
       panel.setOutcomes(outcomes);
@@ -276,8 +314,27 @@ function inspect(sx: number, sy: number): void {
     return;
   }
   const lines = [`${x.toFixed(1)} km, ${y.toFixed(1)} km`, `${l.label}: ${fmtNum(v)} ${l.unit}`];
+  const near = nearestLandmark(x * 1000, y * 1000);
+  if (near) lines.unshift(`${near.name} (${KIND_LABEL[near.kind].toLowerCase()})`);
   if (elev && elev !== l) lines.push(`Elevation: ${fmtNum(sampleLayer(elev, x, y) ?? 0)} m`);
   inspectEl.textContent = lines.join('\n');
+}
+
+/** The most important landmark whose extent covers a map point (metres), for the inspector. */
+function nearestLandmark(xm: number, ym: number): Landmark | null {
+  let best: Landmark | null = null;
+  let bestScore = 0;
+  for (const l of landmarks) {
+    const d = Math.hypot(l.x - xm, l.y - ym);
+    const r = Math.max(2000, l.extentM * 0.6);
+    if (d > r) continue;
+    const score = l.importance * (1 - d / r) + 0.001;
+    if (score > bestScore) {
+      bestScore = score;
+      best = l;
+    }
+  }
+  return best;
 }
 
 function fitView(): void {

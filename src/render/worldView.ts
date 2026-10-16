@@ -1,3 +1,4 @@
+import type { Landmark } from '../shared/landmarks';
 import type { Layer, RiverGraph } from '../shared/protocol';
 import type { GroundQuery, Vec3 } from './camera/ground';
 import { OrbitCamera } from './camera/orbitCamera';
@@ -7,6 +8,7 @@ import type { Palette } from './terrain/biomeLut';
 import { DetailUniforms } from './glsl/detail';
 import { DetailGround, HeightFn } from './height/heightFn';
 import { HorizonPass } from './lighting/horizon';
+import { LabelLayer } from './labels/labelLayer';
 import { DetailMap, type DetailInput } from './terrain/detail/detailMap';
 import { SkyPass } from './lighting/sky';
 import { TerrainPass, type SurfaceLayers } from './terrain/terrainPass';
@@ -52,6 +54,7 @@ export class WorldView {
   private readonly detailU: DetailUniforms;
   private detailSeen = -1;
   private ground: DetailGround | null = null;
+  readonly labels: LabelLayer;
   private creekWorld: { elevation: Layer; waterClass: Layer; discharge: Layer; rivers: RiverGraph; seed: number } | null = null;
   private readonly viewProj = new Float32Array(16);
   private readonly planes = new Float64Array(24);
@@ -84,6 +87,7 @@ export class WorldView {
     this.sky = new SkyPass(gl);
     this.detail = new DetailMap(gl);
     this.detailU = new DetailUniforms(this.detail);
+    this.labels = new LabelLayer(gl);
   }
 
   /** Starts building the close-zoom detail map (time-sliced in draw()). */
@@ -168,6 +172,15 @@ export class WorldView {
       eye: { x: eye.x, y: size - eye.y, z: eye.z / this.exaggeration },
     });
     if (g) this.creekPass.setRivers(g, size);
+  }
+
+  /** Named landmarks for labels (wired to the label layer once it exists). */
+  setLandmarks(list: readonly Landmark[]): void {
+    this.labels.setLandmarks(list, this.hf?.size ?? 1024e3);
+  }
+
+  highlightLandmark(id: number | null): void {
+    this.labels.highlight(id);
   }
 
   setRivers(graph: RiverGraph | null): void {
@@ -255,6 +268,8 @@ export class WorldView {
       this.updateCreeks();
       this.creekPass.draw(riverFrame);
       this.rivers.draw(riverFrame);
+      gl.disable(gl.DEPTH_TEST);
+      this.labels.draw({ cam, ground: this.ground ?? hf, dpr: this.dpr, timeSec, exaggeration: this.exaggeration });
       gl.disable(gl.DEPTH_TEST);
     }
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbo);

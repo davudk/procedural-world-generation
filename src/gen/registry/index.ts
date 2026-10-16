@@ -1,0 +1,62 @@
+import type { Landmark, WorldTraits } from '../../shared/landmarks';
+import type { Rng } from '../../shared/rng';
+import { detectLand } from './land';
+import { Namer } from './names';
+import { rankAndName } from './rank';
+import { detectRegions } from './regions';
+import { detectRelief } from './relief';
+import { detectWaters } from './rivers';
+import { computeShared } from './shared';
+import { worldTraits } from './traits';
+import type { Candidate, RegistryInput } from './types';
+import { detectWater } from './water';
+
+export interface Registry {
+  landmarks: Landmark[];
+  traits: WorldTraits;
+  stats: Record<string, number>;
+  /** Hero candidates considered (category:score@x,y km), for diagnostics. */
+  heroPool: string[];
+}
+
+/**
+ * S11 landmark registry (PLAN.md §6, research 05 §3): detect significant features, rank them on one
+ * global importance scale with a zoom band each, name them, pick the heroes and summarise the world.
+ */
+export async function buildRegistry(I: RegistryInput, heroCount: number, rng: Rng, checkpoint: () => Promise<void>): Promise<Registry> {
+  const stats: Record<string, number> = {};
+  let t = performance.now();
+  const lap = (k: string): void => {
+    const now = performance.now();
+    stats[`ms_${k}`] = Math.round((now - t) * 10) / 10;
+    t = now;
+  };
+  const S = computeShared(I);
+  lap('shared');
+  const cands: Candidate[] = [];
+  detectLand(I, S, cands);
+  lap('land');
+  detectWater(I, S, cands);
+  lap('water');
+  await checkpoint();
+  t = performance.now();
+  const relief = detectRelief(I, S, cands);
+  lap('relief');
+  detectWaters(I, S, cands, relief.rangeOf);
+  lap('rivers');
+  detectRegions(I, S, cands);
+  lap('regions');
+  const worldM = I.worldKm * 1000;
+  const namer = new Namer(I.seed, rng, worldM);
+  const ranked = rankAndName(cands, S, namer, worldM, heroCount);
+  lap('names');
+  const traits = worldTraits(I, S, ranked.landmarks, ranked.heroes);
+  lap('traits');
+  for (const l of ranked.landmarks) stats[`n_${l.kind}`] = (stats[`n_${l.kind}`] ?? 0) + 1;
+  stats.landmarks = ranked.landmarks.length;
+  stats.heroes = ranked.heroes.length;
+  stats.heroTarget = heroCount;
+  stats.heroCandidates = ranked.heroPool.length;
+  stats.cultures = namer.cultures.length;
+  return { landmarks: ranked.landmarks, traits, stats, heroPool: ranked.heroPool };
+}

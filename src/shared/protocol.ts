@@ -1,4 +1,5 @@
 import type { Resolved, StageId } from './config/types';
+import type { Landmark, WorldTraits } from './landmarks';
 
 /** How a raster should be coloured by the debug viewer. */
 export type LayerKind = 'elevation' | 'categorical' | 'scalar';
@@ -90,6 +91,8 @@ export interface LakeInfo {
 export interface Vectors {
   rivers?: RiverGraph;
   lakes?: LakeInfo[];
+  landmarks?: Landmark[];
+  traits?: WorldTraits;
 }
 
 export type GenMode = 'preview' | 'build';
@@ -139,5 +142,7 @@ export function copyVectors(v: Vectors): Vectors {
     };
   }
   if (v.lakes) out.lakes = v.lakes.map((l) => ({ ...l }));
+  if (v.landmarks) out.landmarks = v.landmarks.map((l) => (l.path ? { ...l, data: { ...l.data }, path: l.path.slice() } : { ...l, data: { ...l.data } }));
+  if (v.traits) out.traits = { ...v.traits, traits: [...v.traits.traits], heroes: [...v.traits.heroes] };
   return out;
 }

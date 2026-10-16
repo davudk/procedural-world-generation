@@ -800,3 +800,44 @@ Each research note lists its sources with URLs. The core references are:
 - Coastal dunes (F22) are not done.
 - Landform passes can't see the positions of old craters and hotspots, so they re-detect them from the terrain.
 - Generation in the browser pane is sometimes several times slower than in node, because of machine load while agents ran.
+
+### M7 — Atlas (2026-10-16)
+
+**What landed:**
+- **S11 Registry** (`src/gen/registry/*`): one deterministic union-find merge tree is reused for four things:
+  - peaks by prominence (with a world king);
+  - seas split by basin enclosure;
+  - straits as the passages between sea basins;
+  - isthmuses on the land distance field.
+- **Other detections:**
+  - Ranges: high-relief regions split at deep cols, with PCA orientation and a crest path.
+  - Gulfs and bays: ray-enclosure tests at two scales.
+  - Peninsulas and capes: morphological opening of the land mask.
+  - Archipelagos: island clusters.
+  - Rivers: main stems traced by discharge, with paths.
+  - Lakes and playas, deltas, waterfalls, and canyons from valley depth.
+  - Biome regions, ice caps, and the M6 landform features.
+- **Ranking:** importance and a zoom band per landmark (`maxMpp` = footprint / 23 px, so a 15 km feature reads at world zoom), plus a tier.
+- **Names:** 8 phoneme inventories laid out as 3–5 culture regions per world, with kind-specific generic patterns. Names are seeded by world seed + language + kind + quantised identity position, never list order, and are unique within a world.
+- **Heroes:** scored against the research 05 menu and spaced at least a quarter of the world width apart.
+- **World traits:** a headline sentence plus fact bullets.
+- **Labels** (`src/render/labels/*`):
+  - A runtime SDF glyph atlas (own distance transform, shelf packing, on-demand glyphs).
+  - Upright serif for land and italic for water; spaced capitals for ranges, seas and continents.
+  - Greedy priority placement with collision, density cap, 3-frame stability, hysteresis and fades.
+  - Curved labels along rivers and fjords, rotated labels along ranges.
+  - Occlusion raycasts when tilted, plus hit testing and highlighting.
+- **UI:**
+  - The Atlas panel: traits, hero cards, grouped and searchable lists.
+  - Clicking a row or a label flies there.
+  - The inspector shows the nearest named place.
+
+**Measurements:**
+- Seed 7 Earth-like: 265 landmarks; 17 labels placed at world zoom.
+- Registry 80–150 ms at build; label placement ~0.1 ms per frame on real worlds.
+- 175 tests pass.
+
+**Known gaps:**
+- Pre-erosion volcanoes and old craters are only named when they still stand out as peaks.
+- No deltas are labelled on some seeds, because the fan is under 2 km.
+- River labels have no terrain occlusion.
