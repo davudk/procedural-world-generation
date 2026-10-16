@@ -1,9 +1,10 @@
 import type { Rng } from '../../shared/rng';
+import { RASTER_DX, RASTER_DY, type Grid } from '../grid/grid';
 import { createPriorityFloodScratch, priorityFloodEpsilon, type PriorityFloodScratch } from '../grid/priorityFlood';
 
 /**
  * Landscape evolution: uplift + stream-power incision (Braun & Willett 2013 implicit O(n) solver,
- * n = 1) + hillslope diffusion + talus clamp on a square grid (research 01 §3).
+ * n = 1) + hillslope diffusion + talus clamp on the world grid (research 01 §3).
  */
 
 export interface LemParams {
@@ -42,8 +43,7 @@ export interface LemStrata {
 }
 
 export interface LemInput {
-  n: number;
-  cellM: number;
+  grid: Grid;
   /** Elevation (m, sea level 0); modified in place. */
   h: Float32Array;
   /** Uplift, m/yr. */
@@ -92,17 +92,13 @@ export const RELIEF_CALIBRATION = 1.2;
 
 const CHECKPOINT_EVERY = 2;
 const FLOOD_EPS = 1e-3;
-const DX = [-1, 0, 1, -1, 1, -1, 0, 1];
-const DY = [-1, -1, -1, 0, 0, 1, 1, 1];
-const DIAG = [true, false, true, false, false, true, false, true];
-
-const offsets = (n: number): Int32Array => Int32Array.from(DX, (dx, k) => DY[k] * n + dx);
-
-function outside(x: number, y: number, k: number, n: number): boolean {
-  const nx = x + DX[k];
-  const ny = y + DY[k];
-  return nx < 0 || ny < 0 || nx >= n || ny >= n;
-}
+/** Raster-order D8 (the grid's canonical k): which neighbours are diagonal. */
+const DIAG = RASTER_DX.map((dx, k) => dx !== 0 && RASTER_DY[k] !== 0);
+/** Raster k of the west, east, north and south neighbours. */
+const K_W = 3;
+const K_E = 4;
+const K_N = 1;
+const K_S = 6;
 
 /**
  * Uplift rate (m/yr) giving roughly `targetPeakM` of steady-state relief for a range of half-width
@@ -132,6 +128,7 @@ export function upliftForPeak(targetPeakM: number, K: number, m: number, halfWid
  */
 export class FlowRouter {
   readonly cells: number;
+  readonly cellM: number;
   /** Receiver per cell; self for fixed cells. */
   readonly rcv: Int32Array;
   /** Distance to the receiver (m); 0 for fixed cells. */
@@ -152,12 +149,13 @@ export class FlowRouter {
   private readonly invDist: Float64Array;
 
   constructor(
-    readonly n: number,
-    readonly cellM: number,
+    readonly grid: Grid,
     readonly fixed: Uint8Array,
   ) {
-    const N = n * n;
+    const N = grid.cells;
+    const cellM = grid.cellM;
     this.cells = N;
+    this.cellM = cellM;
     this.rcv = new Int32Array(N);
     this.rdist = new Float32Array(N);
     this.stack = new Int32Array(N);
@@ -173,7 +171,7 @@ export class FlowRouter {
 
   /** Priority-Flood+ε of `h` into `filled`, seeded from the fixed cells. */
   fill(h: Float32Array): void {
-    priorityFloodEpsilon(h, this.n, this.fixed, this.filled, FLOOD_EPS, this.flood);
+    priorityFloodEpsilon(h, this.grid, this.fixed, this.filled, FLOOD_EPS, this.flood);
   }
 
   /**
@@ -181,53 +179,56 @@ export class FlowRouter {
    * probability ∝ slope⁴ instead (cells visited in index order, so the draw sequence is fixed).
    */
   receivers(rng: Rng | null): void {
-    const { n, fixed, filled, rcv, rdist, dist, invDist, w, ks } = this;
-    const off = offsets(n);
-    for (let y = 0; y < n; y++) {
-      const edgeRow = y === 0 || y === n - 1;
-      for (let x = 0; x < n; x++) {
-        const i = y * n + x;
-        if (fixed[i]) {
-          rcv[i] = i;
-          rdist[i] = 0;
-          continue;
-        }
-        const edge = edgeRow || x === 0 || x === n - 1;
-        const zi = filled[i];
-        let best = -1;
-        if (rng) {
-          let cnt = 0;
-          let sum = 0;
-          for (let k = 0; k < 8; k++) {
-            if (edge && outside(x, y, k, n)) continue;
-            const s = (zi - filled[i + off[k]]) * invDist[k];
-            if (s <= 0) continue;
-            const s2 = s * s;
-            w[cnt] = s2 * s2;
-            sum += w[cnt];
-            ks[cnt++] = k;
-          }
-          if (cnt > 0) {
-            let r = rng.float() * sum;
-            let c = 0;
-            while (c < cnt - 1 && r >= w[c]) r -= w[c++];
-            best = ks[c];
-          }
-        } else {
-          let bestS = 0;
-          for (let k = 0; k < 8; k++) {
-            if (edge && outside(x, y, k, n)) continue;
-            const s = (zi - filled[i + off[k]]) * invDist[k];
-            if (s > bestS) {
-              bestS = s;
-              best = k;
-            }
-          }
-        }
-        if (best < 0) throw new Error(`FlowRouter: cell ${i} has no lower neighbour after filling`);
-        rcv[i] = i + off[best];
-        rdist[i] = dist[best];
+    const { grid: g, cells: N, fixed, filled, rcv, rdist, dist, invDist, w, ks } = this;
+    const { off8: off, border } = g;
+    for (let i = 0; i < N; i++) {
+      if (fixed[i]) {
+        rcv[i] = i;
+        rdist[i] = 0;
+        continue;
       }
+      const b = border[i];
+      const zi = filled[i];
+      let best = -1;
+      let bestJ = -1;
+      if (rng) {
+        let cnt = 0;
+        let sum = 0;
+        for (let k = 0; k < 8; k++) {
+          let j: number;
+          if (b === 0) j = i + off[k];
+          else if ((j = g.nbr(i, k)) < 0) continue;
+          const s = (zi - filled[j]) * invDist[k];
+          if (s <= 0) continue;
+          const s2 = s * s;
+          w[cnt] = s2 * s2;
+          sum += w[cnt];
+          ks[cnt++] = k;
+        }
+        if (cnt > 0) {
+          let r = rng.float() * sum;
+          let c = 0;
+          while (c < cnt - 1 && r >= w[c]) r -= w[c++];
+          best = ks[c];
+          bestJ = b === 0 ? i + off[best] : g.nbr(i, best);
+        }
+      } else {
+        let bestS = 0;
+        for (let k = 0; k < 8; k++) {
+          let j: number;
+          if (b === 0) j = i + off[k];
+          else if ((j = g.nbr(i, k)) < 0) continue;
+          const s = (zi - filled[j]) * invDist[k];
+          if (s > bestS) {
+            bestS = s;
+            best = k;
+            bestJ = j;
+          }
+        }
+      }
+      if (best < 0) throw new Error(`FlowRouter: cell ${i} has no lower neighbour after filling`);
+      rcv[i] = bestJ;
+      rdist[i] = dist[best];
     }
   }
 
@@ -289,8 +290,8 @@ export async function runLem(
   onIteration?: (i: number, h: Float32Array) => void,
 ): Promise<LemResult> {
   const t0 = performance.now();
-  const { n, cellM, h, U, K, fixed, rain, strata } = input;
-  const N = n * n;
+  const { grid, h, U, K, fixed, rain, strata } = input;
+  const N = grid.cells;
   for (const [name, a] of [['h', h], ['U', U], ['K', K], ['fixed', fixed], ['rain', rain], ['strata.thickness', strata?.thickness]] as const) {
     if (a && a.length !== N) throw new Error(`runLem: ${name} has ${a.length} cells, expected ${N}`);
   }
@@ -298,11 +299,11 @@ export async function runLem(
   for (let i = 0; i < N; i++) if (!fixed[i]) land++;
   if (land === N) throw new Error('runLem: needs at least one fixed (base-level) cell');
 
-  const router = new FlowRouter(n, cellM, fixed);
+  const router = new FlowRouter(grid, fixed);
   const { rcv, rdist, stack, area } = router;
   const am = new Float64Array(N);
   const tmp = new Float32Array(N);
-  const rim = rimMask(fixed, n);
+  const rim = rimMask(fixed, grid);
   const prof = zeroProfile();
   const { m, dt } = p;
   let t = performance.now();
@@ -332,10 +333,10 @@ export async function runLem(
     incise(h, fixed, K, am, rcv, rdist, stack, router.stackLen, dt, strata);
     lap('incision');
 
-    if (p.kd > 0 && it < p.iterations - p.diffusionOffLast) diffuse(h, tmp, fixed, n, cellM, p.kd, dt);
+    if (p.kd > 0 && it < p.iterations - p.diffusionOffLast) diffuse(h, tmp, fixed, grid, p.kd, dt);
     lap('diffusion');
 
-    if (p.talus > 0) talusClamp(h, fixed, rim, n, cellM, p.talus);
+    if (p.talus > 0) talusClamp(h, fixed, rim, grid, p.talus);
     lap('talus');
 
     onIteration?.(it, h);
@@ -395,23 +396,40 @@ function boundaryH(h: Float32Array, fixed: Uint8Array, j: number): number {
  * Explicit 5-point diffusion on land cells, sub-stepped so c = kd·Δt/cell² ≤ 1/8; map edges are zero-flux.
  * (At the classic limit c = 1/4 the checkerboard mode has amplification −1 and never decays.)
  */
-function diffuse(h: Float32Array, tmp: Float32Array, fixed: Uint8Array, n: number, cellM: number, kd: number, dt: number): void {
-  const N = n * n;
+function diffuse(h: Float32Array, tmp: Float32Array, fixed: Uint8Array, g: Grid, kd: number, dt: number): void {
+  const { cells: N, cellM, off8, border } = g;
+  const oW = off8[K_W];
+  const oE = off8[K_E];
+  const oN = off8[K_N];
+  const oS = off8[K_S];
   const steps = Math.max(1, Math.ceil((dt * 8 * kd) / (cellM * cellM)));
   const c = (kd * (dt / steps)) / (cellM * cellM);
   for (let s = 0; s < steps; s++) {
-    for (let y = 0; y < n; y++) {
-      for (let x = 0; x < n; x++) {
-        const i = y * n + x;
-        if (fixed[i]) continue;
-        const hi = h[i];
-        const l = x > 0 ? boundaryH(h, fixed, i - 1) : hi;
-        const r = x < n - 1 ? boundaryH(h, fixed, i + 1) : hi;
-        const u = y > 0 ? boundaryH(h, fixed, i - n) : hi;
-        const d = y < n - 1 ? boundaryH(h, fixed, i + n) : hi;
-        const v = hi + c * (l + r + u + d - 4 * hi);
-        tmp[i] = v < LAND_MIN ? LAND_MIN : v;
+    for (let i = 0; i < N; i++) {
+      if (fixed[i]) continue;
+      const hi = h[i];
+      let l: number;
+      let r: number;
+      let u: number;
+      let d: number;
+      if (border[i] === 0) {
+        l = boundaryH(h, fixed, i + oW);
+        r = boundaryH(h, fixed, i + oE);
+        u = boundaryH(h, fixed, i + oN);
+        d = boundaryH(h, fixed, i + oS);
+      } else {
+        // Zero-flux map edges: a missing neighbour presents the cell's own height.
+        const jl = g.nbr(i, K_W);
+        const jr = g.nbr(i, K_E);
+        const ju = g.nbr(i, K_N);
+        const jd = g.nbr(i, K_S);
+        l = jl < 0 ? hi : boundaryH(h, fixed, jl);
+        r = jr < 0 ? hi : boundaryH(h, fixed, jr);
+        u = ju < 0 ? hi : boundaryH(h, fixed, ju);
+        d = jd < 0 ? hi : boundaryH(h, fixed, jd);
       }
+      const v = hi + c * (l + r + u + d - 4 * hi);
+      tmp[i] = v < LAND_MIN ? LAND_MIN : v;
     }
     for (let i = 0; i < N; i++) if (!fixed[i]) h[i] = tmp[i];
   }
@@ -422,12 +440,11 @@ function diffuse(h: Float32Array, tmp: Float32Array, fixed: Uint8Array, n: numbe
  * that neighbour (all of it when the neighbour is fixed, where the material is lost to the sea).
  * `rim` flags cells touching the map edge or a fixed cell (the only ones needing those checks).
  */
-function talusClamp(h: Float32Array, fixed: Uint8Array, rim: Uint8Array, n: number, cellM: number, tanMax: number): void {
+function talusClamp(h: Float32Array, fixed: Uint8Array, rim: Uint8Array, g: Grid, tanMax: number): void {
+  const { cells: N, cellM, off8: off, border } = g;
   const inv = Float64Array.from(DIAG, (d) => 1 / ((d ? Math.SQRT2 : 1) * cellM));
   const lim = Float64Array.from(DIAG, (d) => tanMax * (d ? Math.SQRT2 : 1) * cellM);
   const limOrtho = tanMax * cellM;
-  const off = offsets(n);
-  const N = n * n;
   for (let i = 0; i < N; i++) {
     if (fixed[i]) continue;
     const hi = h[i];
@@ -436,11 +453,11 @@ function talusClamp(h: Float32Array, fixed: Uint8Array, rim: Uint8Array, n: numb
     let bestK = 0;
     let hb = 0;
     if (rim[i]) {
-      const x = i % n;
-      const y = (i - x) / n;
+      const bd = border[i];
       for (let k = 0; k < 8; k++) {
-        if (outside(x, y, k, n)) continue;
-        const j = i + off[k];
+        let j: number;
+        if (bd === 0) j = i + off[k];
+        else if ((j = g.nbr(i, k)) < 0) continue;
         const hj = boundaryH(h, fixed, j);
         const s = (hi - hj) * inv[k];
         if (s > bestS) {
@@ -481,18 +498,19 @@ function talusClamp(h: Float32Array, fixed: Uint8Array, rim: Uint8Array, n: numb
   }
 }
 
-/** Cells on the map edge or next to a fixed cell. */
-function rimMask(fixed: Uint8Array, n: number): Uint8Array {
-  const rim = new Uint8Array(n * n);
-  const off = offsets(n);
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      const i = y * n + x;
-      for (let k = 0; k < 8; k++) {
-        if (outside(x, y, k, n) || fixed[i + off[k]]) {
-          rim[i] = 1;
-          break;
-        }
+/** Cells on the grid border or next to a fixed cell. */
+function rimMask(fixed: Uint8Array, g: Grid): Uint8Array {
+  const { cells: N, off8: off, border } = g;
+  const rim = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    if (border[i]) {
+      rim[i] = 1;
+      continue;
+    }
+    for (let k = 0; k < 8; k++) {
+      if (fixed[i + off[k]]) {
+        rim[i] = 1;
+        break;
       }
     }
   }

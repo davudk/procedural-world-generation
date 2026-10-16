@@ -1,5 +1,5 @@
 import { B } from '../stages/plates';
-import { cellAtM, cellX, cellY, insideDistance, label, labelAngle, mergeTree, nearestWhere, pca, resolveOwners, type GridSpec, type MergeTree } from './grid';
+import { cellAtM, cellX, cellY, insideDistance, label, labelAngle, mergeTree, nearestWhere, pca, resolveOwners, type MergeTree } from './grid';
 import { G } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
 
@@ -351,7 +351,7 @@ function detectFlats(I: RegistryInput, S: Shared, out: Candidate[], rangeOf: Int
   }
   const emit = (mask: Uint8Array, kind: 'plateau' | 'plain', minKm2: number, cap: number): void => {
     const comps = label(mask, m, true);
-    const inside = insideDistance(mask, m);
+    const inside = insideDistance(mask, R);
     const pole = new Int32Array(comps.count).fill(-1);
     const sumH = new Float64Array(comps.count);
     for (let i = 0; i < MM; i++) {
@@ -386,7 +386,7 @@ function detectFlats(I: RegistryInput, S: Shared, out: Candidate[], rangeOf: Int
 /** Continental rift segments (plates) of ≥ 100 km, mostly on land. */
 function detectRifts(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const P = I.plates;
-  const pg: GridSpec = { n: P.n, cellM: P.cellKm * 1000 };
+  const pg = I.platesGrid;
   const cells = new Map<number, number[]>();
   for (let c = 0; c < P.n * P.n; c++) {
     const s = P.bSeg[c];

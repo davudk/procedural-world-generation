@@ -1,3 +1,4 @@
+import type { Grid } from './grid';
 import { MinHeap } from './heap';
 
 /** Reusable buffers so repeated floods (one per LEM iteration) allocate nothing. */
@@ -10,9 +11,6 @@ export interface PriorityFloodScratch {
 export function createPriorityFloodScratch(cells: number): PriorityFloodScratch {
   return { closed: new Uint8Array(cells), pit: new Int32Array(cells), heap: new MinHeap(4096) };
 }
-
-const DX = [-1, 0, 1, -1, 1, -1, 0, 1];
-const DY = [-1, -1, -1, 0, 0, 1, 1, 1];
 
 /**
  * Smallest float32 value we treat as "strictly above" z: z + max(eps, |z|·2^-20). The relative term
@@ -31,13 +29,13 @@ export function floodStep(z: number, eps: number): number {
  */
 export function priorityFloodEpsilon(
   h: Float32Array,
-  n: number,
+  g: Grid,
   isSeed: Uint8Array,
   out: Float32Array,
   eps = 1e-3,
-  scratch: PriorityFloodScratch = createPriorityFloodScratch(n * n),
+  scratch: PriorityFloodScratch = createPriorityFloodScratch(g.cells),
 ): void {
-  const N = n * n;
+  const { cells: N, off8: off, border } = g;
   out.set(h);
   const { closed, pit, heap } = scratch;
   closed.fill(0);
@@ -45,38 +43,29 @@ export function priorityFloodEpsilon(
 
   for (let i = 0; i < N; i++) if (isSeed[i]) closed[i] = 1;
   // Only seeds that touch a non-seed cell can ever spill into land; interior ocean stays out of the heap.
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      const i = y * n + x;
-      if (!isSeed[i]) continue;
-      for (let k = 0; k < 8; k++) {
-        const nx = x + DX[k];
-        const ny = y + DY[k];
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        if (!closed[ny * n + nx]) {
-          heap.push(out[i], i);
-          break;
-        }
+  for (let i = 0; i < N; i++) {
+    if (!isSeed[i]) continue;
+    const b = border[i];
+    for (let k = 0; k < 8; k++) {
+      const j = b === 0 ? i + off[k] : g.nbr(i, k);
+      if (j < 0) continue;
+      if (!closed[j]) {
+        heap.push(out[i], i);
+        break;
       }
     }
   }
 
-  const off = Int32Array.from(DX, (dx, k) => DY[k] * n + dx);
   let pitHead = 0;
   let pitTail = 0;
   while (pitHead < pitTail || heap.size > 0) {
     const c = pitHead < pitTail ? pit[pitHead++] : heap.pop();
     const zNext = floodStep(out[c], eps);
-    const cx = c % n;
-    const cy = (c - cx) / n;
-    const edge = cx === 0 || cy === 0 || cx === n - 1 || cy === n - 1;
+    const b = border[c];
     for (let k = 0; k < 8; k++) {
-      if (edge) {
-        const nx = cx + DX[k];
-        const ny = cy + DY[k];
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-      }
-      const j = c + off[k];
+      let j: number;
+      if (b === 0) j = c + off[k];
+      else if ((j = g.nbr(c, k)) < 0) continue;
       if (closed[j]) continue;
       closed[j] = 1;
       if (out[j] <= zNext) {

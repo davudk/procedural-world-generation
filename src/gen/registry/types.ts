@@ -52,6 +52,8 @@ export interface RegistryInput {
   seed: number;
   worldKm: number;
   fine: GridSpec;
+  /** The plates stage's grid. */
+  platesGrid: GridSpec;
   /** Final carved terrain (m). */
   h: Float32Array;
   /** 1 = sea (WATER.OCEAN). */

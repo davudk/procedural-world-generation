@@ -1,4 +1,5 @@
 import type { Noise2 } from '../../shared/noise';
+import { coarser, type Grid } from '../grid/grid';
 import { chamferDistance, smoothstep } from '../grid/ops';
 import { advectMarine, advectMoisture, buildStencil } from './advect';
 import { sstAnomaly } from './currents';
@@ -85,6 +86,7 @@ export interface ClimateFields {
 
 /** Inputs of the seasonal sweeps, on the sweep grid. */
 interface SweepGrid {
+  grid: Grid;
   n: number;
   cellKm: number;
   sea: Uint8Array;
@@ -120,12 +122,12 @@ interface SweepOut {
 export async function computeClimate(
   h: Float32Array,
   fixed: Uint8Array,
-  n: number,
-  cellKm: number,
+  grid: Grid,
   p: ClimateParams,
   noise: Noise2,
   checkpoint: () => Promise<void>,
 ): Promise<ClimateFields> {
+  const { n, cellKm } = grid;
   const N = n * n;
   const stats: Record<string, number> = {};
   let tLap = performance.now();
@@ -144,11 +146,11 @@ export async function computeClimate(
     // fBm rarely leaves ±0.5, so ×2 gives the research's ±warp degrees.
     for (let x = 0; x < n; x++) lat[y * n + x] = base + 2 * p.latitudeWarp * lat[y * n + x];
   }
-  const coastKm = chamferDistance(sea, n);
+  const coastKm = chamferDistance(sea, grid);
   for (let i = 0; i < N; i++) coastKm[i] *= cellKm;
   let f = 1;
   while (f * 2 * cellKm <= SWEEP_KM && n % (f * 2) === 0 && n / (f * 2) >= 64) f *= 2;
-  const g = sweepGrid(sea, h, lat, n, cellKm, f, p);
+  const g = sweepGrid(sea, h, lat, grid, f, p);
   stats.sweepGrid = g.n;
   lap('setup');
   await checkpoint();
@@ -223,7 +225,9 @@ export async function computeClimate(
   return { sea, lat, temp, tAmp, precip, pSummer, pet, marine, coastKm, sstAnom, fog, windDeg, stats };
 }
 
-function sweepGrid(sea: Uint8Array, h: Float32Array, lat: Float32Array, n: number, cellKm: number, f: number, p: ClimateParams): SweepGrid {
+function sweepGrid(sea: Uint8Array, h: Float32Array, lat: Float32Array, grid: Grid, f: number, p: ClimateParams): SweepGrid {
+  const { n, cellKm } = grid;
+  const sg = coarser(grid, f);
   const m = n / f;
   const M = m * m;
   const seaF = new Float32Array(n * n);
@@ -240,7 +244,7 @@ function sweepGrid(sea: Uint8Array, h: Float32Array, lat: Float32Array, n: numbe
   const ck = cellKm * f;
   const hs = gh.slice();
   gaussBlur(hs, m, 5 / ck);
-  const coastKm = chamferDistance(gs, m);
+  const coastKm = chamferDistance(gs, sg);
   const tsl = new Float32Array(M);
   const ampL = new Float32Array(M);
   const ampO = new Float32Array(M);
@@ -252,7 +256,7 @@ function sweepGrid(sea: Uint8Array, h: Float32Array, lat: Float32Array, n: numbe
     ampO[i] = ampOcean.at(glat[i]) * p.seasonality;
   }
   const anom = p.oceanCurrents ? sstAnomaly(gs, glat, m, ck, !p.outsideOcean) : new Float32Array(M);
-  return { n: m, cellKm: ck, sea: gs, lat: glat, h: gh, hs, coastKm, tsl, ampL, ampO, anom };
+  return { grid: sg, n: m, cellKm: ck, sea: gs, lat: glat, h: gh, hs, coastKm, tsl, ampL, ampO, anom };
 }
 
 async function sweeps(g: SweepGrid, p: ClimateParams, noise: Noise2, stats: Record<string, number>, checkpoint: () => Promise<void>): Promise<SweepOut> {

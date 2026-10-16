@@ -429,7 +429,7 @@ export function settleFixed(c: LandformCtx, s: Snapshot): number {
 
 /** Connected regions (4-neighbour) of `mask`, with cell count and centroid (km) per region. */
 export function regions(c: LandformCtx, mask: Uint8Array): { label: Int32Array; size: number[]; cx: number[]; cy: number[] } {
-  const { label, sizes } = components(mask, c.n);
+  const { label, sizes } = components(mask, c.grid);
   const cx = new Array<number>(sizes.length).fill(0);
   const cy = new Array<number>(sizes.length).fill(0);
   for (let i = 0; i < label.length; i++) {

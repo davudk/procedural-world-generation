@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { flatGrid } from '../src/gen/grid/grid';
 import { applyArid } from '../src/gen/landforms/arid';
 import { applyCraters } from '../src/gen/landforms/impact';
 import { applyKarst } from '../src/gen/landforms/karst';
@@ -62,7 +63,7 @@ async function run(archetype: string, seed = 7, pins: WorldSpec['pins'] = {}): P
     return resolved.values[id];
   };
   const c: LandformCtx = {
-    n: g.n, cellKm: g.cellKm, worldKm: get('worldSize') as number, h: g.h.slice(), fixed: g.fixed.slice(), ice: g.ice,
+    grid: flatGrid(g.n, g.cellKm), n: g.n, cellKm: g.cellKm, worldKm: get('worldSize') as number, h: g.h.slice(), fixed: g.fixed.slice(), ice: g.ice,
     climate: pl.output('climate')!.extra as ClimateExtra,
     plates: pl.output('plates')!.extra as PlatesExtra,
     base: pl.output('base')!.extra as BaseExtra,

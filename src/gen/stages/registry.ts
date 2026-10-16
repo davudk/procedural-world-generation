@@ -25,13 +25,13 @@ export const registryStage: StageDef = {
     const biome = ctx.input('biome').extra as BiomeExtra;
     const climate = ctx.input('climate').extra as ClimateExtra;
     const plates = ctx.input('plates').extra as PlatesExtra;
-    const { n, cellKm } = hydro;
+    const { n } = hydro;
     if (landforms.n !== n || biome.n !== n || climate.n !== n) throw new Error('registry: grids differ');
     const sea = new Uint8Array(n * n);
     for (let c = 0; c < n * n; c++) sea[c] = hydro.waterClass[c] === WATER.OCEAN ? 1 : 0;
     const reg = await buildRegistry(
       {
-        seed: ctx.seed, worldKm: ctx.num('worldSize'), fine: { n, cellM: cellKm * 1000 }, h: hydro.elevation, sea, hydro,
+        seed: ctx.seed, worldKm: ctx.num('worldSize'), fine: ctx.grid(n), platesGrid: ctx.grid(plates.n), h: hydro.elevation, sea, hydro,
         rivers: hydroOut.vectors!.rivers!, lakes: hydroOut.vectors!.lakes ?? [], landforms, plates, biome, climate,
       },
       Math.round(ctx.drawn('heroCount')), ctx.rng('cultures'), ctx.checkpoint,

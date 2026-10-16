@@ -1,4 +1,5 @@
-/** Resampling of square row-major grids (cell-centred: cell i covers [i, i+1) and samples at i + ½). */
+/** Resampling between grid resolutions (cell-centred: cell i covers [i, i+1) and samples at i + ½). */
+import type { Grid } from './grid';
 
 /** Catmull-Rom weights for the four taps at offsets −1, 0, 1, 2 from floor(x), fraction t. */
 function catmullRom(t: number, w: Float64Array, o: number): void {
@@ -11,10 +12,11 @@ function catmullRom(t: number, w: Float64Array, o: number): void {
 }
 
 /**
- * Bicubic (Catmull-Rom) upsample of an n×n grid to (factor·n)², cell-centred, edges clamped. The
- * kernel interpolates, so it can overshoot slightly near sharp steps.
+ * Bicubic (Catmull-Rom) upsample of a field on `g` to `finer(g, factor)`, cell-centred, edges
+ * clamped. The kernel interpolates, so it can overshoot slightly near sharp steps.
  */
-export function upsampleBicubic(src: Float32Array, n: number, factor: 2): Float32Array {
+export function upsampleBicubic(src: Float32Array, g: Grid, factor: 2): Float32Array {
+  const n = g.n;
   const m = n * factor;
   // Destination cell X samples source coordinate (X + ½)/factor − ½; precompute taps and weights per axis.
   const base = new Int32Array(m * 4);
@@ -51,8 +53,9 @@ export function upsampleBicubic(src: Float32Array, n: number, factor: 2): Float3
   return dst;
 }
 
-/** Box-filter downsample of an n×n grid by an integer factor dividing n. */
-export function downsampleMean(src: Float32Array, n: number, factor: number): Float32Array {
+/** Box-filter downsample of a field on `g` to `coarser(g, factor)` (factor must divide n). */
+export function downsampleMean(src: Float32Array, g: Grid, factor: number): Float32Array {
+  const n = g.n;
   if (n % factor !== 0) throw new Error(`downsampleMean: ${factor} does not divide ${n}`);
   const m = n / factor;
   const dst = new Float32Array(m * m);

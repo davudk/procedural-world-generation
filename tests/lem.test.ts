@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { flatGrid } from '../src/gen/grid/grid';
 import { priorityFloodEpsilon } from '../src/gen/grid/priorityFlood';
 import { downsampleMean, upsampleBicubic } from '../src/gen/grid/upsample';
 import { DEFAULT_LEM_PARAMS, FlowRouter, LAND_MIN, runLem, upliftForPeak, type LemInput, type LemParams } from '../src/gen/lem/streamPower';
@@ -27,7 +28,7 @@ function island(n: number, seed: number, U0 = 1e-3): LemInput {
       }
     }
   }
-  return { n, cellM: CELL, h, U: new Float32Array(N).fill(U0), K: new Float32Array(N).fill(K0), fixed };
+  return { grid: flatGrid(n, CELL / 1000), h, U: new Float32Array(N).fill(U0), K: new Float32Array(N).fill(K0), fixed };
 }
 
 /** Strip draining to base level at x = 0 and x = n−1; top and bottom rows are closed map edges. */
@@ -43,7 +44,7 @@ function strip(n: number, seed: number, U0: number): LemInput {
       else h[i] = 1 + 10 * rng.float();
     }
   }
-  return { n, cellM: CELL, h, U: new Float32Array(N).fill(U0), K: new Float32Array(N).fill(K0), fixed };
+  return { grid: flatGrid(n, CELL / 1000), h, U: new Float32Array(N).fill(U0), K: new Float32Array(N).fill(K0), fixed };
 }
 
 const params = (over: Partial<LemParams> = {}): LemParams => ({ ...DEFAULT_LEM_PARAMS, ...over });
@@ -77,7 +78,7 @@ describe('priorityFloodEpsilon', () => {
     }
     for (let i = 1000; i < 1300; i++) h[i] = 3100; // a large flat
     const out = new Float32Array(n * n);
-    priorityFloodEpsilon(h, n, seed, out, 1e-4);
+    priorityFloodEpsilon(h, flatGrid(n, 1), seed, out, 1e-4);
     let raised = 0;
     for (let i = 0; i < n * n; i++) {
       if (seed[i]) {
@@ -97,12 +98,12 @@ describe('upsample', () => {
     const n = 16;
     const src = new Float32Array(n * n);
     for (let i = 0; i < n * n; i++) src[i] = 3 * (i % n) + 2 * Math.floor(i / n);
-    const up = upsampleBicubic(src, n, 2);
+    const up = upsampleBicubic(src, flatGrid(n, 1), 2);
     const m = 2 * n;
     for (let Y = 4; Y < m - 4; Y++) {
       for (let X = 4; X < m - 4; X++) expect(up[Y * m + X]).toBeCloseTo(3 * ((X + 0.5) / 2 - 0.5) + 2 * ((Y + 0.5) / 2 - 0.5), 4);
     }
-    const back = downsampleMean(up, m, 2);
+    const back = downsampleMean(up, flatGrid(m, 1), 2);
     for (let Y = 2; Y < n - 2; Y++) for (let X = 2; X < n - 2; X++) expect(back[Y * n + X]).toBeCloseTo(src[Y * n + X], 4);
   });
 });
@@ -113,7 +114,7 @@ describe('FlowRouter', () => {
     const rain = new Float32Array(96 * 96);
     const rng = new Rng(9);
     for (let i = 0; i < rain.length; i++) rain[i] = 0.5 + rng.float();
-    const r = new FlowRouter(inp.n, CELL, inp.fixed);
+    const r = new FlowRouter(inp.grid, inp.fixed);
     r.route(inp.h, new Rng(1), rain);
     const pos = new Int32Array(inp.h.length).fill(-1);
     for (let k = 0; k < r.stackLen; k++) pos[r.stack[k]] = k;
@@ -236,9 +237,9 @@ describe('runLem', () => {
 
 describe('diffusion stability', () => {
   it('leaves no cell-parity checkerboard at 1 km cells (c = kd·dt/cell² at the classic 1/4 limit)', async () => {
-    const inp = { ...island(96, 5), cellM: 1000 };
+    const inp = { ...island(96, 5), grid: flatGrid(96, 1) };
     const res = await runLem(inp, params({ iterations: 40, stochasticIterations: 0, diffusionOffLast: 0, talus: 10 }), new Rng(5));
-    const { h, n } = { h: res.h, n: inp.n };
+    const { h, n } = { h: res.h, n: inp.grid.n };
     // A checkerboard makes the orthogonal-neighbour Laplacian dominate the diagonal one.
     let orth = 0;
     let diag = 0;

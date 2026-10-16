@@ -25,7 +25,7 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
       mask[i] = s >= thr ? 1 : 0;
     }
     const comps = label(mask, m, true);
-    const inside = insideDistance(mask, m);
+    const inside = insideDistance(mask, R);
     const res: { cells: number[]; areaKm2: number; pole: number }[] = [];
     const cellsOf: number[][] = Array.from({ length: comps.count }, () => []);
     for (let i = 0; i < MM; i++) if (comps.label[i] >= 0) cellsOf[comps.label[i]].push(i);

@@ -164,7 +164,7 @@ function detectPeninsulas(I: RegistryInput, S: Shared, R: GridSpec, rKm: number,
     if (rad < 1.5) continue;
     const eroded = new Uint8Array(MM);
     for (let i = 0; i < MM; i++) eroded[i] = S.land[i] && S.dSea[i] > rad ? 1 : 0;
-    const dO = chamferDistance(eroded, m);
+    const dO = chamferDistance(eroded, R);
     const resid = new Uint8Array(MM);
     const opened = new Uint8Array(MM);
     for (let i = 0; i < MM; i++) {

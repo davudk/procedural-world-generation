@@ -1,7 +1,5 @@
+import { AXIAL_DX as DX, AXIAL_DY as DY, type Grid } from './grid';
 import { MinHeap } from './heap';
-
-const DX = [1, -1, 0, 0, 1, 1, -1, -1];
-const DY = [0, 0, 1, -1, 1, -1, 1, -1];
 
 /**
  * Approximate Euclidean distance transform with nearest-source propagation: a multi-source Dijkstra
@@ -9,7 +7,8 @@ const DY = [0, 0, 1, -1, 1, -1, 1, -1];
  * to that source (vector propagation; errors are rare and sub-cell). O(n log n).
  * Returns distances in cells and the index of the nearest source cell (−1 if none).
  */
-export function distanceField(source: Uint8Array, n: number): { dist: Float32Array; nearest: Int32Array } {
+export function distanceField(source: Uint8Array, g: Grid): { dist: Float32Array; nearest: Int32Array } {
+  const n = g.n;
   // Float64 on purpose: comparing float64 candidates against float32-rounded stored distances can
   // re-queue the same cells forever.
   const dist = new Float64Array(n * n).fill(Infinity);
@@ -51,11 +50,12 @@ export function distanceField(source: Uint8Array, n: number): { dist: Float32Arr
  * is measured to the nearest cell of the other side, minus half a cell, so the zero crossing sits on
  * the cell edge.
  */
-export function signedDistance(mask: Uint8Array, n: number): Float32Array {
+export function signedDistance(mask: Uint8Array, g: Grid): Float32Array {
+  const n = g.n;
   const inv = new Uint8Array(n * n);
   for (let i = 0; i < n * n; i++) inv[i] = mask[i] ? 0 : 1;
-  const toOutside = distanceField(inv, n).dist;
-  const toInside = distanceField(mask, n).dist;
+  const toOutside = distanceField(inv, g).dist;
+  const toInside = distanceField(mask, g).dist;
   const out = new Float32Array(n * n);
   for (let i = 0; i < n * n; i++) {
     out[i] = mask[i] ? Math.min(toOutside[i], n) - 0.5 : -(Math.min(toInside[i], n) - 0.5);

@@ -1,3 +1,4 @@
+import { coarser } from '../grid/grid';
 import { boxBlur } from '../grid/ops';
 import {
   areaFactor, aridityAt, bigRegions, centreOf, coarseNoise, coarsen, concavity, DiskSet, drains, DX8, DY8, forDisk, poisson, refineCoarse,
@@ -149,6 +150,7 @@ export function applyArid(c: LandformCtx): void {
   const co = coarsen(c, h);
   const cm = co.m;
   const ckC = ck * co.f;
+  const cg = coarser(c.grid, co.f);
   const sC = new Float32Array(cm * cm);
   for (let y = 1; y < cm - 1; y++) {
     for (let x = 1; x < cm - 1; x++) {
@@ -156,9 +158,9 @@ export function applyArid(c: LandformCtx): void {
       sC[i] = Math.hypot(co.g[i + 1] - co.g[i - 1], co.g[i + cm] - co.g[i - cm]) / (2 * ckC * 1000);
     }
   }
-  boxBlur(sC, cm, Math.max(1, Math.round(8 / ckC)));
+  boxBlur(sC, cg, Math.max(1, Math.round(8 / ckC)));
   const slope = refineCoarse(c, sC, cm, co.f);
-  boxBlur(co.g, cm, Math.max(1, Math.round(40 / ckC)), 2);
+  boxBlur(co.g, cg, Math.max(1, Math.round(40 / ckC)), 2);
   const reg = refineCoarse(c, co.g, cm, co.f);
   const shape = coarseNoise(c, rng.nextU32(), [{ km: 300, octaves: 3, weight: 1 }]);
   const dens = c.num('density_arid');

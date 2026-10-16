@@ -1,4 +1,5 @@
 import type { Rng } from '../../shared/rng';
+import type { Grid } from '../grid/grid';
 import { boxBlur, components, smoothstep } from '../grid/ops';
 import { LAND_MIN } from '../lem/streamPower';
 import { CorridorSources, corridorCarve, softenCarve } from './corridor';
@@ -13,6 +14,7 @@ import { donorsCsr, flowOrder, glacierWidth, heightAboveEla, iceFlux, Q0, Q_TROU
  */
 
 export interface GlaciateInput {
+  grid: Grid;
   n: number;
   cellKm: number;
   h: Float32Array;
@@ -193,7 +195,7 @@ export function glaciate(inp: GlaciateInput, opt: GlaciateOptions, rng: Rng): Gl
   }
 
   lap('seaMs');
-  const ice = iceCover(now, dzNow, fixed, n, cellM);
+  const ice = iceCover(now, dzNow, fixed, inp.grid);
   lap('iceMs');
   let land = 0;
   let iceSum = 0;
@@ -207,7 +209,7 @@ export function glaciate(inp: GlaciateInput, opt: GlaciateOptions, rng: Rng): Gl
   const glacierMask = new Uint8Array(N);
   for (let i = 0; i < N; i++) glacierMask[i] = ice[i] >= 0.5 ? 1 : 0;
   const minCells = Math.max(1, Math.ceil(2e6 / (cellM * cellM)));
-  const glaciers = components(glacierMask, n).sizes.filter((s) => s >= minCells).length;
+  const glaciers = components(glacierMask, inp.grid).sizes.filter((s) => s >= minCells).length;
 
   Object.assign(stats, {
     glaciers,
@@ -465,7 +467,8 @@ function floodSea(h: Float32Array, fixed: Uint8Array, n: number): void {
  * Present-day ice cover 0–1: accumulation zones fade in over 0–150 m above the ELA, tongues fill
  * their glacier width; a 3×3 blur softens the edges outward. Zero on the sea.
  */
-function iceCover(now: IceFlux, dz: Float32Array, fixed: Uint8Array, n: number, cellM: number): Float32Array {
+function iceCover(now: IceFlux, dz: Float32Array, fixed: Uint8Array, g: Grid): Float32Array {
+  const { n, cellM } = g;
   const N = n * n;
   const raw = new Float32Array(N);
   // Tongues: the min-stamp on negated cover, −1 inside the glacier width fading to 0 at its edge.
@@ -480,7 +483,7 @@ function iceCover(now: IceFlux, dz: Float32Array, fixed: Uint8Array, n: number, 
   }
   for (let i = 0; i < N; i++) raw[i] = Math.max(raw[i], -tongue[i]);
   const soft = raw.slice();
-  boxBlur(soft, n, 1);
+  boxBlur(soft, g, 1);
   for (let i = 0; i < N; i++) raw[i] = fixed[i] ? 0 : Math.min(1, Math.max(raw[i], soft[i]));
   return raw;
 }

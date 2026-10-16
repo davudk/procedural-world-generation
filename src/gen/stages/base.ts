@@ -85,6 +85,8 @@ export const baseStage: StageDef = {
     const cellKm = worldKm / n;
     const cellM = cellKm * 1000;
     const N = n * n;
+    const g = ctx.grid(n);
+    const pg = ctx.grid(P.n);
     const noise = new Noise2(ctx.rng('noise').nextU32());
     const warpN = new Noise2(ctx.rng('warp').nextU32());
     const coastN = new Noise2(ctx.rng('coast').nextU32());
@@ -104,14 +106,14 @@ export const baseStage: StageDef = {
         const qy = wy + 30 * warpN.fbm(wx / 220 + 19.1, wy / 220 - 7.3, 3);
         wxs[i] = qx;
         wys[i] = qy;
-        const pc = cellAt(P.n, qx / worldKm, qy / worldKm);
+        const pc = cellAt(pg, qx / worldKm, qy / worldKm);
         pcell[i] = pc;
         cont[i] = P.continent[pc] !== -1 ? 1 : 0;
       }
     }
     await ctx.checkpoint();
 
-    const sdf = signedDistance(cont, n);
+    const sdf = signedDistance(cont, g);
     const segs = P.segments.map((s, id) => segProps(ctx.rng('segment', id), s, ctx));
     // Direct steering of relief contrast (research 05 §3.6, CONFIG.md §4): when the range cores cover
     // too little of the continental crust (few or short convergent boundaries), widen every belt.
@@ -259,10 +261,10 @@ export const baseStage: StageDef = {
     for (let i = 0; i < N; i++) if (U[i] > uCap) U[i] = uCap;
     // Deep-ocean features come from per-segment boundary profiles; smooth them so the abyss has no facets.
     const blurred = h0.slice();
-    boxBlur(blurred, n, Math.max(1, Math.round(18 / cellKm)), 2);
+    boxBlur(blurred, g, Math.max(1, Math.round(18 / cellKm)), 2);
     for (let i = 0; i < N; i++) h0[i] += (blurred[i] - h0[i]) * deep[i];
     // Uplift ends abruptly where a boundary segment ends; a blur tapers range ends naturally.
-    boxBlur(U, n, Math.max(1, Math.round(10 / cellKm)), 2);
+    boxBlur(U, g, Math.max(1, Math.round(10 / cellKm)), 2);
 
     const sea = quantile(h0, 1 - ctx.num('landFraction'));
     // King massif (research 05 §3.6: highest summit ≥ 1.5 × the 95th-percentile peak): one uplift

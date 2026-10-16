@@ -67,14 +67,15 @@ export const refineStage: StageDef = {
     const target = ctx.mode === 'preview' ? src.n : Number(ctx.str('macroGrid'));
     while (cur.n < target) {
       const n = cur.n * 2;
-      const h = upsampleBicubic(cur.h, cur.n, 2);
-      const U = upsampleBicubic(cur.U, cur.n, 2);
+      const cg = ctx.grid(cur.n);
+      const h = upsampleBicubic(cur.h, cg, 2);
+      const U = upsampleBicubic(cur.U, cg, 2);
       // Halving the cell size raises the steady-state relief of the same uplift; rescale so the
       // refined summits keep the heights the erosion grid reached.
       const uScale = upliftRefineFactor(cur.cellKm * 1000, cur.cellKm * 500, LEM_M);
       for (let i = 0; i < U.length; i++) U[i] *= uScale;
-      const K = upsampleBicubic(cur.K, cur.n, 2);
-      const strata = upsampleBicubic(cur.strata, cur.n, 2);
+      const K = upsampleBicubic(cur.K, cg, 2);
+      const strata = upsampleBicubic(cur.strata, cg, 2);
       // Sub-cell jitter so flow on flat ground doesn't lock onto the new grid's axes.
       const jit = ctx.rng('refine-jitter', n);
       for (let i = 0; i < n * n; i++) if (h[i] > 0) h[i] += 4 * (jit.float() - 0.5);
@@ -118,7 +119,7 @@ export const refineStage: StageDef = {
         peak = Math.max(peak, h[i]);
       }
     }
-    const { sizes } = components(land, n);
+    const { sizes } = components(land, ctx.grid(n));
     const continents = sizes.filter((s) => s >= CONTINENT_MIN_SHARE * landCells).length;
     const islands = sizes.length - continents;
     const layers: Layer[] = [elevationLayer('elevation', 'Elevation', 'refine', { extra: final }, worldKm), drainageLayer(final, worldKm)];
@@ -133,7 +134,7 @@ export const refineStage: StageDef = {
 
 async function erode(ctx: StageCtx, t: TerrainExtra, h: Float32Array, iterations: number): Promise<{ extra: ErodedExtra; ms: number }> {
   const r = await runLem(
-    { n: t.n, cellM: t.cellKm * 1000, h, U: t.U, K: t.K, fixed: t.fixed, strata: { thickness: t.strata, capFraction: 0.3, softRatio: 4 } },
+    { grid: ctx.grid(t.n), h, U: t.U, K: t.K, fixed: t.fixed, strata: { thickness: t.strata, capFraction: 0.3, softRatio: 4 } },
     lemParams(iterations),
     ctx.rng('lem', t.n),
     () => ctx.checkpoint(),

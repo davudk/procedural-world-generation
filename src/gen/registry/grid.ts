@@ -1,7 +1,8 @@
+import type { Grid } from '../grid/grid';
 import { chamferDistance } from '../grid/ops';
 
 /**
- * Raster helpers for the landmark registry (S11). Everything runs on square row-major grids: the
+ * Raster helpers for the landmark registry (S11). Everything runs on world grids: the
  * macro grid (1 km cells on the build, 4 km on the preview at the default size) and a "regional"
  * grid of ~4 km cells used for seas, coasts, ranges and biome regions, so those detectors cost the
  * same on the build and the preview and find the same features in both.
@@ -10,12 +11,8 @@ import { chamferDistance } from '../grid/ops';
 export const DX8 = [1, -1, 0, 0, 1, 1, -1, -1];
 export const DY8 = [0, 0, 1, -1, 1, -1, 1, -1];
 
-/** A grid with its cell size; positions are map metres (x from the west edge, y from the north edge). */
-export interface GridSpec {
-  n: number;
-  /** Cell size in metres. */
-  cellM: number;
-}
+/** A registry grid; positions are map metres (x from the west edge, y from the north edge). */
+export type GridSpec = Grid;
 
 export const cellX = (g: GridSpec, c: number): number => ((c % g.n) + 0.5) * g.cellM;
 export const cellY = (g: GridSpec, c: number): number => (Math.floor(c / g.n) + 0.5) * g.cellM;
@@ -310,10 +307,10 @@ export function labelAngle(dx: number, dy: number): number {
 }
 
 /** Approximate distance (cells, 3-4 chamfer) from every cell of `mask` to the nearest cell outside it. */
-export function insideDistance(mask: Uint8Array, n: number): Float32Array {
-  const inv = new Uint8Array(n * n);
-  for (let i = 0; i < n * n; i++) inv[i] = mask[i] ? 0 : 1;
-  return chamferDistance(inv, n);
+export function insideDistance(mask: Uint8Array, g: Grid): Float32Array {
+  const inv = new Uint8Array(g.cells);
+  for (let i = 0; i < g.cells; i++) inv[i] = mask[i] ? 0 : 1;
+  return chamferDistance(inv, g);
 }
 
 /** Nearest cell to (cx, cy) (cells) within `radius` cells for which `ok` holds, or −1. */

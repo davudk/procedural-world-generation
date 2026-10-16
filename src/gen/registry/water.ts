@@ -1,3 +1,4 @@
+import { coarser } from '../grid/grid';
 import { chamferDistance } from '../grid/ops';
 import { blockMean, cellX, cellY, DX8, DY8, insideDistance, label, labelAngle, mergeTree, nearestWhere, resolveOwners, type GridSpec } from './grid';
 import { gradAt } from './shared';
@@ -125,12 +126,12 @@ function embayments(
   parent: Embayments | null,
 ): Embayments {
   const m = R.n / fac;
-  const g: GridSpec = { n: m, cellM: R.cellM * fac };
+  const g = coarser(R, fac);
   const gKm = g.cellM / 1000;
   const share = fac === 1 ? S.landShare : blockMean(S.landShare, R.n, fac);
   const land = new Uint8Array(m * m);
   for (let i = 0; i < m * m; i++) land[i] = share[i] >= 0.5 ? 1 : 0;
-  const dl = fac === 1 ? S.dLand : chamferDistance(land, m);
+  const dl = fac === 1 ? S.dLand : chamferDistance(land, g);
   const rad = radKm / gKm;
   const DIRS = 16;
   const cosT = new Float64Array(DIRS);
@@ -160,7 +161,7 @@ function embayments(
     if (hits >= 11) emb[i] = 1;
   }
   const comps = label(emb, m, false);
-  const inside = insideDistance(emb, m);
+  const inside = insideDistance(emb, g);
   const pole = new Int32Array(comps.count).fill(-1);
   const opens = new Uint8Array(comps.count);
   for (let i = 0; i < m * m; i++) {

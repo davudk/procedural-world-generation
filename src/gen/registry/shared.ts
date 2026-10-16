@@ -1,5 +1,6 @@
 import { BIOME } from '../../shared/biomes';
 import { WATER } from '../stages/hydro';
+import { coarser } from '../grid/grid';
 import { boxBlur, chamferDistance } from '../grid/ops';
 import { coarseFactor, label } from './grid';
 import type { RegistryInput, Shared } from './types';
@@ -52,7 +53,7 @@ export function computeShared(I: RegistryInput): Shared {
   const N = n * n;
   const f = coarseFactor(n, cellM, REGIONAL_M);
   const m = n / f;
-  const reg = { n: m, cellM: cellM * f };
+  const reg = coarser(I.fine, f);
   const M = m * m;
   // One pass over the macro grid: land share, mean and max land height, biome groups, totals.
   const landShare = new Float32Array(M);
@@ -97,14 +98,14 @@ export function computeShared(I: RegistryInput): Shared {
   // ~20 km windows whatever the grid: radius in regional cells.
   const r = Math.max(1, Math.round(8000 / reg.cellM));
   const hSmooth = hMean.slice();
-  boxBlur(hSmooth, m, r);
+  boxBlur(hSmooth, reg, r);
   const sq = new Float32Array(M);
   for (let i = 0; i < M; i++) sq[i] = hMean[i] * hMean[i];
-  boxBlur(sq, m, r);
+  boxBlur(sq, reg, r);
   const relief = new Float32Array(M);
   for (let i = 0; i < M; i++) relief[i] = Math.sqrt(Math.max(0, sq[i] - hSmooth[i] * hSmooth[i]));
-  const dLand = chamferDistance(land, m);
-  const dSea = chamferDistance(seaR, m);
+  const dLand = chamferDistance(land, reg);
+  const dSea = chamferDistance(seaR, reg);
   const comps = label(landFine, n, true);
   const cellKm2 = (cellM / 1000) ** 2;
   const landKm2 = landCells * cellKm2;

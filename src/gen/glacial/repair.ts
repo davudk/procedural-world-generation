@@ -1,3 +1,4 @@
+import type { Grid } from '../grid/grid';
 import { FlowRouter, LAND_MIN } from '../lem/streamPower';
 
 /**
@@ -14,15 +15,14 @@ export function repairDrainage(
   h: Float32Array,
   fixed: Uint8Array,
   K: Float32Array,
-  n: number,
-  cellM: number,
+  g: Grid,
   m: number,
   dt: number,
   iterations: number,
   active: Uint8Array,
 ): { area: Float32Array; rcv: Int32Array; basinCells: number } {
-  const N = n * n;
-  const router = new FlowRouter(n, cellM, fixed);
+  const N = g.cells;
+  const router = new FlowRouter(g, fixed);
   router.route(h, null);
   const { rcv, rdist, stack, area } = router;
   const am = new Float64Array(N);

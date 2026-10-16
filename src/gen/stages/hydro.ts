@@ -309,7 +309,7 @@ export const hydroStage: StageDef = {
       const c = waterClass[i];
       if (c === WATER.LAKE || c === WATER.SALT_LAKE || c === WATER.PLAYA || (chan[i] && acc.q[i] >= ARID_WETLAND_Q)) exotic[i] = 1;
     }
-    const exoticDist = chamferDistance(exotic, n);
+    const exoticDist = chamferDistance(exotic, ctx.grid(n));
     const aridReach = Math.max(1, ARID_WETLAND_KM / cellKm);
     const aridOk = new Uint8Array(N);
     for (let i = 0; i < N; i++) if (exoticDist[i] <= aridReach) aridOk[i] = 1;

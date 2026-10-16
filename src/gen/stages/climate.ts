@@ -51,7 +51,7 @@ export const climateStage: StageDef = {
     const t = ctx.input('refine').extra as ErodedExtra;
     const { n, cellKm, h, fixed } = t;
     const [latNorth, latSouth] = ctx.range('latitudeSpan');
-    const f = await computeClimate(h, fixed, n, cellKm, {
+    const f = await computeClimate(h, fixed, ctx.grid(n), {
       latNorth,
       latSouth,
       tempOffset: ctx.num('temperatureOffset'),

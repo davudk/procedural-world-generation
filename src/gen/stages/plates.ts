@@ -128,7 +128,7 @@ export const platesStage: StageDef = {
 
     const isBoundary = new Uint8Array(n * n);
     for (let c = 0; c < n * n; c++) isBoundary[c] = chosen.bClass[c] !== B.NONE ? 1 : 0;
-    const { dist, nearest } = distanceField(isBoundary, n);
+    const { dist, nearest } = distanceField(isBoundary, ctx.grid(n));
     const dBKm = new Float32Array(n * n);
     for (let c = 0; c < n * n; c++) dBKm[c] = dist[c] * cellKm;
 

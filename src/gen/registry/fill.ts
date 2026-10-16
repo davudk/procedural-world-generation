@@ -75,7 +75,7 @@ function fillBand(I: RegistryInput, S: Shared, out: Candidate[], relief: ReliefR
   if (B.riverOrder > 0) for (let i = 0; i < g.n; i++) if (g.strahler[i] >= B.riverOrder && !(g.flags[i] & RIVER.DISTRIBUTARY)) mark(g.x[i], g.y[i]);
   for (const l of I.lakes) if (Math.sqrt(l.areaKm2) * 1000 >= B.lo) mark(l.cx, l.cy);
   for (const f of I.landforms.features) if (LANDFORM_PLACES.has(f.type) && f.size >= B.lo) mark(f.x, f.y);
-  const dist = chamferDistance(covered, cg.n);
+  const dist = chamferDistance(covered, cg);
   const fillCells = (B.fillKm * 1000) / cg.cellM;
   const far = (c: number): boolean => dist[area ? c : cellAtM(cg, cellX(fine, c), cellY(fine, c))] >= fillCells;
 
@@ -243,7 +243,7 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number
   let added = 0;
   const tried = new Uint8Array(MM);
   for (let guard = 0; guard < 64; guard++) {
-    const dist = chamferDistance(covered, m);
+    const dist = chamferDistance(covered, R);
     let best = -1;
     for (let i = 0; i < MM; i++) if (S.land[i] && !tried[i] && dist[i] > need && (best < 0 || dist[i] > dist[best])) best = i;
     if (best < 0) break;
