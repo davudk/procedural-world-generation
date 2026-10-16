@@ -883,3 +883,60 @@ Each research note lists its sources with URLs. The core references are:
   - Great rivers are rare in sea-dominated archetypes.
 - **Size invariance:** only 5 of 26 rows are within tolerance.
 - **"Boring":** up to 28 % of seeds (deserts dominated by hot desert, worlds with little high relief).
+
+### M9 — Polish & ship (2026-10-16)
+
+**What landed:**
+- **Atmosphere and light** (`render/lighting/sun.ts`, `atmosphere.ts`, `clouds.ts`):
+  - A sun model with time of day and season. At the defaults (about 15:34, mid-July) it reproduces the pre-M9 light exactly; a unit test checks this.
+  - Low sun brings warm light, a wider penumbra and extra sky fill. At night the scene only dims, under faint blue moonlight.
+  - Climate-driven clouds drift as a thin, depth-tested sheet at 3.2 km. They cast shadows of up to 60% and fade in at region zoom.
+  - Valley fog uses a relief-based potential baked in the AO pass. It is mostly a dawn effect.
+- **Vegetation:**
+  - Worley-style tree crowns of about 13 m and stand clumps of about 40 m, both in the terrain shader.
+  - Conifers and broadleaf trees look different. Crowns are lit on the sun side and cast offset shadows.
+  - The layers are faded by pixel footprint and normalised, so the overall tone stays the same during the fade.
+- **Seasons** (render-time only):
+  - snow that comes and goes with the season;
+  - autumn colours, bare deciduous trees, then a spring green-up;
+  - dry-season browning of grass;
+  - Mediterranean winter green-up;
+  - lake and sea ice.
+- **View controls:** a time slider with a play button (T), a season slider and a clouds toggle. They are saved per browser, not in the URL.
+- **Mobile and robustness:**
+  - Quality tiers (`render/quality.ts`) are picked from a device probe:
+    - **low:** no MSAA, a 0.75 render scale at DPR ≥ 2.5, a 2048² detail map and coarser CDLOD;
+    - **medium:** 2× MSAA and a 2048² detail map;
+    - **high:** 4× MSAA and a 4096² detail map.
+    - Override with `?quality=`.
+  - An idle frame cap of about 30 fps (`render/framePacer.ts`).
+  - The world rebuilds after a lost graphics context (`WorldView.initGpu()` / `restore()`).
+  - A phone layout with a foldable layer box and 40 px touch targets.
+- **Export menu:**
+  - screenshot PNG, labels included;
+  - 16-bit heightmap PNG, from its own encoder;
+  - colour map of the selected layer;
+  - world JSON with spec, traits and landmarks;
+  - copy share link.
+- **UI:**
+  - The layer menu lists the finished world first, as "World (final, realistic)".
+  - The per-stage timing chips are replaced by a segmented generation timeline with a short status line.
+- **Peaks:** full builds reached about 14.6 km. Refine now rescales uplift for its finer cells and may not raise summits, and a smooth ceiling above 7.6 km eases heights toward 9 km. The highest summits are now 6.9–8.9 km in both preview and build.
+- **Ship:**
+  - Firebase project `procedural-world-gen`, live at https://procedural-world-gen.web.app.
+  - Public repository at https://github.com/davudk/procedural-world-generation, under the MIT license.
+
+**Measurements:**
+- 199 tests pass.
+- New shading work: vegetation about 0.6 ms at the closest zoom, clouds 0.2–0.5 ms, fog about 0.1 ms. These were measured in the browser pane on a loaded machine, so treat them as relative.
+- With the peak fix, the king summit passes on 60–100% of preview seeds; rift and volcanic worlds are lowest.
+
+**Known gaps:**
+- Valley fog follows the 1 km raster, so it reads as bands rather than pools.
+- Phenology is generic rather than per biome.
+- Labels are not dimmed at night.
+- The sky shows no clouds in tilted views.
+- Very low sun leaves large dark areas.
+- Clouds freeze when frames stop.
+- Nothing has been tested on real phones.
+- The config panel's AUTO chips are smaller than 40 px.

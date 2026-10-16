@@ -12,7 +12,7 @@ A configurable procedural world generator in the browser. It builds a finite reg
 
 The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 
-**Status: milestone M8 (density tuning).** It includes:
+**Status: milestone M9 (polish & ship).** Spherical worlds are planned as an option ([research 10](docs/research/10-spherical-worlds.md)). It includes:
 - the hierarchical config system and the staged generation pipeline;
 - tectonic plates with motion and boundary classes;
 - continents grown to a target count;
@@ -26,7 +26,9 @@ The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 - a landmark registry: about 250 named places per world (peaks ranked by prominence, ranges, rivers, lakes, seas, gulfs, bays, straits, peninsulas, capes, islands, archipelagos, fjords, canyons, deserts, forests, volcanoes, craters…), named in procedural regional languages, with 3–5 hero landmarks and a World-traits summary;
 - SDF map labels with cartographic styles, priority placement and labels along rivers and ranges; an Atlas panel (A) that flies to any place;
 - a 2D raster debug viewer;
-- a metrics harness (`npm run metrics`) that scores density, targets and boring/cluttered worlds over many seeds, archetypes and sizes.
+- a metrics harness (`npm run metrics`) that scores density, targets and boring/cluttered worlds over many seeds, archetypes and sizes;
+- time of day, seasons, drifting clouds with shadows, valley fog and shader tree crowns;
+- quality tiers for phones, recovery after a lost graphics context, and export (screenshot, 16-bit heightmap, colour map, world JSON, share link).
 
 Close zoom (down to 8 m/px) shows a GPU-built 4096² detail heightmap (carved river valleys, thermal and hydraulic erosion) plus footprint-faded shader octaves, deterministic creeks generated for the visible area, soft horizon shadows and ambient occlusion, a gradient sky with aerial haze, and animated water with shoreline foam. See [docs/PLAN.md](docs/PLAN.md) for the full plan.
 
