@@ -17,6 +17,7 @@ uniform mat4 u_invViewProj;
 uniform vec3 u_horizon;
 uniform vec3 u_zenith;
 uniform vec3 u_sun;
+uniform vec3 u_glow;     // sun glow colour × strength (0 at night)
 uniform float u_nearZ;   // NDC depth of the near plane: 1 with reversed-Z, −1 otherwise
 out vec4 o;
 void main() {
@@ -26,7 +27,7 @@ void main() {
   float up = d.z;
   vec3 c = mix(u_horizon, u_zenith, smoothstep(0.0, 0.45, up));
   c = mix(c, u_horizon * 0.3, smoothstep(0.0, -0.25, up));   // below the horizon: beyond the world edge
-  c += vec3(1.0, 0.92, 0.75) * pow(max(dot(d, u_sun), 0.0), 64.0) * 0.35;
+  c += u_glow * pow(max(dot(d, u_sun), 0.0), 64.0);
   o = vec4(pow(c, vec3(1.0 / 1.1)), 1.0);
 }`;
 
@@ -39,7 +40,7 @@ export class SkyPass {
 
   constructor(private readonly gl: WebGL2RenderingContext) {
     this.prog = compileProgram(gl, 'sky', VS, FS);
-    this.u = uniforms(gl, this.prog, ['u_invViewProj', 'u_horizon', 'u_zenith', 'u_sun', 'u_nearZ'] as const);
+    this.u = uniforms(gl, this.prog, ['u_invViewProj', 'u_horizon', 'u_zenith', 'u_sun', 'u_glow', 'u_nearZ'] as const);
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, createQuadBuffer(gl));
@@ -48,14 +49,21 @@ export class SkyPass {
     gl.bindVertexArray(null);
   }
 
-  draw(viewProj: Float32Array, horizon: readonly [number, number, number], sun: readonly [number, number, number], reversedZ: boolean): void {
+  /** Colours come from the sun model (lighting/sun.ts); its defaults are the pre-M9 constants. */
+  draw(
+    viewProj: Float32Array,
+    sky: { horizon: readonly [number, number, number]; zenith: readonly [number, number, number]; glow: readonly [number, number, number] },
+    sun: readonly [number, number, number],
+    reversedZ: boolean,
+  ): void {
     if (!invert(this.inv, viewProj)) return;
     this.inv32.set(this.inv);
     const gl = this.gl;
     gl.useProgram(this.prog);
     gl.uniformMatrix4fv(this.u.u_invViewProj, false, this.inv32);
-    gl.uniform3f(this.u.u_horizon, horizon[0], horizon[1], horizon[2]);
-    gl.uniform3f(this.u.u_zenith, 0.22, 0.38, 0.62);
+    gl.uniform3f(this.u.u_horizon, sky.horizon[0], sky.horizon[1], sky.horizon[2]);
+    gl.uniform3f(this.u.u_zenith, sky.zenith[0], sky.zenith[1], sky.zenith[2]);
+    gl.uniform3f(this.u.u_glow, sky.glow[0], sky.glow[1], sky.glow[2]);
     gl.uniform3f(this.u.u_sun, sun[0], sun[1], sun[2]);
     gl.uniform1f(this.u.u_nearZ, reversedZ ? 1 : -1);
     gl.bindVertexArray(this.vao);

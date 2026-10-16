@@ -15,6 +15,7 @@ import type { FromWorker, GenMode, Layer, RiverGraph } from './shared/protocol';
 import { AtlasPanel, KIND_LABEL } from './ui/atlas';
 import { Compass } from './ui/compass';
 import { ConfigPanel } from './ui/configPanel';
+import { ViewControls } from './ui/viewControls';
 import { GenProgress } from './ui/genProgress';
 
 /** Delay after the last settings change before a full-quality build starts. */
@@ -46,6 +47,8 @@ const world = new WorldView(canvas);
 const orbit = new OrbitController(canvas, world.cam);
 const minimap = new Minimap($('layers'), world.cam);
 const compass = new Compass($('compass-host'), world.cam);
+// Time of day, season and clouds (M9 view settings, stored locally; T animates the time).
+$('legend').before(new ViewControls($('layers'), (s) => Object.assign(world.view, s)).el);
 const cam = new Camera();
 const view = new RasterView(canvas);
 const camCtl = new CameraController(canvas, cam, () => ({ w: currentWorldKm(), h: currentWorldKm() }));
@@ -259,7 +262,10 @@ function showSelected(): void {
     const snow = layers.get('snow');
     if (temperature && aridity && canopy && snow) {
       surfaceShown = biome;
-      world.setSurface({ temperature, aridity, summerRain: layers.get('summerRain') ?? null, canopy, snow, biome });
+      world.setSurface({
+        temperature, aridity, summerRain: layers.get('summerRain') ?? null, canopy, snow, biome,
+        tempRange: layers.get('tempRange') ?? null, precip: layers.get('precip') ?? null,
+      });
       const wl2 = layers.get('waterLevel');
       const wc = layers.get('waterClass');
       const dis = layers.get('discharge');

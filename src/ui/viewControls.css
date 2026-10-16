@@ -1,0 +1,36 @@
+/* View controls (time of day, season, clouds) inside the #layers box; rows reuse .exag. */
+.view-ctl {
+  margin-top: 4px;
+  padding-top: 2px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.view-ctl .view-out {
+  min-width: 6.5em;
+  text-align: right;
+  color: var(--text);
+}
+
+.view-ctl .view-play {
+  font: inherit;
+  width: 26px;
+  padding: 1px 0;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.view-ctl .view-play.on {
+  color: var(--accent);
+}
+
+.view-ctl .view-check input {
+  flex: none;
+  margin: 0;
+}
+
+body.mode-2d .view-ctl {
+  display: none;
+}

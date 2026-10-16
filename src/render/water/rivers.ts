@@ -1,5 +1,6 @@
 import { RIVER, type RiverGraph } from '../../shared/protocol';
 import { compileProgram, uniforms } from '../gl/util';
+import { ATMOS_GLSL, bindAtmos, type AtmosFrame } from '../lighting/atmosphere';
 
 /** Floats per vertex: centre x, y, z (world m), side x, y, side sign, width (m), area (km²), along (m), flags. */
 const VERT_FLOATS = 10;
@@ -20,7 +21,9 @@ out float v_along;
 out float v_side;
 out float v_flags;
 out float v_widthPx;
+out vec3 v_world;    // world xy (m), render height
 void main() {
+  v_world = vec3(a_center.xy, a_center.z * u_exag);
   vec3 rel = a_center - u_origin;
   rel.z = a_center.z * u_exag - u_origin.z;
   float dist = max(1.0, length(rel));
@@ -46,7 +49,14 @@ in float v_along;
 in float v_side;
 in float v_flags;
 in float v_widthPx;
+in vec3 v_world;
 uniform float u_time;
+uniform int u_atmos;         // 1: light colours, cloud shadows and valley fog (realistic view)
+uniform float u_size;
+uniform vec3 u_sun;
+uniform vec3 u_hazeColor;
+uniform sampler2D u_fogPot;  // horizon pass AO texture: b = valley-fog potential
+${ATMOS_GLSL}
 out vec4 o;
 float hash(float x) { return fract(sin(x * 12.9898) * 43758.5453); }
 void main() {
@@ -58,6 +68,14 @@ void main() {
   col *= 1.0 - 0.18 * abs(v_side) * smoothstep(2.0, 6.0, v_widthPx);     // darker banks
   if ((flags & ${RIVER.WATERFALL}) != 0) col = mix(col, vec3(0.92, 0.95, 0.97), 0.6 + 0.2 * sin(u_time * 9.0 + v_along));
   else if ((flags & ${RIVER.RAPIDS}) != 0) col = mix(col, vec3(0.80, 0.88, 0.92), 0.25 * smoothstep(4.0, 12.0, v_widthPx));
+  if (u_atmos == 1) {
+    // Same light as the water lid, so ribbons don't glow at night, under clouds or in fog.
+    float foot = max(1.0, length(fwidth(v_world.xy)));
+    float cs = cloudShadow(v_world.xy, v_world.z, foot);
+    col *= mix(0.85, 1.0, cs) * (0.35 * u_ambient + 0.65 * u_lightCol);
+    vec2 uv = vec2(v_world.x, u_size - v_world.y) / u_size;
+    col = mix(col, fogColor(), valleyFog(v_world.xy, texture(u_fogPot, uv).b, texture(u_clim2, uv).g, foot));
+  }
   float a = v_alpha;
   if ((flags & ${RIVER.EPHEMERAL}) != 0) a *= step(0.45, fract(v_along / 400.0)) * 0.7;  // dashed wadis
   // Soft edges for ribbons that are only a pixel or two wide.
@@ -72,6 +90,8 @@ export interface RiverFrame {
   exaggeration: number;
   pxScale: number;
   time: number;
+  /** Atmosphere (realistic view) with the horizon pass's fog-potential texture, or null. */
+  atmos: { frame: AtmosFrame; fogPot: WebGLTexture; size: number; sun: readonly [number, number, number]; hazeColor: readonly [number, number, number] } | null;
 }
 
 /** Rivers as ribbons built once per generation from the river graph (research 02 §9, 04 §4.2). */
@@ -88,7 +108,7 @@ export class RiverPass {
 
   constructor(private readonly gl: WebGL2RenderingContext) {
     this.prog = compileProgram(gl, 'rivers', VS, FS);
-    this.u = uniforms(gl, this.prog, ['u_viewProj', 'u_origin', 'u_exag', 'u_pxScale', 'u_minPx', 'u_lodC', 'u_time'] as const);
+    this.u = uniforms(gl, this.prog, ['u_viewProj', 'u_origin', 'u_exag', 'u_pxScale', 'u_minPx', 'u_lodC', 'u_time', 'u_atmos', 'u_size', 'u_sun', 'u_hazeColor', 'u_fogPot'] as const);
     this.vao = gl.createVertexArray();
     this.vbo = gl.createBuffer();
     this.ibo = gl.createBuffer();
@@ -188,6 +208,17 @@ export class RiverPass {
     gl.uniform1f(this.u.u_minPx, this.minPx);
     gl.uniform1f(this.u.u_lodC, this.lodC);
     gl.uniform1f(this.u.u_time, f.time);
+    gl.uniform1i(this.u.u_atmos, f.atmos ? 1 : 0);
+    if (f.atmos) {
+      const a = f.atmos;
+      gl.uniform1f(this.u.u_size, a.size);
+      gl.uniform3f(this.u.u_sun, a.sun[0], a.sun[1], a.sun[2]);
+      gl.uniform3f(this.u.u_hazeColor, a.hazeColor[0], a.hazeColor[1], a.hazeColor[2]);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, a.fogPot);
+      gl.uniform1i(this.u.u_fogPot, 1);
+      bindAtmos(gl, this.prog, a.frame, 0);
+    }
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.depthMask(false);

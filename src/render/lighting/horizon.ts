@@ -59,22 +59,37 @@ void main() {
   vec2 sunDir = normalize(vec2(u_sun.x, -u_sun.y));
   float sunTan = u_sun.z / max(1e-4, length(u_sun.xy));
   float hor = horizonTan(p, sunDir, h0);
-  // Soft penumbra: the sun's disc plus some atmospheric softness (~2.5°).
-  float vis = smoothstep(-0.045, 0.045, atan(sunTan) - atan(hor));
+  // Soft penumbra: the sun's disc plus some atmospheric softness (~2.5°), wider at low sun (M9) where
+  // long shadows would otherwise show the 1 km raster.
+  float soft = mix(0.1, 0.045, smoothstep(0.15, 0.6, atan(sunTan)));
+  float vis = smoothstep(-soft, soft, atan(sunTan) - atan(hor));
   float ao = 1.0;
+  float fog = 0.0;
   if (u_doAO == 1) {
     float occl = 0.0;
+    // Valley-fog potential (M9): low against the surroundings (1.5–9 km) with relief around, so fog
+    // pools on valley floors and sheltered shores but not over open sea or featureless plains.
+    float h0m = h0 / u_exag;
+    float lo = h0m, hi = h0m;
     for (int k = 0; k < 8; k++) {
       float a = float(k) * 0.7853982 + 0.3;
-      float ht = max(0.0, horizonTan(p, vec2(cos(a), sin(a)), h0));
+      vec2 dir = vec2(cos(a), sin(a));
+      float ht = max(0.0, horizonTan(p, dir, h0));
       occl += sin(atan(ht));
+      for (int j = 0; j < 3; j++) {
+        float r = max(1.0, (j == 0 ? 1500.0 : j == 1 ? 4000.0 : 9000.0) / u_cell);
+        float hs = hAt(p + dir * r) / u_exag;
+        lo = min(lo, hs);
+        hi = max(hi, hs);
+      }
     }
     ao = 1.0 - occl / 8.0;
+    fog = (1.0 - smoothstep(10.0, 200.0, h0m - lo)) * smoothstep(40.0, 300.0, hi - h0m);
   }
-  o = vec4(vis, ao, 0.0, 1.0);
+  o = vec4(vis, ao, fog, 1.0);
 }`;
 
-/** Sun-visibility texture (r) and ambient-occlusion texture (g) over the surface raster. */
+/** Sun-visibility texture (r) and ambient-occlusion texture (g, plus valley-fog potential in b). */
 export class HorizonPass {
   private readonly prog: WebGLProgram;
   private readonly u;
@@ -83,14 +98,20 @@ export class HorizonPass {
   private readonly surfaceTex: WebGLTexture;
   /** r = sun visibility (0 shadow … 1 lit). */
   readonly texture: WebGLTexture;
-  /** g = ambient occlusion (1 open … 0 enclosed). */
+  /** g = ambient occlusion (1 open … 0 enclosed), b = valley-fog potential (0 none … 1 valley floor). */
   readonly aoTexture: WebGLTexture;
   private readonly fbo: WebGLFramebuffer;
   private n = 0;
   private cell = 1;
   private lastKey = '';
   private aoKey = '';
+  private lastRun = 0;
   ready = false;
+  /**
+   * Minimum time between sun-visibility updates (ms). 0 follows every change; while the time of day
+   * animates the sun moves every frame, so the pass is throttled to a few updates per second.
+   */
+  minIntervalMs = 0;
 
   constructor(private readonly gl: WebGL2RenderingContext) {
     this.prog = compileProgram(gl, 'horizon', VS, FS);
@@ -137,9 +158,12 @@ export class HorizonPass {
     const az = Math.round((Math.atan2(sun[0], sun[1]) * 180) / Math.PI / 1.5);
     const key = `${az}|${Math.round(sun[2] * 100)}|${exag}`;
     if (key === this.lastKey) return;
-    const gl = this.gl;
     const aoKey = String(exag);
     const needAO = aoKey !== this.aoKey;
+    const now = performance.now();
+    if (this.ready && !needAO && now - this.lastRun < this.minIntervalMs) return;
+    this.lastRun = now;
+    const gl = this.gl;
     gl.useProgram(this.prog);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.surfaceTex);

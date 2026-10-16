@@ -11,12 +11,17 @@ import { HorizonPass } from './lighting/horizon';
 import { LabelLayer } from './labels/labelLayer';
 import { DetailMap, type DetailInput } from './terrain/detail/detailMap';
 import { SkyPass } from './lighting/sky';
+import { CloudPass } from './lighting/clouds';
+import { DEFAULT_SEASON, DEFAULT_TIME, DEFAULT_VIEW, seasonPhase, sunLight, type ViewSettings } from './lighting/sun';
 import { TerrainPass, type SurfaceLayers } from './terrain/terrainPass';
 import { CreekManager } from './water/creeks/creekManager';
 import { RiverPass } from './water/rivers';
 
 const MSAA = 4;
-const HAZE_COLOR = [0.62, 0.70, 0.78] as const;
+/** Cloud base above sea level (m, before exaggeration). */
+const CLOUD_BASE = 3200;
+/** Cloud drift (m/s); time-of-day animation runs the clouds faster too. */
+const CLOUD_WIND = [9, 4] as const;
 
 /** Flat placeholder ground until the first elevation arrives. */
 class FlatGround implements GroundQuery {
@@ -50,6 +55,11 @@ export class WorldView {
   readonly creeks = new CreekManager();
   private readonly horizon: HorizonPass;
   private readonly sky: SkyPass;
+  private readonly clouds: CloudPass;
+  /** Time of day, season and clouds (M9 view settings; the defaults keep the pre-M9 look). */
+  view: ViewSettings = { ...DEFAULT_VIEW };
+  private cloudDrift: [number, number] = [0, 0];
+  private lastTime = -1;
   private readonly detail: DetailMap;
   private readonly detailU: DetailUniforms;
   private detailSeen = -1;
@@ -88,6 +98,10 @@ export class WorldView {
     this.detail = new DetailMap(gl);
     this.detailU = new DetailUniforms(this.detail);
     this.labels = new LabelLayer(gl);
+
+    // ── M9 atmosphere passes. The cloud pass holds no data of its own: its climate texture is
+    // TerrainPass.climate2 (rebuilt by setSurface) and everything else is per-frame uniforms.
+    this.clouds = new CloudPass(gl);
   }
 
   /** Starts building the close-zoom detail map (time-sliced in draw()). */
@@ -214,7 +228,15 @@ export class WorldView {
     this.ensureTargets(W, H);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
     gl.viewport(0, 0, W, H);
-    gl.clearColor(HAZE_COLOR[0] * 0.25, HAZE_COLOR[1] * 0.27, HAZE_COLOR[2] * 0.32, 1);
+    // Map modes keep the default light; time of day, season, clouds and fog belong to the realistic view.
+    const realistic = this.terrain.realistic;
+    const sun = realistic ? sunLight(this.view.time, this.view.season, this.cam.bearing) : sunLight(DEFAULT_TIME, DEFAULT_SEASON, this.cam.bearing);
+    const haze = sun.skyHorizon;
+    const dt = this.lastTime < 0 ? 0 : Math.min(0.1, Math.max(0, timeSec - this.lastTime));
+    this.lastTime = timeSec;
+    const windK = this.view.animate ? 60 : 1;
+    this.cloudDrift = [(this.cloudDrift[0] - CLOUD_WIND[0] * dt * windK) % 2e7, (this.cloudDrift[1] - CLOUD_WIND[1] * dt * windK) % 2e7];
+    gl.clearColor(haze[0] * 0.25, haze[1] * 0.27, haze[2] * 0.32, 1);
     gl.clearDepth(this.reversedZ ? 0 : 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     const hf = this.hf;
@@ -231,17 +253,29 @@ export class WorldView {
       this.nodes = this.selector.select(hf, eye, eye, this.planes, { maxDepth, vertexPx: 3, pxPerRad, boundsPad });
       if (this.ground) this.ground.pxFoot = Math.max(cam.metresPerPixel(), hf.size / 2 ** maxDepth / GRID);
       const altitude = Math.max(1, eye.z - hf.heightAt(eye.x, eye.y));
-      const az = cam.bearing - Math.PI / 4; // light from the top-left of the screen
-      const el = (40 * Math.PI) / 180;
       const tilt = Math.sin(cam.pitch);
-      const sun: [number, number, number] = [Math.sin(az) * Math.cos(el), Math.cos(az) * Math.cos(el), Math.sin(el)];
+      // Light from the top-left of the screen at the default time (lighting/sun.ts).
+      const light = sun.dir;
       // Shadows read best with a little more relief than the geometry at far zoom.
-      this.horizon.update(sun, this.exaggeration * 1.5);
+      this.horizon.minIntervalMs = this.view.animate ? 120 : 0;
+      this.horizon.update(light, this.exaggeration * 1.5);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
       gl.viewport(0, 0, W, H);
       gl.disable(gl.DEPTH_TEST);
-      this.sky.draw(this.viewProj, HAZE_COLOR, sun, this.reversedZ);
+      this.sky.draw(this.viewProj, { horizon: haze, zenith: sun.skyZenith, glow: sun.glow }, sun.sunDir, this.reversedZ);
       gl.enable(gl.DEPTH_TEST);
+      const ph = seasonPhase(this.view.season);
+      // Valley fog: low sun, a little more in the cold half of the year.
+      const fogK = realistic ? 0.5 * sun.fog * (1 + 0.3 * Math.max(0, -ph.cos)) : 0;
+      const atmos = {
+        cloudAmount: realistic && this.view.clouds ? 0.7 : 0,
+        cloudDrift: this.cloudDrift,
+        cloudZ: CLOUD_BASE * this.exaggeration,
+        fogK,
+        light: sun.light,
+        ambient: sun.ambient,
+      };
+      const hazeK = (tilt * tilt * 1.2) / (altitude * 25) + 1e-9;
       this.terrain.draw({
         lighting: this.horizon.ready ? { sun: this.horizon.texture, ao: this.horizon.aoTexture } : null,
         pxScale: (2 * Math.tan(cam.fovY / 2)) / Math.max(1, cam.viewH),
@@ -252,22 +286,34 @@ export class WorldView {
         count: this.nodes,
         exaggeration: this.exaggeration,
         normalExaggeration: this.exaggeration * (1.4 + 5.0 * smoothstep(5e3, 6e5, altitude)),
-        sun,
+        sun: light,
         // Aerial perspective scales with altitude: low tilted views fade the horizon, high views stay clear.
-        haze: (tilt * tilt * 1.2) / (altitude * 25) + 1e-9,
-        hazeColor: HAZE_COLOR,
+        haze: hazeK,
+        hazeColor: haze,
         time: timeSec,
+        season: [ph.cos, ph.sin],
+        atmos,
       });
+      const atmosFrame = { ...atmos, clim2: this.terrain.climate2 };
       const riverFrame = {
         viewProj: this.viewProj,
         origin: eye,
         exaggeration: this.exaggeration,
         pxScale: (2 * Math.tan(cam.fovY / 2)) / Math.max(1, cam.viewH),
         time: timeSec,
+        atmos: realistic && this.horizon.ready
+          ? { frame: atmosFrame, fogPot: this.horizon.aoTexture, size: hf.size, sun: light, hazeColor: haze }
+          : null,
       };
       this.updateCreeks();
       this.creekPass.draw(riverFrame);
       this.rivers.draw(riverFrame);
+      // Visible clouds fade in above ~15 km and stay thin and subtle from far away.
+      this.clouds.draw({
+        viewProj: this.viewProj, origin: eye, worldSize: hf.size, sun: light, haze: hazeK, hazeColor: haze,
+        alpha: 0.6 * smoothstep(15e3, 45e3, altitude) * (1 - 0.45 * smoothstep(2e5, 1.2e6, altitude)),
+        atmos: atmosFrame,
+      });
       gl.disable(gl.DEPTH_TEST);
       this.labels.draw({ cam, ground: this.ground ?? hf, dpr: this.dpr, timeSec, exaggeration: this.exaggeration });
       gl.disable(gl.DEPTH_TEST);
