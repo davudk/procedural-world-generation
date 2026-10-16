@@ -5,6 +5,11 @@
  * outputs consistently. Re-record only for an intended output change:
  *
  *   GOLDEN_UPDATE=1 npx vitest run tests/golden.test.ts
+ *
+ * Spherical worlds (research 10 §8, Phase 2) have their own fixture, recorded when the sphere stages
+ * landed; re-record only those with
+ *
+ *   GOLDEN_UPDATE=1 npx vitest run --project golden -t sphere
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
@@ -16,6 +21,7 @@ import { hashBytes, hashValue } from '../src/shared/hash';
 import type { GenMode, Vectors } from '../src/shared/protocol';
 
 const FIXTURE = new URL('./golden.json', import.meta.url);
+const SPHERE_FIXTURE = new URL('./golden-sphere.json', import.meta.url);
 const UPDATE = process.env.GOLDEN_UPDATE === '1';
 
 interface Case {
@@ -36,6 +42,11 @@ for (const archetype of ['earth', 'fjordland', 'desert']) {
     CASES.push({ name: `${archetype}-${seed}-build512`, seed, archetype, mode: 'build', pins: BUILD_PINS });
   }
 }
+// Spheres: previews of the default small planet (6 × 128² erosion grid), plus one fjordland world.
+const SPHERE_CASES: Case[] = [
+  ...[7, 11, 42].map((seed) => ({ name: `sphere-earth-${seed}-preview`, seed, archetype: 'earth', mode: 'preview' as const, pins: { worldShape: 'sphere' } })),
+  { name: 'sphere-fjordland-7-preview', seed: 7, archetype: 'fjordland', mode: 'preview', pins: { worldShape: 'sphere' } },
+];
 
 /** Wall-clock stats (`ms`, `ms_route`, `coastal_ms`, `carveMs`, …) are not outputs. */
 const TIMING = /^ms$|^ms_|_ms$|_ms_|Ms$/;
@@ -90,20 +101,25 @@ async function hashesOf(c: Case): Promise<Record<string, number>> {
   return out;
 }
 
-describe('golden hashes', () => {
-  const recorded: Record<string, Record<string, number>> = existsSync(FIXTURE) && !UPDATE ? JSON.parse(readFileSync(FIXTURE, 'utf8')) : {};
-  const fresh: Record<string, Record<string, number>> = {};
+function goldenSuite(title: string, fixture: URL, cases: readonly Case[]): void {
+  describe(title, () => {
+    const recorded: Record<string, Record<string, number>> = existsSync(fixture) && !UPDATE ? JSON.parse(readFileSync(fixture, 'utf8')) : {};
+    const fresh: Record<string, Record<string, number>> = {};
 
-  for (const c of CASES) {
-    it(`${c.name} matches the recorded outputs`, async () => {
-      const got = await hashesOf(c);
-      fresh[c.name] = got;
-      if (UPDATE) {
-        if (Object.keys(fresh).length === CASES.length) writeFileSync(FIXTURE, JSON.stringify(fresh, null, 1) + '\n');
-        return;
-      }
-      expect(recorded[c.name], `no recorded hashes for ${c.name}; run with GOLDEN_UPDATE=1`).toBeDefined();
-      expect(got).toEqual(recorded[c.name]);
-    }, 60_000);
-  }
-});
+    for (const c of cases) {
+      it(`${c.name} matches the recorded outputs`, async () => {
+        const got = await hashesOf(c);
+        fresh[c.name] = got;
+        if (UPDATE) {
+          if (Object.keys(fresh).length === cases.length) writeFileSync(fixture, JSON.stringify(fresh, null, 1) + '\n');
+          return;
+        }
+        expect(recorded[c.name], `no recorded hashes for ${c.name}; run with GOLDEN_UPDATE=1`).toBeDefined();
+        expect(got).toEqual(recorded[c.name]);
+      }, 60_000);
+    }
+  });
+}
+
+goldenSuite('golden hashes', FIXTURE, CASES);
+goldenSuite('sphere golden hashes', SPHERE_FIXTURE, SPHERE_CASES);

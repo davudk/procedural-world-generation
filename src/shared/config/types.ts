@@ -27,6 +27,12 @@ export const STAGE_ORDER = [
 ] as const;
 export type StageId = (typeof STAGE_ORDER)[number];
 
+/** Stages a spherical world runs in this phase (research 10 §8 Phase 2); the pipeline stops after the last. */
+export const SPHERE_STAGES: readonly StageId[] = ['plates', 'base', 'stamps', 'lem', 'refine', 'climate'];
+
+/** World shape (research 10 §3): a flat square map or a cube-sphere planet. */
+export type WorldShape = 'flat' | 'sphere';
+
 export type Source = 'auto' | 'preset' | 'set';
 
 /** Read access to already-resolved values while computing an AUTO value. */
@@ -58,6 +64,8 @@ interface ParamBase<V extends Value> {
   target?: boolean;
   /** Derived for orientation only; cannot be pinned. */
   readonly?: boolean;
+  /** World shapes the parameter applies to (absent = both); the panel hides it on the others. */
+  shapes?: readonly WorldShape[];
 }
 
 export interface NumberParam extends ParamBase<number> {

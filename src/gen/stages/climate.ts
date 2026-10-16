@@ -1,9 +1,11 @@
 import { Noise2 } from '../../shared/noise';
+import { Noise3 } from '../../shared/noise3';
 import type { Layer } from '../../shared/protocol';
 import { minMax } from '../climate/fields';
 import { computeClimate } from '../climate/model';
 import type { StageDef } from '../pipeline';
 import type { ErodedExtra } from './lem';
+import { shapeHeader } from './plates';
 
 /** Climate output for later stages (hydrology, biomes). All rasters n×n, row-major. */
 export interface ClimateExtra {
@@ -51,7 +53,9 @@ export const climateStage: StageDef = {
     const t = ctx.input('refine').extra as ErodedExtra;
     const { n, cellKm, h, fixed } = t;
     const [latNorth, latSouth] = ctx.range('latitudeSpan');
-    const f = await computeClimate(h, fixed, ctx.grid(n), {
+    const grid = ctx.grid(n);
+    const seed = ctx.rng('noise').nextU32();
+    const f = await computeClimate(h, fixed, grid, {
       latNorth,
       latSouth,
       tempOffset: ctx.num('temperatureOffset'),
@@ -68,10 +72,10 @@ export const climateStage: StageDef = {
       orographicStrength: ctx.num('orographicStrength'),
       rainShadowCap: ctx.num('rainShadowCap'),
       recycling: ctx.num('recycling'),
-    }, new Noise2(ctx.rng('noise').nextU32()), () => ctx.checkpoint());
+    }, grid.shape === 'sphere' ? new Noise3(seed) : new Noise2(seed), () => ctx.checkpoint());
 
     const worldKm = ctx.num('worldSize');
-    const base = { stage: 'climate' as const, kind: 'scalar' as const, w: n, h: n, worldKm };
+    const base = { stage: 'climate' as const, kind: 'scalar' as const, w: n, h: n, worldKm, ...shapeHeader(grid) };
     const [tLo, tHi] = minMax(f.temp);
     const [aLo, aHi] = minMax(f.tAmp);
     const [, pHi] = minMax(f.precip);
@@ -87,7 +91,7 @@ export const climateStage: StageDef = {
     let tLand = 0;
     let pLand = 0;
     let fogCells = 0;
-    for (let i = 0; i < n * n; i++) {
+    for (let i = 0; i < grid.cells; i++) {
       if (f.sea[i]) continue;
       land++;
       tLand += f.temp[i];

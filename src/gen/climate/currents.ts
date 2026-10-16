@@ -1,6 +1,8 @@
+import { asCube } from '../grid/cube';
 import { cellIndex, type Grid } from '../grid/grid';
 import { smoothstep } from '../grid/ops';
 import { gaussBlur } from '../grid/smooth';
+import { distanceAlong, eastWest } from './sphere';
 import { LatTable } from './tables';
 
 /** e-folding distance of a coastal current anomaly offshore (km). */
@@ -17,11 +19,22 @@ const eastCoast = new LatTable((a) => 2 * band(a, 15, 40) - 4 * band(a, 42, 60))
  * Sea-surface temperature anomaly (°C) from the coastline-orientation heuristic of research 03 §1.4:
  * two row sweeps give the distance to land east and west of every sea cell. The SH is mirrored via
  * |φ|. With `edgeIsLand` the map edge counts as a coast. Blurred over the sea (σ 20 km) so the row
- * sweeps leave no horizontal streaks. Zero on land.
+ * sweeps leave no horizontal streaks. Zero on land. On the sphere the rows are chains of east / west
+ * neighbours along the local parallel, and every ocean has both kinds of coast.
  */
 export function sstAnomaly(sea: Uint8Array, lat: Float32Array, g: Grid, edgeIsLand: boolean): Float32Array {
   const { n, cellKm, cells: N } = g;
   const out = new Float32Array(N);
+  if (g.shape === 'sphere') {
+    const c = asCube(g);
+    const { east, west } = eastWest(c);
+    const farKm = 2 * n * cellKm;
+    const dE = distanceAlong(c, sea, east, farKm);
+    const dW = distanceAlong(c, sea, west, farKm);
+    const fall = (d: number): number => (d >= farKm ? 0 : Math.exp(-d / CURRENT_KM));
+    for (let i = 0; i < N; i++) if (sea[i]) out[i] = westCoast.at(lat[i]) * fall(dE[i]) + eastCoast.at(lat[i]) * fall(dW[i]);
+    return normalisedBlur(out, sea, g);
+  }
   const far = 2 * n;
   const fall = Float32Array.from({ length: 2 * n + 1 }, (_, d) => (d >= 2 * n ? 0 : Math.exp((-d * cellKm) / CURRENT_KM)));
   const dE = new Int32Array(n);
@@ -39,6 +52,11 @@ export function sstAnomaly(sea: Uint8Array, lat: Float32Array, g: Grid, edgeIsLa
       out[i] = westCoast.at(lat[i]) * fall[dE[x]] + eastCoast.at(lat[i]) * fall[d];
     }
   }
+  return normalisedBlur(out, sea, g);
+}
+
+function normalisedBlur(out: Float32Array, sea: Uint8Array, g: Grid): Float32Array {
+  const { cellKm, cells: N } = g;
   // Normalised convolution: land cells carry no anomaly and must not dilute the coastal values.
   const w = Float32Array.from(sea);
   gaussBlur(out, g, 20 / cellKm);

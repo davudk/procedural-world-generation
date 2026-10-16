@@ -1,10 +1,15 @@
+import { faceDir } from '../../shared/cube';
 import type { Rng } from '../../shared/rng';
-import { RASTER_DX, RASTER_DY, type Grid } from '../grid/grid';
+import { angle, asCube, type CubeGrid } from '../grid/cube';
+import { cellIndex, RASTER_DX, RASTER_DY, type Grid } from '../grid/grid';
 import { createPriorityFloodScratch, priorityFloodEpsilon, type PriorityFloodScratch } from '../grid/priorityFlood';
 
 /**
  * Landscape evolution: uplift + stream-power incision (Braun & Willett 2013 implicit O(n) solver,
- * n = 1) + hillslope diffusion + talus clamp on the world grid (research 01 §3).
+ * n = 1) + hillslope diffusion + talus clamp on the world grid (research 01 §3). On the cube-sphere
+ * (non-uniform grids) slopes use the per-neighbour great-circle distances, drainage area sums the
+ * cell areas and diffusion is a finite-volume Laplacian (research 10 §5.4); flat grids keep their
+ * constant-spacing kernels.
  */
 
 export interface LemParams {
@@ -179,6 +184,10 @@ export class FlowRouter {
    * probability ∝ slope⁴ instead (cells visited in index order, so the draw sequence is fixed).
    */
   receivers(rng: Rng | null): void {
+    if (!this.grid.uniform) {
+      this.receiversCube(rng);
+      return;
+    }
     const { grid: g, cells: N, fixed, filled, rcv, rdist, dist, invDist, w, ks } = this;
     const { off8: off, border } = g;
     for (let i = 0; i < N; i++) {
@@ -232,6 +241,61 @@ export class FlowRouter {
     }
   }
 
+  /** `receivers` with per-cell neighbour distances (cube-sphere); same draws in the same order. */
+  private receiversCube(rng: Rng | null): void {
+    const { grid, cells: N, fixed, filled, rcv, rdist, w, ks } = this;
+    const g = asCube(grid);
+    const n2 = g.n2;
+    const table = g.distTable;
+    for (let i = 0; i < N; i++) {
+      if (fixed[i]) {
+        rcv[i] = i;
+        rdist[i] = 0;
+        continue;
+      }
+      const t = (i % n2) * 8;
+      const zi = filled[i];
+      let best = -1;
+      let bestJ = -1;
+      if (rng) {
+        let cnt = 0;
+        let sum = 0;
+        for (let k = 0; k < 8; k++) {
+          const j = g.nbr(i, k);
+          if (j < 0) continue;
+          const s = (zi - filled[j]) / table[t + k];
+          if (s <= 0) continue;
+          const s2 = s * s;
+          w[cnt] = s2 * s2;
+          sum += w[cnt];
+          ks[cnt++] = k;
+        }
+        if (cnt > 0) {
+          let r = rng.float() * sum;
+          let c = 0;
+          while (c < cnt - 1 && r >= w[c]) r -= w[c++];
+          best = ks[c];
+          bestJ = g.nbr(i, best);
+        }
+      } else {
+        let bestS = 0;
+        for (let k = 0; k < 8; k++) {
+          const j = g.nbr(i, k);
+          if (j < 0) continue;
+          const s = (zi - filled[j]) / table[t + k];
+          if (s > bestS) {
+            bestS = s;
+            best = k;
+            bestJ = j;
+          }
+        }
+      }
+      if (best < 0) throw new Error(`FlowRouter: cell ${i} has no lower neighbour after filling`);
+      rcv[i] = bestJ;
+      rdist[i] = table[t + best];
+    }
+  }
+
   /** Donor CSR and the receiver-before-donor stack (breadth-first from each base-level root). */
   buildStack(): void {
     const { cells: N, rcv, donStart, donPos, donList, stack } = this;
@@ -259,7 +323,12 @@ export class FlowRouter {
   accumulate(rain?: Float32Array): void {
     const { cells: N, fixed, area, rcv, stack } = this;
     const a = this.cellM * this.cellM;
-    for (let i = 0; i < N; i++) area[i] = fixed[i] ? 0 : rain ? a * rain[i] : a;
+    if (this.grid.uniform) for (let i = 0; i < N; i++) area[i] = fixed[i] ? 0 : rain ? a * rain[i] : a;
+    else {
+      const { areaTable, n } = this.grid;
+      const n2 = n * n;
+      for (let i = 0; i < N; i++) area[i] = fixed[i] ? 0 : rain ? areaTable![i % n2] * rain[i] : areaTable![i % n2];
+    }
     for (let k = this.stackLen - 1; k >= 0; k--) {
       const i = stack[k];
       const r = rcv[i];
@@ -333,10 +402,16 @@ export async function runLem(
     incise(h, fixed, K, am, rcv, rdist, stack, router.stackLen, dt, strata);
     lap('incision');
 
-    if (p.kd > 0 && it < p.iterations - p.diffusionOffLast) diffuse(h, tmp, fixed, grid, p.kd, dt);
+    if (p.kd > 0 && it < p.iterations - p.diffusionOffLast) {
+      if (grid.uniform) diffuse(h, tmp, fixed, grid, p.kd, dt);
+      else diffuseCube(h, tmp, fixed, asCube(grid), p.kd, dt);
+    }
     lap('diffusion');
 
-    if (p.talus > 0) talusClamp(h, fixed, rim, grid, p.talus);
+    if (p.talus > 0) {
+      if (grid.uniform) talusClamp(h, fixed, rim, grid, p.talus);
+      else talusClampCube(h, fixed, asCube(grid), p.talus);
+    }
     lap('talus');
 
     onIteration?.(it, h);
@@ -488,6 +563,103 @@ function talusClamp(h: Float32Array, fixed: Uint8Array, rim: Uint8Array, g: Grid
     }
     if (best < 0) continue;
     const excess = hi - hb - lim[bestK];
+    if (excess <= 0) continue;
+    if (fixed[best]) {
+      h[i] = Math.max(LAND_MIN, hi - excess);
+    } else {
+      h[i] = Math.max(LAND_MIN, hi - excess * 0.5);
+      h[best] += excess * 0.5;
+    }
+  }
+}
+
+/** Raster k of the W, E, N, S neighbours, in that order. */
+const AXIAL4 = [K_W, K_E, K_N, K_S] as const;
+const fvCache = new WeakMap<CubeGrid, { coef: Float64Array; maxSum: number }>();
+
+/**
+ * Finite-volume diffusion weights per face position: (shared edge length / centre distance) / cell
+ * area for the W, E, N, S neighbours, and the largest per-cell sum (for the stability limit).
+ */
+function fvWeights(g: CubeGrid): { coef: Float64Array; maxSum: number } {
+  let fv = fvCache.get(g);
+  if (fv) return fv;
+  const { n, delta } = g;
+  const Q = Math.PI / 4;
+  const coef = new Float64Array(g.n2 * 4);
+  const a = new Float64Array(3);
+  const b = new Float64Array(3);
+  const corner = (x: number, y: number, out: Float64Array): void => faceDir(0, x * delta - Q, y * delta - Q, out);
+  let maxSum = 0;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const i = cellIndex(g, x, y);
+      const ends = [[x, y, x, y + 1], [x + 1, y, x + 1, y + 1], [x, y, x + 1, y], [x, y + 1, x + 1, y + 1]];
+      let sum = 0;
+      for (let s = 0; s < 4; s++) {
+        const [x0, y0, x1, y1] = ends[s];
+        corner(x0, y0, a);
+        corner(x1, y1, b);
+        const c = (g.radiusM * angle(a, b)) / g.dist(i, AXIAL4[s]) / g.areaTable[i];
+        coef[i * 4 + s] = c;
+        sum += c;
+      }
+      maxSum = Math.max(maxSum, sum);
+    }
+  }
+  fv = { coef, maxSum };
+  fvCache.set(g, fv);
+  return fv;
+}
+
+/**
+ * Explicit finite-volume diffusion on the cube-sphere: Σ_k (h_k − h_i)·(edge_ik / dist_ik) / area_i,
+ * sub-stepped so the per-cell sum of coefficients stays ≤ 1/2 (the flat c ≤ 1/8 rule for 4 neighbours).
+ */
+function diffuseCube(h: Float32Array, tmp: Float32Array, fixed: Uint8Array, g: CubeGrid, kd: number, dt: number): void {
+  const { cells: N, n2 } = g;
+  const { coef, maxSum } = fvWeights(g);
+  const steps = Math.max(1, Math.ceil(2 * kd * dt * maxSum));
+  const kdt = kd * (dt / steps);
+  for (let s = 0; s < steps; s++) {
+    for (let i = 0; i < N; i++) {
+      if (fixed[i]) continue;
+      const hi = h[i];
+      const t = (i % n2) * 4;
+      let acc = 0;
+      for (let k = 0; k < 4; k++) acc += coef[t + k] * (boundaryH(h, fixed, g.nbr(i, AXIAL4[k])) - hi);
+      const v = hi + kdt * acc;
+      tmp[i] = v < LAND_MIN ? LAND_MIN : v;
+    }
+    for (let i = 0; i < N; i++) if (!fixed[i]) h[i] = tmp[i];
+  }
+}
+
+/** talusClamp with per-neighbour distances (cube-sphere). */
+function talusClampCube(h: Float32Array, fixed: Uint8Array, g: CubeGrid, tanMax: number): void {
+  const { cells: N, n2, distTable } = g;
+  for (let i = 0; i < N; i++) {
+    if (fixed[i]) continue;
+    const hi = h[i];
+    const t = (i % n2) * 8;
+    let best = -1;
+    let bestS = 0;
+    let bestD = 0;
+    let hb = 0;
+    for (let k = 0; k < 8; k++) {
+      const j = g.nbr(i, k);
+      if (j < 0) continue;
+      const hj = boundaryH(h, fixed, j);
+      const s = (hi - hj) / distTable[t + k];
+      if (s > bestS) {
+        bestS = s;
+        best = j;
+        bestD = distTable[t + k];
+        hb = hj;
+      }
+    }
+    if (best < 0) continue;
+    const excess = hi - hb - tanMax * bestD;
     if (excess <= 0) continue;
     if (fixed[best]) {
       h[i] = Math.max(LAND_MIN, hi - excess);

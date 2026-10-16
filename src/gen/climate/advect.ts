@@ -1,5 +1,6 @@
 import { cellIndex, type Grid } from '../grid/grid';
 import { gaussBlur } from '../grid/smooth';
+import { upwindOrder } from './sphere';
 import type { Wind } from './wind';
 
 /**
@@ -52,7 +53,13 @@ export function buildStencil(w: Wind, g: Grid): Stencil {
       ju[i] = gy > 0 ? g.nbr(i, 1) : gy < 0 ? g.nbr(i, 6) : i;
     }
     wa[i] = a / s;
-    ds[i] = (cellKm * s) / Math.sqrt(gx * gx + gy * gy);
+    if (g.uniform) ds[i] = (cellKm * s) / Math.sqrt(gx * gx + gy * gy);
+    else {
+      // Sphere: the cell's own spacing along each face axis (0.71–1 × nominal).
+      const hx = (g.dist(i, 3) + g.dist(i, 4)) / 2000;
+      const hy = (g.dist(i, 1) + g.dist(i, 6)) / 2000;
+      ds[i] = (a * hx + b * hy) / Math.sqrt(gx * gx + gy * gy);
+    }
     quad[i] = (gx >= 0 ? 0 : 1) | (gy >= 0 ? 0 : 2);
   }
   // Divergence lines (two cells upwind of each other) would form cycles that the sweeps resolve only
@@ -77,6 +84,8 @@ export function buildStencil(w: Wind, g: Grid): Stencil {
   }
   const sources = new Int32Array(nSrc);
   for (let i = 0, s = 0; i < N; i++) if (isSrc[i]) sources[s++] = i;
+  // A closed surface has no global raster order: sweep the upwind graph topologically instead.
+  if (g.shape === 'sphere') return { grid: g, iu, ju, wa, ds, order: upwindOrder(iu, ju), sources };
   // Sweep order: per wind quadrant, the raster scan that visits upwind cells first.
   const n = g.n;
   const order = new Int32Array(N);

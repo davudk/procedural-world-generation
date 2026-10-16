@@ -8,10 +8,11 @@ import { Camera } from './render/camera2d';
 import { FramePacer } from './render/framePacer';
 import { Minimap } from './render/minimap';
 import { RasterView, sampleLayer } from './render/rasterView';
+import { equirectLatLon, projectSphereLayer, type ProjectedLayer, type SphereProjection } from './render/sphereProjection';
 import { parseQualityChoice, pickQuality, probeDevice, type QualityChoice } from './render/quality';
 import { WorldView } from './render/worldView';
 import { fmtNum, resolve } from './shared/config/resolve';
-import type { WorldSpec } from './shared/config/types';
+import type { WorldShape, WorldSpec } from './shared/config/types';
 import { queryToSpec, specToQuery } from './shared/config/url';
 import type { Landmark, WorldTraits } from './shared/landmarks';
 import type { FromWorker, GenMode, Layer, RiverGraph } from './shared/protocol';
@@ -28,6 +29,7 @@ const LAYER_KEY = 'pwg.layer';
 const MODE_KEY = 'pwg.mode';
 const PALETTE_KEY = 'pwg.palette';
 const QUALITY_KEY = 'pwg.quality';
+const PROJECTION_KEY = 'pwg.sphereProjection';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('view');
@@ -40,7 +42,7 @@ const inspectEl = $('inspect');
 let spec: WorldSpec = queryToSpec(location.search, randomSeed());
 const layers = new Map<string, Layer>();
 let selected = readStored(LAYER_KEY) ?? 'elevation';
-let fittedFor = -1;
+let fittedFor: number | string = -1;
 let buildTimer = 0;
 let rivers: RiverGraph | null = null;
 let landmarks: Landmark[] = [];
@@ -57,13 +59,21 @@ const compass = new Compass($('compass-host'), world.cam);
 $('legend').before(new ViewControls($('layers'), (s) => Object.assign(world.view, s)).el);
 const cam = new Camera();
 let view = new RasterView(canvas);
-const camCtl = new CameraController(canvas, cam, () => ({ w: currentWorldKm(), h: currentWorldKm() }));
+const camCtl = new CameraController(canvas, cam, () => ({ w: currentWorldKm(), h: currentWorldHeightKm() }));
 /** Debug handle for the console / browser automation. */
 Object.assign(window, { __pwg: { world, orbit, layers: () => layers } });
 let mode: '3d' | '2d' = readStored(MODE_KEY) === '2d' ? '2d' : '3d';
 let terrainShown: { elev: Layer; water: Layer | null } | null = null;
 let surfaceShown: Layer | null = null;
 let drapeShown: Layer | null | undefined;
+/** Shape of the world being generated; layers from a world of the other shape are dropped. */
+let genShape: WorldShape | null = null;
+/** Spheres show in the 2D view as an equirectangular map or a cube net (research 10 §6.8). */
+let sphereProjection: SphereProjection = readStored(PROJECTION_KEY) === 'net' ? 'net' : 'equirect';
+/** The projected sphere layer on screen (null for flat maps). */
+let sphereShown: ProjectedLayer | null = null;
+/** A sphere switched the view to 2D; a flat world switches it back. */
+let forced2d = false;
 
 // ── Mobile pass: quality tier, idle frame cap, context loss, export (M9) ──────────────────
 
@@ -77,6 +87,33 @@ const applyQuality = (): void => {
 };
 const pacer = new FramePacer(world.quality.idleFps);
 applyQuality();
+
+// Short notices (e.g. "globe view arrives in phase 3"), faded out after a few seconds.
+const noticeEl = document.createElement('div');
+noticeEl.className = 'view-notice hidden';
+noticeEl.setAttribute('role', 'status');
+document.body.append(noticeEl);
+let noticeTimer = 0;
+function notice(text: string): void {
+  noticeEl.textContent = text;
+  noticeEl.classList.remove('hidden');
+  clearTimeout(noticeTimer);
+  noticeTimer = window.setTimeout(() => noticeEl.classList.add('hidden'), 4500);
+}
+
+// Spheres: switch the 2D map between the equirectangular projection and the cube net.
+const projectionEl = document.createElement('button');
+projectionEl.type = 'button';
+projectionEl.className = 'projection-toggle';
+projectionEl.hidden = true;
+projectionEl.title = 'Show the planet as an equirectangular map or as the six cube faces (P)';
+projectionEl.addEventListener('click', () => toggleProjection());
+legendEl.after(projectionEl);
+function toggleProjection(): void {
+  sphereProjection = sphereProjection === 'net' ? 'equirect' : 'net';
+  writeStored(PROJECTION_KEY, sphereProjection);
+  showSelected();
+}
 
 const glLostEl = document.createElement('div');
 glLostEl.className = 'gl-lost hidden';
@@ -107,8 +144,12 @@ new ExportMenu(document.body, $('export-toggle'), {
     world,
     spec: () => spec,
     mode: () => mode,
-    layer: (id) => layers.get(id),
-    shownLayer: () => layers.get(shownLayerId()),
+    // Spheres export their equirectangular projection (the six raw faces are not an image).
+    layer: (id) => {
+      const l = layers.get(id);
+      return l?.faces === 6 ? projectSphereLayer(l, 'equirect') : l;
+    },
+    shownLayer: () => sphereShown ?? layers.get(shownLayerId()),
     landmarks: () => landmarks,
     traits: () => traits,
   }),
@@ -217,6 +258,7 @@ window.addEventListener('keydown', (e) => {
   if (isTypingTarget(e.target) || e.metaKey || e.ctrlKey) return;
   if (e.code === 'KeyB') startGen('build');
   if (e.code === 'KeyV') setMode(mode === '3d' ? '2d' : '3d');
+  if (e.code === 'KeyP' && sphereShown) toggleProjection();
   if (e.code === 'KeyA') atlas.toggle();
   if (e.code === 'Home' && mode === '2d') fitView();
 });
@@ -240,9 +282,28 @@ function regenerate(): void {
 
 function startGen(mode: GenMode): void {
   if (mode === 'build') clearTimeout(buildTimer);
-  progress.start(mode);
+  const resolved = resolve(spec);
+  const shape = resolved.values.worldShape as WorldShape;
+  if (shape !== genShape) {
+    // The other shape's layers (and rivers, landmarks) no longer describe this world.
+    if (genShape !== null) clearWorld();
+    genShape = shape;
+  }
+  progress.start(mode, shape);
   outcomes = {};
-  gen.generate(resolve(spec), mode);
+  gen.generate(resolved, mode);
+}
+
+function clearWorld(): void {
+  layers.clear();
+  layerSelect.replaceChildren();
+  rivers = null;
+  landmarks = [];
+  traits = null;
+  world.setRivers(null);
+  world.setLandmarks([]);
+  atlas.set([], null);
+  sphereShown = null;
 }
 
 function onGenEvent(msg: FromWorker): void {
@@ -313,6 +374,17 @@ function showSelected(): void {
   layerSelect.value = shownLayerId();
   const l = layers.get(shownLayerId());
   if (!l) return;
+  if (l.faces === 6) {
+    showSphere(l);
+    return;
+  }
+  sphereShown = null;
+  projectionEl.hidden = true;
+  if (forced2d) {
+    // Back to a flat world after a sphere forced the 2D view: restore the 3D view.
+    forced2d = false;
+    setMode('3d', false);
+  }
   view.setLayer(l);
   pacer.wake();
   const elev = layers.get('elevation');
@@ -378,9 +450,41 @@ function showSelected(): void {
       : `${l.w}² cells · ${cell} km/cell · ${fmtNum(l.min)} … ${fmtNum(l.max)} ${l.unit}`;
 }
 
+/**
+ * A cube-sphere layer in the 2D view: projected on the main thread (cached per layer). The 3D view
+ * has no globe renderer yet, so spheres always show in 2D (research 10 §8, Phase 3).
+ */
+function showSphere(l: Layer): void {
+  const shown = projectSphereLayer(l, sphereProjection);
+  sphereShown = shown;
+  view.setLayer(shown);
+  pacer.wake();
+  if (mode === '3d') {
+    notice('Globe view arrives in phase 3 — showing the 2D map');
+    forced2d = true;
+    setMode('2d', false);
+  }
+  projectionEl.hidden = false;
+  projectionEl.textContent = sphereProjection === 'net' ? 'Show map' : 'Show cube net';
+  const key = `${shown.projection}:${shown.worldKm}`;
+  if (fittedFor !== key) {
+    fittedFor = key;
+    fitView();
+  }
+  const cell = (l.worldKm / l.w).toFixed(2);
+  legendEl.textContent =
+    l.kind === 'categorical'
+      ? `6 × ${l.w}² cells · ${cell} km/cell · ${l.max + 1} classes`
+      : `6 × ${l.w}² cells · ${cell} km/cell · ${fmtNum(l.min)} … ${fmtNum(l.max)} ${l.unit}`;
+}
+
 function inspect(sx: number, sy: number): void {
   let x = cam.screenToWorldX(sx);
   let y = cam.screenToWorldY(sy);
+  if (sphereShown) {
+    inspectSphere(sphereShown, x, y);
+    return;
+  }
   if (mode === '3d') {
     const p = world.cam.pick(sx, sy);
     if (!p || !world.hf) {
@@ -401,6 +505,25 @@ function inspect(sx: number, sy: number): void {
   const near = nearestLandmark(x * 1000, y * 1000);
   if (near) lines.unshift(`${near.name} (${KIND_LABEL[near.kind].toLowerCase()})`);
   if (elev && elev !== l) lines.push(`Elevation: ${fmtNum(sampleLayer(elev, x, y) ?? 0)} m`);
+  inspectEl.textContent = lines.join('\n');
+}
+
+function inspectSphere(shown: ProjectedLayer, x: number, y: number): void {
+  const v = sampleLayer(shown, x, y);
+  if (v === null) {
+    inspectEl.textContent = '';
+    return;
+  }
+  const lines = [`${shown.label}: ${fmtNum(v)} ${shown.unit}`];
+  if (shown.projection === 'equirect') {
+    const [lat, lon] = equirectLatLon(shown, x, y);
+    lines.unshift(`${Math.abs(lat).toFixed(1)}° ${lat >= 0 ? 'N' : 'S'}, ${Math.abs(lon).toFixed(1)}° ${lon >= 0 ? 'E' : 'W'}`);
+  }
+  const elev = layers.get('elevation');
+  if (elev && elev.label !== shown.label && elev.faces === 6) {
+    const e = sampleLayer(projectSphereLayer(elev, shown.projection), x, y);
+    if (e !== null) lines.push(`Elevation: ${fmtNum(e)} m`);
+  }
   inspectEl.textContent = lines.join('\n');
 }
 
@@ -426,12 +549,16 @@ function fitView(): void {
   const panelEl = $('panel');
   const docked = getComputedStyle(panelEl).transform === 'none' || window.innerWidth > 760;
   const top = $('topbar').getBoundingClientRect().bottom;
-  cam.fit(currentWorldKm(), currentWorldKm(), { top, right: docked ? window.innerWidth - panelEl.getBoundingClientRect().left : 0, bottom: 0, left: 0 });
+  cam.fit(currentWorldKm(), currentWorldHeightKm(), { top, right: docked ? window.innerWidth - panelEl.getBoundingClientRect().left : 0, bottom: 0, left: 0 });
   camCtl.setZoom(cam.zoom);
 }
 
 function currentWorldKm(): number {
-  return layers.get(shownLayerId())?.worldKm ?? 1024;
+  return sphereShown?.worldKm ?? layers.get(shownLayerId())?.worldKm ?? 1024;
+}
+
+function currentWorldHeightKm(): number {
+  return sphereShown ? (sphereShown.worldKm * sphereShown.h) / sphereShown.w : currentWorldKm();
 }
 
 // ── Frame loop ────────────────────────────────────────────────────────────────────────────
@@ -467,10 +594,16 @@ function frame(now: number): void {
   requestAnimationFrame(frame);
 }
 
-function setMode(m: '3d' | '2d'): void {
+/** `persist` = false for switches the app makes on its own (a sphere forcing the 2D view). */
+function setMode(m: '3d' | '2d', persist = true): void {
+  if (persist) forced2d = false;
+  if (m === '3d' && sphereShown) {
+    notice('Globe view arrives in phase 3 — showing the 2D map');
+    m = '2d';
+  }
   mode = m;
   pacer.wake();
-  writeStored(MODE_KEY, m);
+  if (persist) writeStored(MODE_KEY, m);
   orbit.enabled = m === '3d';
   camCtl.enabled = m === '2d';
   document.body.classList.toggle('mode-2d', m === '2d');

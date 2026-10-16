@@ -1,10 +1,11 @@
 import type { Layer } from '../../shared/protocol';
-import { cellIndex, cellX, cellY } from '../grid/grid';
+import { cellFace, cellIndex, cellX, cellY, type Grid } from '../grid/grid';
 import { components } from '../grid/ops';
 import { upsampleBicubic } from '../grid/upsample';
 import { runLem, upliftRefineFactor, type LemParams } from '../lem/streamPower';
 import type { StageCtx, StageDef } from '../pipeline';
 import { LEM_M } from './base';
+import { shapeHeader } from './plates';
 import type { TerrainExtra } from './stamps';
 
 export interface ErodedExtra extends TerrainExtra {
@@ -46,7 +47,7 @@ export const lemStage: StageDef = {
     const t = ctx.input('stamps').extra as TerrainExtra;
     const iterations = ctx.mode === 'preview' ? Math.round(ctx.num('lemIterations') * 0.6) : ctx.num('lemIterations');
     const out = await erode(ctx, t, t.h.slice(), iterations);
-    const layers = [elevationLayer('lemElevation', 'Eroded elevation (erosion grid)', 'lem', out, ctx.num('worldSize'))];
+    const layers = [elevationLayer('lemElevation', 'Eroded elevation (erosion grid)', 'lem', out, ctx.num('worldSize'), ctx.grid(t.n))];
     return { layers, stats: { iterations, ms: out.ms }, outcomes: {}, extra: out.extra };
   },
 };
@@ -59,13 +60,14 @@ export const refineStage: StageDef = {
   id: 'refine',
   label: 'Refine',
   inputs: ['lem'],
-  reads: ['worldSize', 'macroGrid', 'seaLevelRise', 'lemIterations'],
+  reads: ['worldSize', 'macroGrid', 'seaLevelRise', 'lemIterations', 'faceGrid'],
   async run(ctx) {
     const src = ctx.input('lem').extra as ErodedExtra;
     const worldKm = ctx.num('worldSize');
     let cur: ErodedExtra = src;
     let ms = 0;
-    const target = ctx.mode === 'preview' ? src.n : Number(ctx.str('macroGrid'));
+    const sphere = ctx.grid(src.n).shape === 'sphere';
+    const target = ctx.mode === 'preview' ? src.n : Number(ctx.str(sphere ? 'faceGrid' : 'macroGrid'));
     while (cur.n < target) {
       const n = cur.n * 2;
       const cg = ctx.grid(cur.n);
@@ -78,12 +80,12 @@ export const refineStage: StageDef = {
       const K = upsampleBicubic(cur.K, cg, 2);
       const strata = upsampleBicubic(cur.strata, cg, 2);
       // Sub-cell jitter so flow on flat ground doesn't lock onto the new grid's axes.
-      const jit = ctx.rng('refine-jitter', n);
-      for (let i = 0; i < n * n; i++) if (h[i] > 0) h[i] += 4 * (jit.float() - 0.5);
       const fg = ctx.grid(n);
-      const fixed = new Uint8Array(n * n);
-      for (let i = 0; i < n * n; i++) {
-        const parent = cur.fixed[cellIndex(cg, Math.floor(cellX(fg, i) / 2), Math.floor(cellY(fg, i) / 2))];
+      const jit = ctx.rng('refine-jitter', n);
+      for (let i = 0; i < fg.cells; i++) if (h[i] > 0) h[i] += 4 * (jit.float() - 0.5);
+      const fixed = new Uint8Array(fg.cells);
+      for (let i = 0; i < fg.cells; i++) {
+        const parent = cur.fixed[cellIndex(cg, Math.floor(cellX(fg, i) / 2), Math.floor(cellY(fg, i) / 2), cellFace(fg, i))];
         fixed[i] = parent || h[i] <= 0 ? 1 : 0;
         if (fixed[i] && h[i] > 0 && parent) h[i] = Math.min(h[i], 0);
         if (U[i] < 0) U[i] = 0;
@@ -93,7 +95,7 @@ export const refineStage: StageDef = {
       const r = await erode(ctx, { n, cellKm: cur.cellKm / 2, h, U, K, strata, fixed }, h, iterations);
       ms += r.ms;
       // Refinement carves finer valleys; it must not raise summits above the coarse surface.
-      for (let i = 0; i < n * n; i++) r.extra.h[i] = Math.min(r.extra.h[i], up[i] + REFINE_RISE_M);
+      for (let i = 0; i < fg.cells; i++) r.extra.h[i] = Math.min(r.extra.h[i], up[i] + REFINE_RISE_M);
       cur = r.extra;
     }
 
@@ -111,23 +113,32 @@ export const refineStage: StageDef = {
     }
     const final: ErodedExtra = { ...cur, h, fixed };
     const n = final.n;
-    const land = new Uint8Array(n * n);
+    const fg = ctx.grid(n);
+    const land = new Uint8Array(fg.cells);
     let landCells = 0;
+    let landArea = 0;
     let peak = 0;
-    for (let i = 0; i < n * n; i++) {
+    for (let i = 0; i < fg.cells; i++) {
       if (h[i] > 0) {
         land[i] = 1;
         landCells++;
+        if (sphere) landArea += fg.area(i);
         peak = Math.max(peak, h[i]);
       }
     }
-    const { sizes } = components(land, ctx.grid(n));
+    const { label, sizes } = components(land, fg);
+    if (sphere) {
+      // Continents and islands by area: cube-sphere cells differ by up to √2 (research 10 §5.5).
+      const areas = new Float64Array(sizes.length);
+      for (let i = 0; i < fg.cells; i++) if (label[i] >= 0) areas[label[i]] += fg.area(i);
+      for (let k = 0; k < sizes.length; k++) sizes[k] = (areas[k] / landArea) * landCells;
+    }
     const continents = sizes.filter((s) => s >= CONTINENT_MIN_SHARE * landCells).length;
     const islands = sizes.length - continents;
-    const layers: Layer[] = [elevationLayer('elevation', 'Elevation', 'refine', { extra: final }, worldKm), drainageLayer(final, worldKm)];
+    const layers: Layer[] = [elevationLayer('elevation', 'Elevation', 'refine', { extra: final }, worldKm, fg), drainageLayer(final, worldKm, fg)];
     return {
       layers,
-      stats: { landFraction: landCells / (n * n), continents, islands, highestPeakM: peak, ms },
+      stats: { landFraction: sphere ? landArea / fg.totalArea : landCells / (n * n), continents, islands, highestPeakM: peak, ms },
       outcomes: { continentCount: continents },
       extra: final,
     };
@@ -144,7 +155,7 @@ async function erode(ctx: StageCtx, t: TerrainExtra, h: Float32Array, iterations
   return { extra: { ...t, h: r.h, area: r.area, rcv: r.rcv }, ms: r.ms };
 }
 
-function elevationLayer(id: string, label: string, stage: 'lem' | 'refine', r: { extra: ErodedExtra }, worldKm: number): Layer {
+function elevationLayer(id: string, label: string, stage: 'lem' | 'refine', r: { extra: ErodedExtra }, worldKm: number, g: Grid): Layer {
   const { h, n } = r.extra;
   let lo = Infinity;
   let hi = -Infinity;
@@ -152,16 +163,16 @@ function elevationLayer(id: string, label: string, stage: 'lem' | 'refine', r: {
     lo = Math.min(lo, v);
     hi = Math.max(hi, v);
   }
-  return { id, label, stage, kind: 'elevation', w: n, h: n, worldKm, unit: 'm', min: lo, max: hi, data: h };
+  return { id, label, stage, kind: 'elevation', w: n, h: n, worldKm, ...shapeHeader(g), unit: 'm', min: lo, max: hi, data: h };
 }
 
-function drainageLayer(e: ErodedExtra, worldKm: number): Layer {
+function drainageLayer(e: ErodedExtra, worldKm: number, g: Grid): Layer {
   const { n, area, fixed } = e;
-  const data = new Float32Array(n * n);
+  const data = new Float32Array(g.cells);
   let hi = 0;
-  for (let i = 0; i < n * n; i++) {
+  for (let i = 0; i < g.cells; i++) {
     data[i] = fixed[i] ? 0 : Math.log10(Math.max(1, area[i] / 1e6));
     hi = Math.max(hi, data[i]);
   }
-  return { id: 'drainage', label: 'Drainage area (log10 km²)', stage: 'refine', kind: 'scalar', w: n, h: n, worldKm, unit: '', min: 0, max: hi, data };
+  return { id: 'drainage', label: 'Drainage area (log10 km²)', stage: 'refine', kind: 'scalar', w: n, h: n, worldKm, ...shapeHeader(g), unit: '', min: 0, max: hi, data };
 }

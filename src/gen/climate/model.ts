@@ -1,10 +1,13 @@
 import type { Noise2 } from '../../shared/noise';
-import { cellIndex, coarser, type Grid } from '../grid/grid';
+import type { Noise3 } from '../../shared/noise3';
+import { asCube, latitudes } from '../grid/cube';
+import { cellFace, cellIndex, cellX, cellY, coarser, type Grid } from '../grid/grid';
 import { chamferDistance, smoothstep } from '../grid/ops';
 import { downsample, gaussBlur, upsample, warp } from '../grid/smooth';
 import { advectMarine, advectMoisture, buildStencil } from './advect';
 import { sstAnomaly } from './currents';
 import { coarseFbm, expNeg } from './fields';
+import { windToFace } from './sphere';
 import { ampLand, ampOcean, capacity, circulation, HALF_YEAR, LAPSE, zonalT } from './tables';
 import { windField, type Wind, type WindOptions } from './wind';
 
@@ -110,6 +113,7 @@ interface SweepOut {
   /** Means of both runs: marine influence, advected anomaly, wind vector, fog flag. */
   m: Float32Array;
   a: Float32Array;
+  /** Wind toward east and south (flat: also the grid axes; sphere: the local frame). */
   wx: Float32Array;
   wy: Float32Array;
   fog: Float32Array;
@@ -118,18 +122,22 @@ interface SweepOut {
 /**
  * Climate model of research 03 §1–2 on the macro grid: warped latitude, zonal temperature with lapse
  * rate, coastal current anomalies, continentality, and the summer and winter upwind moisture sweeps
- * (on a grid of ≥ SWEEP_KM cells) with orographic uplift, snow-out and recycling.
+ * (on a grid of ≥ SWEEP_KM cells) with orographic uplift, snow-out and recycling. On the sphere the
+ * latitude is the true one (latNorth / latSouth are ignored), winds are turned from the local frame
+ * into face axes and the sweeps follow the upwind graph round the planet (research 10 §5.6); `noise`
+ * is then a Noise3.
  */
 export async function computeClimate(
   h: Float32Array,
   fixed: Uint8Array,
   grid: Grid,
   p: ClimateParams,
-  noise: Noise2,
+  noise: Noise2 | Noise3,
   checkpoint: () => Promise<void>,
 ): Promise<ClimateFields> {
   const { n, cellKm } = grid;
-  const N = n * n;
+  const N = grid.cells;
+  const sphere = grid.shape === 'sphere';
   const stats: Record<string, number> = {};
   let tLap = performance.now();
   const lap = (key: string): void => {
@@ -142,12 +150,17 @@ export async function computeClimate(
   const sea = new Uint8Array(N);
   for (let i = 0; i < N; i++) sea[i] = fixed[i] && h[i] <= 0 ? 1 : 0;
   const lat = coarseFbm(noise, grid, 500, 3, 0.37);
-  for (let y = 0; y < n; y++) {
-    const base = p.latNorth + ((p.latSouth - p.latNorth) * (y + 0.5)) / n;
-    // fBm rarely leaves ±0.5, so ×2 gives the research's ±warp degrees.
-    for (let x = 0; x < n; x++) {
-      const i = cellIndex(grid, x, y);
-      lat[i] = base + 2 * p.latitudeWarp * lat[i];
+  if (sphere) {
+    const trueLat = latitudes(asCube(grid));
+    for (let i = 0; i < N; i++) lat[i] = trueLat[i] + 2 * p.latitudeWarp * lat[i];
+  } else {
+    for (let y = 0; y < n; y++) {
+      const base = p.latNorth + ((p.latSouth - p.latNorth) * (y + 0.5)) / n;
+      // fBm rarely leaves ±0.5, so ×2 gives the research's ±warp degrees.
+      for (let x = 0; x < n; x++) {
+        const i = cellIndex(grid, x, y);
+        lat[i] = base + 2 * p.latitudeWarp * lat[i];
+      }
     }
   }
   const coastKm = chamferDistance(sea, grid);
@@ -166,8 +179,8 @@ export async function computeClimate(
   // 3. Post-processing on the sweep grid (storm-scale spreading, seasonality), then full resolution.
   gaussBlur(sw.ps, g.grid, 8 / g.cellKm);
   gaussBlur(sw.pw, g.grid, 8 / g.cellKm);
-  const pC = new Float32Array(g.n * g.n);
-  const psC = new Float32Array(g.n * g.n);
+  const pC = new Float32Array(g.grid.cells);
+  const psC = new Float32Array(g.grid.cells);
   for (let i = 0; i < pC.length; i++) {
     const tot = sw.ps[i] + sw.pw[i];
     pC[i] = tot / 2;
@@ -217,11 +230,19 @@ export async function computeClimate(
     fog[i] = !s && fogF[i] >= 0.5 ? 1 : 0;
   }
   const windDeg = new Float32Array(N);
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      const c = cellIndex(g.grid, Math.floor(x / f), Math.floor(y / f));
+  if (sphere) {
+    for (let i = 0; i < N; i++) {
+      const c = cellIndex(g.grid, Math.floor(cellX(grid, i) / f), Math.floor(cellY(grid, i) / f), cellFace(grid, i));
       const d = (Math.atan2(sw.wx[c], -sw.wy[c]) * 180) / Math.PI;
-      windDeg[cellIndex(grid, x, y)] = d < 0 ? d + 360 : d;
+      windDeg[i] = d < 0 ? d + 360 : d;
+    }
+  } else {
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        const c = cellIndex(g.grid, Math.floor(x / f), Math.floor(y / f));
+        const d = (Math.atan2(sw.wx[c], -sw.wy[c]) * 180) / Math.PI;
+        windDeg[cellIndex(grid, x, y)] = d < 0 ? d + 360 : d;
+      }
     }
   }
   lap('post');
@@ -229,13 +250,13 @@ export async function computeClimate(
 }
 
 function sweepGrid(sea: Uint8Array, h: Float32Array, lat: Float32Array, grid: Grid, f: number, p: ClimateParams): SweepGrid {
-  const { n, cellKm } = grid;
+  const { cellKm } = grid;
   const sg = coarser(grid, f);
-  const m = n / f;
-  const M = m * m;
-  const seaF = new Float32Array(n * n);
-  const land = new Float32Array(n * n);
-  for (let i = 0; i < n * n; i++) {
+  const m = sg.n;
+  const M = sg.cells;
+  const seaF = new Float32Array(grid.cells);
+  const land = new Float32Array(grid.cells);
+  for (let i = 0; i < grid.cells; i++) {
     seaF[i] = sea[i];
     land[i] = sea[i] ? 0 : Math.max(0, h[i]);
   }
@@ -262,7 +283,7 @@ function sweepGrid(sea: Uint8Array, h: Float32Array, lat: Float32Array, grid: Gr
   return { grid: sg, n: m, cellKm: ck, sea: gs, lat: glat, h: gh, hs, coastKm, tsl, ampL, ampO, anom };
 }
 
-async function sweeps(g: SweepGrid, p: ClimateParams, noise: Noise2, stats: Record<string, number>, checkpoint: () => Promise<void>): Promise<SweepOut> {
+async function sweeps(g: SweepGrid, p: ClimateParams, noise: Noise2 | Noise3, stats: Record<string, number>, checkpoint: () => Promise<void>): Promise<SweepOut> {
   const { grid, cellKm, sea, lat, h, hs, coastKm, tsl, ampL, ampO, anom } = g;
   const N = grid.cells;
   // Hothouse worlds (flat gradients) also flatten the circulation contrast (research 03 §7.4).
@@ -300,8 +321,8 @@ async function sweeps(g: SweepGrid, p: ClimateParams, noise: Noise2, stats: Reco
     });
     const st = buildStencil(wind, grid);
     for (let i = 0; i < N; i++) {
-      out.wx[i] += wind.gx[i];
-      out.wy[i] += wind.gy[i];
+      out.wx[i] += wind.ex?.[i] ?? wind.gx[i];
+      out.wy[i] += wind.sy?.[i] ?? wind.gy[i];
       decay[i] = expNeg(st.ds[i] / L_MARINE);
     }
     // Inflow where a cell has no upwind neighbour. Map edge: marine air from an ocean beyond the map
@@ -366,8 +387,26 @@ async function sweeps(g: SweepGrid, p: ClimateParams, noise: Noise2, stats: Reco
 /**
  * Wind bands evaluated on a ≤ 8 km lattice and bilinearly upsampled: the field only varies on the
  * 300–500 km scales of the latitude warp and direction noise, so per-cell trigonometry is wasted.
+ * On the sphere the bands are upsampled in the local (east, south) frame, which is continuous across
+ * the seams, and then turned into face axes; `ex` / `sy` keep the local components.
  */
 function coarseWind(
+  lat: Float32Array,
+  grid: Grid,
+  dirNoise: Float32Array,
+  o: Omit<WindOptions, 'noise'> & { noiseRad: number },
+): Wind & { ex?: Float32Array; sy?: Float32Array } {
+  if (grid.shape === 'sphere') {
+    const w = coarseWindFlatFrame(lat, grid, dirNoise, o);
+    const ex = w.gx.slice();
+    const sy = w.gy.slice();
+    windToFace(asCube(grid), w.gx, w.gy);
+    return { gx: w.gx, gy: w.gy, ex, sy };
+  }
+  return coarseWindFlatFrame(lat, grid, dirNoise, o);
+}
+
+function coarseWindFlatFrame(
   lat: Float32Array,
   grid: Grid,
   dirNoise: Float32Array,
@@ -381,8 +420,8 @@ function coarseWind(
   const c = windField(f === 1 ? lat : downsample(lat, grid, f), { shiftDeg: o.shiftDeg, noise, overrideDeg: o.overrideDeg, overrideStrength: o.overrideStrength });
   if (f === 1) return c;
   const cg = coarser(grid, f);
-  const gx = new Float32Array(n * n);
-  const gy = new Float32Array(n * n);
+  const gx = new Float32Array(grid.cells);
+  const gy = new Float32Array(grid.cells);
   upsample(c.gx, cg, f, gx);
   upsample(c.gy, cg, f, gy);
   return { gx, gy };
