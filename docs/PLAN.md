@@ -626,3 +626,55 @@ Each research note lists its sources with URLs. The core references are:
 - No shadows or AO yet (M5).
 - Haze only when tilted.
 - No labels (M7).
+
+### M3 — Water (2026-10-16)
+
+**What landed:**
+- **S6 Climate (placeholder):**
+  - Zonal temperature with a lapse rate.
+  - Precipitation from a latitude circulation factor, distance inland and elevation.
+  - PET from temperature.
+  - It gives hydrology rain and evaporation; M4 replaces it.
+- **S8 Hydrology** (`src/gen/hydro/*`):
+  - Pit breaching and grid-scale lake basins.
+  - Depression hierarchy with a Fu–Budyko water balance: through-flow, terminal or salt lake, or playa.
+  - Jittered D8 routing with uncrossing, and accumulation with arid losses.
+  - A river graph (struct of arrays, reach-ordered) with Strahler orders and hydraulic geometry.
+  - Kinoshita meanders, monotone water and bed elevation, knickpoint waterfalls and rapids.
+  - Galloway-style deltas and estuaries, and inland deltas.
+  - Wetlands from TWI selected to the 🎯 share, and a min-only bed carve.
+- **Protocol:** a `vectors` channel carries the river graph and lakes alongside raster layers.
+- **Rendering:**
+  - The water lid now uses the water-level raster, so lakes sit at their own level.
+  - Water levels are pre-extended two cells, so shorelines follow the terrain contour.
+  - Lake, salt-lake and playa colours; soft wetland and salt-flat masks.
+  - River ribbons stay at least 1.3 px wide, fade by drainage area per zoom (A_vis = (49·m/px / 1000)² km²), and show flowing streaks, waterfall foam and dashed ephemeral wadis.
+  - The minimap shows lakes.
+
+**Decisions and fixes made while building:**
+- **Lakes are placed, not found.** The eroded terrain has almost no depressions, so hydrology carves grid-scale basins behind sills on drainage lines (Pareto sizes, ~1 per 1000 km² × lakeDensity). The water balance then decides their fate. Sub-grid kettles, tarns and ponds are deferred.
+- **Channel threshold** is 8 km² / riverDensity², which keeps the build graph at ~220k nodes.
+- **Gradient texture mips.** The shading gradient is a mipmapped RG16F texture sampled by pixel footprint. Without it, 1 km cells only ~3 px wide shade as blocky stairs. The mips are built on the CPU, because `generateMipmap` needs a colour-renderable format; RG16F is not one without an extension, and the incomplete texture had flattened all shading.
+- **Plains roughness.** Base land gets ~35 m of 14 km-wavelength roughness, and refine adds 4 m of jitter, so plains drainage doesn't lock onto the grid axes.
+
+**Measurements, seed 7, build (node):**
+
+| Measure | Value |
+|---|---|
+| Hydrology stage time | ~0.5 s |
+| River graph | 218k nodes, 23.6k reaches |
+| Rivers reaching the sea | 1,236 |
+| Lakes | 131 (2 ≥ 100 km², 1 ≥ 1000 km²) |
+| Playas | 14 |
+| Waterfall nodes | 255 |
+| Lake cover | 0.95 % |
+| Horton bifurcation ratio | 4.9 |
+| Hack exponent | 0.55 |
+| Full build | ~6.6 s |
+| Frame time | p50 8.3 ms (120 Hz) |
+
+**Known gaps:**
+- Some long rivers still run straight across very flat plains (flat routing).
+- No oxbow lakes or braided rendering yet.
+- Small placed lakes and creeks arrive with detail (M5).
+- The climate model is a placeholder until M4.

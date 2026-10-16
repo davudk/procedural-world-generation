@@ -1,6 +1,6 @@
 import type { Range, Resolved, StageId, Value } from '../shared/config/types';
 import { hashValue, rngFor } from '../shared/hash';
-import type { FromWorker, GenMode, Layer } from '../shared/protocol';
+import { copyVectors, type FromWorker, type GenMode, type Layer, type Vectors } from '../shared/protocol';
 import type { Rng } from '../shared/rng';
 
 export interface StageOutput {
@@ -10,6 +10,8 @@ export interface StageOutput {
   outcomes: Record<string, number>;
   /** Stage-private data for downstream stages (never sent to the main thread). */
   extra?: unknown;
+  /** Vector data for the renderer (rivers, lakes). */
+  vectors?: Vectors;
 }
 
 export interface StageCtx {
@@ -152,7 +154,9 @@ export class Pipeline {
 function stageDone(reqId: number, s: StageDef, ms: number, cached: boolean, out: StageOutput): FromWorker {
   // Copies: the cache keeps the originals, and the copies are transferred.
   const layers = out.layers.map((l) => ({ ...l, data: l.data.slice() }));
-  return { type: 'stage-done', reqId, stage: s.id, label: s.label, ms, cached, layers, stats: out.stats, outcomes: out.outcomes };
+  const msg: FromWorker = { type: 'stage-done', reqId, stage: s.id, label: s.label, ms, cached, layers, stats: out.stats, outcomes: out.outcomes };
+  if (out.vectors) msg.vectors = copyVectors(out.vectors);
+  return msg;
 }
 
 function yieldToEventLoop(): Promise<void> {

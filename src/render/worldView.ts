@@ -1,9 +1,10 @@
-import type { Layer } from '../shared/protocol';
+import type { Layer, RiverGraph } from '../shared/protocol';
 import type { GroundQuery, Vec3 } from './camera/ground';
 import { OrbitCamera } from './camera/orbitCamera';
-import { HeightField } from './heightField';
+import { HeightField, prepareWater } from './heightField';
 import { CdlodSelector } from './terrain/cdlod';
 import { TerrainPass } from './terrain/terrainPass';
+import { RiverPass } from './water/rivers';
 
 const MSAA = 4;
 const HAZE_COLOR = [0.62, 0.70, 0.78] as const;
@@ -35,6 +36,7 @@ export class WorldView {
   nodes = 0;
   private readonly selector = new CdlodSelector();
   private readonly terrain: TerrainPass;
+  readonly rivers: RiverPass;
   private readonly viewProj = new Float32Array(16);
   private readonly planes = new Float64Array(24);
   private fbo: WebGLFramebuffer | null = null;
@@ -57,14 +59,17 @@ export class WorldView {
     this.cam = new OrbitCamera(new FlatGround(1024e3));
     this.cam.reversedZ = this.reversedZ;
     this.terrain = new TerrainPass(gl);
+    this.rivers = new RiverPass(gl);
   }
 
-  setElevation(layer: Layer): void {
-    const hf = new HeightField(layer);
+  /** Terrain elevation plus optional water level / water class rasters (same grid). */
+  setTerrain(layer: Layer, water: Layer | null = null, wclass: Layer | null = null): void {
+    const prepared = water !== null && water.w === layer.w ? prepareWater(layer, water, wclass && wclass.w === layer.w ? wclass : null) : null;
+    const hf = new HeightField(layer, prepared?.level ?? null);
     hf.exaggeration = this.exaggeration;
     this.hf = hf;
     this.cam.setGround(hf);
-    this.terrain.setHeight(layer);
+    this.terrain.setTerrain(layer, prepared);
     if (this.fittedSize !== hf.size) {
       this.fittedSize = hf.size;
       this.cam.fitWorld();
@@ -74,6 +79,10 @@ export class WorldView {
   setExaggeration(x: number): void {
     this.exaggeration = x;
     if (this.hf) this.hf.exaggeration = x;
+  }
+
+  setRivers(graph: RiverGraph | null): void {
+    this.rivers.setRivers(graph, this.hf?.size ?? 0);
   }
 
   setDrape(layer: Layer | null): void {
@@ -125,10 +134,17 @@ export class WorldView {
         instances: this.selector.instances,
         count: this.nodes,
         exaggeration: this.exaggeration,
-        normalExaggeration: this.exaggeration * (1.5 + 5 * smoothstep(5e3, 6e5, altitude)),
+        normalExaggeration: this.exaggeration * (1.4 + 5.0 * smoothstep(5e3, 6e5, altitude)),
         sun: [Math.sin(az) * Math.cos(el), Math.cos(az) * Math.cos(el), Math.sin(el)],
         haze: (tilt * tilt * 1.6) / hf.size + 1e-8,
         hazeColor: HAZE_COLOR,
+        time: timeSec,
+      });
+      this.rivers.draw({
+        viewProj: this.viewProj,
+        origin: eye,
+        exaggeration: this.exaggeration,
+        pxScale: (2 * Math.tan(cam.fovY / 2)) / Math.max(1, cam.viewH),
         time: timeSec,
       });
       gl.disable(gl.DEPTH_TEST);

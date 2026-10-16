@@ -1,4 +1,5 @@
 import type { Layer } from '../shared/protocol';
+import { DRY } from './heightField';
 import type { OrbitCamera } from './camera/orbitCamera';
 
 const SIZE = 168;
@@ -41,7 +42,8 @@ export class Minimap {
     this.el.addEventListener('pointerup', () => (this.dragging = false));
   }
 
-  setElevation(layer: Layer): void {
+  setTerrain(layer: Layer, water: Layer | null = null): void {
+    const wl = water && water.w === layer.w ? water.data : null;
     const W = this.el.width;
     const img = this.ctx.createImageData(W, W);
     const n = layer.w;
@@ -51,7 +53,10 @@ export class Minimap {
       for (let x = 0; x < W; x++) {
         const sx = Math.min(n - 2, Math.floor((x / W) * n));
         const sy = Math.min(n - 2, Math.floor((y / W) * n));
-        const h = d[sy * n + sx];
+        const h0 = d[sy * n + sx];
+        const lvl = wl ? wl[sy * n + sx] : DRY - 1;
+        // Lakes: colour as water by depth below their level.
+        const h = lvl > DRY && lvl > h0 && h0 >= 0 ? -Math.min(400, lvl - h0) * 3 : h0;
         const dx = (d[sy * n + sx + 1] - h) / cell;
         const dy = (d[(sy + 1) * n + sx] - h) / cell;
         const shade = h > 0 ? Math.min(1.4, Math.max(0.45, 1 - 6 * (dx + dy))) : 1;

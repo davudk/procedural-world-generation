@@ -61,3 +61,42 @@ export function smoothstep(e0: number, e1: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
   return t * t * (3 - 2 * t);
 }
+
+/**
+ * Two-pass 3-4 chamfer distance (in cells, ≈ Euclidean within ~8 %) to the nearest cell where
+ * `source` is non-zero. O(n), for fields where approximate distance is fine (e.g. coast distance).
+ */
+export function chamferDistance(source: Uint8Array, n: number): Float32Array {
+  const INF = 1e9;
+  const d = new Float32Array(n * n);
+  for (let i = 0; i < n * n; i++) d[i] = source[i] ? 0 : INF;
+  const a = 1;
+  const b = 1.4;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const i = y * n + x;
+      let v = d[i];
+      if (x > 0) v = Math.min(v, d[i - 1] + a);
+      if (y > 0) {
+        v = Math.min(v, d[i - n] + a);
+        if (x > 0) v = Math.min(v, d[i - n - 1] + b);
+        if (x < n - 1) v = Math.min(v, d[i - n + 1] + b);
+      }
+      d[i] = v;
+    }
+  }
+  for (let y = n - 1; y >= 0; y--) {
+    for (let x = n - 1; x >= 0; x--) {
+      const i = y * n + x;
+      let v = d[i];
+      if (x < n - 1) v = Math.min(v, d[i + 1] + a);
+      if (y < n - 1) {
+        v = Math.min(v, d[i + n] + a);
+        if (x < n - 1) v = Math.min(v, d[i + n + 1] + b);
+        if (x > 0) v = Math.min(v, d[i + n - 1] + b);
+      }
+      d[i] = v;
+    }
+  }
+  return d;
+}

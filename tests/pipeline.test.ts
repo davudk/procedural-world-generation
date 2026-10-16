@@ -22,16 +22,18 @@ const ran = (events: FromWorker[]): string[] =>
 describe('pipeline caching', () => {
   it('re-runs only stages whose read parameters or inputs changed', async () => {
     const p = new Pipeline(STAGES);
-    const ALL = ['plates', 'base', 'stamps', 'lem', 'refine'];
+    const ALL = ['plates', 'base', 'stamps', 'lem', 'refine', 'climate', 'hydro'];
     expect(ran(await run(p, spec()))).toEqual(ALL);
     expect(ran(await run(p, spec()))).toEqual([]);
     // continentalShare is read by plates, so both stages re-run; coastRoughness only by base.
     expect(ran(await run(p, spec({ continentalShare: 0.6 })))).toEqual(ALL);
     expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4 })))).toEqual(ALL.slice(1));
-    // Sea-level rise only affects the last stage.
-    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50 })))).toEqual(['refine']);
+    // Sea-level rise starts at refine.
+    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50 })))).toEqual(['refine', 'climate', 'hydro']);
+    // Humidity only reaches climate and what depends on it.
+    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50, humidity: 2 })))).toEqual(['climate', 'hydro']);
     // A parameter no stage reads yet regenerates nothing.
-    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50, humidity: 2 })))).toEqual([]);
+    expect(ran(await run(p, spec({ continentalShare: 0.6, coastRoughness: 1.4, seaLevelRise: 50, humidity: 2, karstShare: 0.3 })))).toEqual([]);
   });
 
   it('rejects undeclared parameter reads and out-of-order inputs', async () => {

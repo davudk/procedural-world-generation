@@ -10,7 +10,7 @@ import { WorldView } from './render/worldView';
 import { fmtNum, resolve } from './shared/config/resolve';
 import type { StageId, WorldSpec } from './shared/config/types';
 import { queryToSpec, specToQuery } from './shared/config/url';
-import type { FromWorker, GenMode, Layer } from './shared/protocol';
+import type { FromWorker, GenMode, Layer, RiverGraph } from './shared/protocol';
 import { Compass } from './ui/compass';
 import { ConfigPanel } from './ui/configPanel';
 
@@ -33,6 +33,7 @@ let selected = readStored(LAYER_KEY) ?? 'elevation';
 let fittedFor = -1;
 let buildTimer = 0;
 const stageEls = new Map<StageId, HTMLElement>();
+let rivers: RiverGraph | null = null;
 /** Realised 🎯 targets of the current run; later stages refine earlier values. */
 let outcomes: Record<string, number> = {};
 
@@ -47,7 +48,7 @@ const camCtl = new CameraController(canvas, cam, () => ({ w: currentWorldKm(), h
 /** Debug handle for the console / browser automation. */
 Object.assign(window, { __pwg: { world, orbit, layers: () => layers } });
 let mode: '3d' | '2d' = readStored(MODE_KEY) === '2d' ? '2d' : '3d';
-let elevationShown: Layer | null = null;
+let terrainShown: { elev: Layer; water: Layer | null } | null = null;
 let drapeShown: Layer | null | undefined;
 
 const panel = new ConfigPanel($('panel'), spec, {
@@ -127,6 +128,10 @@ function onGenEvent(msg: FromWorker): void {
         .map(([k, v]) => `${k}: ${fmtNum(v)}`)
         .join('\n');
       for (const l of msg.layers) layers.set(l.id, l);
+      if (msg.vectors?.rivers) {
+        rivers = msg.vectors.rivers;
+        world.setRivers(rivers);
+      }
       outcomes = { ...outcomes, ...msg.outcomes };
       panel.setOutcomes(outcomes);
       refreshLayerList();
@@ -181,10 +186,15 @@ function showSelected(): void {
   if (!l) return;
   view.setLayer(l);
   const elev = layers.get('elevation');
-  if (elev && elev !== elevationShown) {
-    elevationShown = elev;
-    world.setElevation(elev);
-    minimap.setElevation(elev);
+  // Water rasters only match the elevation produced by the same stage.
+  const water = layers.get('waterLevel');
+  const wl = water && water.stage === elev?.stage ? water : null;
+  if (elev && (elev !== terrainShown?.elev || wl !== terrainShown.water)) {
+    terrainShown = { elev, water: wl };
+    const cls = layers.get('waterClass');
+    world.setTerrain(elev, wl, cls && cls.stage === elev.stage ? cls : null);
+    world.setRivers(rivers);
+    minimap.setTerrain(elev, wl);
   }
   const drape = l.id === 'elevation' ? null : l;
   if (drape !== drapeShown) {

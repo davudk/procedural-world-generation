@@ -10,14 +10,15 @@ A configurable procedural world generator in the browser. It builds a finite reg
 
 The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 
-**Status: milestone M2 (3D world).** It includes:
+**Status: milestone M3 (water).** It includes:
 - the hierarchical config system and the staged generation pipeline;
 - tectonic plates with motion and boundary classes;
 - continents grown to a target count;
 - uplift and erodibility maps;
 - volcanoes, hotspot chains and old craters;
 - a stream-power erosion model that carves dendritic mountain ranges;
-- a 3D world view: CDLOD terrain with a water lid, an orbit camera with zoom-to-cursor, tilt and rotate, a minimap and a compass;
+- hydrology: lakes decided by water balance (through-flow, salt lakes, playas), a river graph with Strahler orders, meanders, waterfalls and rapids, deltas and estuaries, and wetlands;
+- a 3D world view: CDLOD terrain with a water lid for sea and lakes, river ribbons that fade in by drainage area as you zoom, an orbit camera with zoom-to-cursor, tilt and rotate, a minimap and a compass;
 - a 2D raster debug viewer.
 
 Shader detail at close zoom, shadows and animated water arrive in M5. See [docs/PLAN.md](docs/PLAN.md) for the full plan.

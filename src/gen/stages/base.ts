@@ -230,7 +230,9 @@ function segProps(rng: Rng, s: Segment, ctx: { range(id: string): readonly [numb
 
 /** Land base: low plains rising gently inland, with rolling noise. */
 function landBase(s: number, noise: Noise2, wx: number, wy: number): number {
-  return 120 + 380 * smoothstep(0, 320, s) + 220 * noise.fbm(wx / 160, wy / 160, 4);
+  // The last term is small-scale roughness: on low-uplift plains the erosion model otherwise routes
+  // water over a near-planar surface and D8 cuts straight, parallel, axis-aligned channels.
+  return 120 + 380 * smoothstep(0, 320, s) + 220 * noise.fbm(wx / 160, wy / 160, 4) + 35 * noise.fbm(wx / 14 + 71, wy / 14 - 29, 3);
 }
 
 /** Ocean profile by distance from the coast (research 01 §1.4). */

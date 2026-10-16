@@ -64,6 +64,9 @@ export const refineStage: StageDef = {
       const U = upsampleBicubic(cur.U, cur.n, 2);
       const K = upsampleBicubic(cur.K, cur.n, 2);
       const strata = upsampleBicubic(cur.strata, cur.n, 2);
+      // Sub-cell jitter so flow on flat ground doesn't lock onto the new grid's axes.
+      const jit = ctx.rng('refine-jitter', n);
+      for (let i = 0; i < n * n; i++) if (h[i] > 0) h[i] += 4 * (jit.float() - 0.5);
       const fixed = new Uint8Array(n * n);
       for (let i = 0; i < n * n; i++) {
         const parent = cur.fixed[(Math.floor(Math.floor(i / n) / 2) * cur.n) + Math.floor((i % n) / 2)];
