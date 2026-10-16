@@ -1,4 +1,5 @@
-import { gaussBlur } from './fields';
+import { cellIndex, type Grid } from '../grid/grid';
+import { gaussBlur } from '../grid/smooth';
 import type { Wind } from './wind';
 
 /**
@@ -8,7 +9,7 @@ import type { Wind } from './wind';
  * sweeping, restricted to the cells each sweep can update).
  */
 export interface Stencil {
-  n: number;
+  grid: Grid;
   /**
    * Upwind neighbour in x / y: −1 = no upwind cell (outside the map, or a neighbour that blows back
    * into this cell along a divergence line), the cell itself when that weight is 0.
@@ -24,29 +25,35 @@ export interface Stencil {
   sources: Int32Array;
 }
 
-export function buildStencil(w: Wind, n: number, cellKm: number): Stencil {
-  const N = n * n;
+export function buildStencil(w: Wind, g: Grid): Stencil {
+  const { cells: N, cellKm, off8, border } = g;
+  // Raster D8 slots of the four axial neighbours.
+  const oW = off8[3];
+  const oE = off8[4];
+  const oN = off8[1];
+  const oS = off8[6];
   const iu = new Int32Array(N);
   const ju = new Int32Array(N);
   const wa = new Float32Array(N);
   const ds = new Float32Array(N);
   const quad = new Uint8Array(N);
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      const i = y * n + x;
-      const gx = w.gx[i];
-      const gy = w.gy[i];
-      const a = Math.abs(gx);
-      const b = Math.abs(gy);
-      const s = a + b;
-      const ux = gx > 0 ? x - 1 : gx < 0 ? x + 1 : x;
-      const uy = gy > 0 ? y - 1 : gy < 0 ? y + 1 : y;
-      iu[i] = ux < 0 || ux >= n ? -1 : y * n + ux;
-      ju[i] = uy < 0 || uy >= n ? -1 : uy * n + x;
-      wa[i] = a / s;
-      ds[i] = (cellKm * s) / Math.sqrt(gx * gx + gy * gy);
-      quad[i] = (gx >= 0 ? 0 : 1) | (gy >= 0 ? 0 : 2);
+  for (let i = 0; i < N; i++) {
+    const gx = w.gx[i];
+    const gy = w.gy[i];
+    const a = Math.abs(gx);
+    const b = Math.abs(gy);
+    const s = a + b;
+    // Upwind neighbours: west for eastward wind, north for southward wind (−1 off the map).
+    if (border[i] === 0) {
+      iu[i] = gx > 0 ? i + oW : gx < 0 ? i + oE : i;
+      ju[i] = gy > 0 ? i + oN : gy < 0 ? i + oS : i;
+    } else {
+      iu[i] = gx > 0 ? g.nbr(i, 3) : gx < 0 ? g.nbr(i, 4) : i;
+      ju[i] = gy > 0 ? g.nbr(i, 1) : gy < 0 ? g.nbr(i, 6) : i;
     }
+    wa[i] = a / s;
+    ds[i] = (cellKm * s) / Math.sqrt(gx * gx + gy * gy);
+    quad[i] = (gx >= 0 ? 0 : 1) | (gy >= 0 ? 0 : 2);
   }
   // Divergence lines (two cells upwind of each other) would form cycles that the sweeps resolve only
   // geometrically slowly; such air comes from aloft, so the pair takes the boundary value instead.
@@ -70,20 +77,21 @@ export function buildStencil(w: Wind, n: number, cellKm: number): Stencil {
   }
   const sources = new Int32Array(nSrc);
   for (let i = 0, s = 0; i < N; i++) if (isSrc[i]) sources[s++] = i;
+  // Sweep order: per wind quadrant, the raster scan that visits upwind cells first.
+  const n = g.n;
   const order = new Int32Array(N);
   let k = 0;
   for (let q = 0; q < 4; q++) {
     const rx = (q & 1) !== 0;
     const ry = (q & 2) !== 0;
     for (let yy = 0; yy < n; yy++) {
-      const r = (ry ? n - 1 - yy : yy) * n;
       for (let xx = 0; xx < n; xx++) {
-        const i = r + (rx ? n - 1 - xx : xx);
+        const i = cellIndex(g, rx ? n - 1 - xx : xx, ry ? n - 1 - yy : yy);
         if (quad[i] === q) order[k++] = i;
       }
     }
   }
-  return { n, iu, ju, wa, ds, order, sources };
+  return { grid: g, iu, ju, wa, ds, order, sources };
 }
 
 /** Upwind blend of `v`; a side without an upwind cell takes the boundary value `b[i]`. */
@@ -210,7 +218,7 @@ export function advectMoisture(
   // hundreds of km and shows as a straight seam. Rain is drawn from humidity blurred by σ = mixCells;
   // the local efficiency (circulation, uplift, snow-out) keeps its full resolution.
   const qs = q.slice();
-  gaussBlur(qs, st.n, mixCells);
+  gaussBlur(qs, st.grid, mixCells);
   for (let i = 0; i < q.length; i++) {
     const qin = inflow(st, qs, boundaryQ, i);
     let qq = qin * deplete[i];
