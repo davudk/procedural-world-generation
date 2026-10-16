@@ -972,3 +972,50 @@ Spherical worlds are being added as an option, with flat staying the default ([r
 - `settleFixed`/`reconcileFixed`;
 - the world-ocean rule in `water.ts`;
 - climate inflow (`hasOutside`).
+
+### Sphere phase 2 — Cube-sphere terrain and climate (2026-10-16)
+
+**What landed:**
+- **Cube-sphere grid** (`src/gen/grid/cube.ts`, geometry shared with the renderer in `src/shared/cube.ts`):
+  - Six equal-angle n×n faces; faces 0–3 ring the equator, 4 and 5 are the poles.
+  - A seam table gives each face-border cell its mirror cells on the next face. The 24 cube-corner cells have 7 neighbours; every other cell has 8.
+  - Exact cell areas (closed-form solid angle, summing to 4πR²), great-circle neighbour distances, positions, local frames, tangent-plane charts and padded face halos (`padFace`).
+  - The shared helpers take the sphere through halos (box and Gaussian blurs, bicubic and bilinear resampling, warp) or geodesic Dijkstra (distance fields; chamfer falls back to it). Priority-Flood, components and the LEM router already went through `nbr`.
+- **Noise3** (`src/shared/noise3.ts`): 3D gradient noise on a hashed lattice, without Noise2's 256 period. Stages call it through `SurfaceNoise`; on flat maps that forwards to Noise2 bit for bit.
+- **Stages on the sphere** (plates → base → stamps → LEM → refine → climate; the pipeline then stops and the timeline shows 6 steps):
+  - Plates: seeds spaced on the sphere, rotation about random Euler poles, and boundary classes from relative velocity in the local east/north frame. Continents use ownership blocks with 7×7 neighbourhoods taken across seams.
+  - Base and stamps: 3D noise at the surface position and an area-weighted sea level. Volcanoes, craters and the king massif are stamped through charts; hotspot trails are small-circle arcs about the plate's pole.
+  - LEM: slopes from per-neighbour distances, drainage from cell areas, finite-volume diffusion and per-neighbour talus. There are no edge outlets; every river reaches the sea.
+  - Climate: true latitude, and winds turned from the local frame into face axes. Current anomalies use coastline distances along chains of east/west neighbours. The moisture and marine sweeps follow a topological order of the upwind graph, with loop edges reading the previous round.
+- **Config:** `worldShape` (Flat | Sphere, L0, never written to URLs when flat), `planetSize` (circumference, with read-only radius and area), `axialTilt` and `faceGrid`. Parameters carry `shapes`, and the panel hides the rows of the other shape. AUTO formulas read the equal-area size `sizeEff`, which is `worldSize` on flat maps; provenance hides parents of the other shape.
+- **Viewer:** sphere layers (`Layer.faces = 6`) are projected on the main thread to an equirectangular map or a cube net (toggle with P). The inspector shows latitude and longitude. The 3D button says the globe view comes in phase 3 and stays in 2D; the next flat world restores 3D.
+
+**Grid sizes:**
+- Default small planet (4,096 km circumference, R = 652 km):
+  - Build: plates 6×128², erosion 6×256² at 4 km, macro 6×512² at 2 km (1.57 M cells).
+  - Preview: plates 6×64², erosion = macro 6×128² at 8 km.
+
+**Measurements** (per world, `npm run bench -- --shape sphere`, under load):
+- Preview ≈ 1.1 s: plates 75, base 265, stamps 21, LEM 610, refine 5, climate 115 ms.
+- Build ≈ 12.7 s: plates 0.15, base 1.0, stamps 0.08, LEM 4.0, refine 5.2, climate 1.7 s. That is 1.15× a flat build up to climate, for 1.5× the cells.
+- Flat stays byte-identical: `tests/golden.json` was not re-recorded.
+- Flat timings, interleaved A/B against main (6 alternations): build total −0.3 %, preview total +2.3 %. Every stage over 100 ms is within 3 %.
+
+**Tests:**
+- `tests/cube.test.ts`: area sum, seam symmetry and directions, corner counts, components, Priority-Flood, distance fields and their continuity, halos, blurs, charts and Noise3.
+- `tests/sphere.test.ts`:
+  - The LEM strip relief on the sphere is within 5 % of the flat strip.
+  - A water world has a zonal temperature spread of 0.19 °C and the right wind bands.
+  - The sphere pipeline is deterministic and drains every land cell to the sea.
+  - Config and URL rules.
+- `tests/sphereView.test.ts`: the projections.
+- Sphere goldens (4 previews) are in `tests/golden-sphere.json`; re-record with `GOLDEN_UPDATE=1 npx vitest run --project golden -t sphere`.
+
+**Known gaps:**
+- On a water world, precipitation varies by up to ±17 % between longitudes. This is first-order upwind transport on cells that vary by √2, and the moisture sweeps use all 4 rounds.
+- Preview cells are 8 km (flat previews: 4 km).
+- Climate on the 2 km macro grid takes 1.7 s, mostly the geodesic coast distance.
+- AUTO formulas for spheres are first cuts (research 10 §3.3):
+  - Peaks reach the summit ceiling on every archetype.
+  - Large planets give spiky orographic precipitation maxima.
+- Glacial, landforms, hydro, biomes and the registry do not run on spheres (phase 4). Exports save the equirectangular projection.

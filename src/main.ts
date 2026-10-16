@@ -144,8 +144,12 @@ new ExportMenu(document.body, $('export-toggle'), {
     world,
     spec: () => spec,
     mode: () => mode,
-    layer: (id) => layers.get(id),
-    shownLayer: () => layers.get(shownLayerId()),
+    // Spheres export their equirectangular projection (the six raw faces are not an image).
+    layer: (id) => {
+      const l = layers.get(id);
+      return l?.faces === 6 ? projectSphereLayer(l, 'equirect') : l;
+    },
+    shownLayer: () => sphereShown ?? layers.get(shownLayerId()),
     landmarks: () => landmarks,
     traits: () => traits,
   }),

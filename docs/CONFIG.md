@@ -42,11 +42,14 @@ Levels are evaluated top-down: **L0 → L1 → L2 → L3**. L4 (view) never affe
 |---|---|---|---|
 | `seed` | int | random | |
 | `archetype` | enum | Earth-like | Earth-like, Archipelago, Pangaea, Rift & great lakes, Fjordland, Desert world, Volcanic island chain, Ice age, Hothouse tropics, Old craton, **Custom**. Applies a bundle of pins and biases (§5) |
-| `worldSize` | scalar, log slider | 1024 km | 256–4096 km; preset stops at 512 / 1024 / 2048 / 4096 |
+| `worldShape` | enum | Flat | Flat \| Sphere ([research 10](research/10-spherical-worlds.md)). Never written to URLs when flat. Spheres run plates → climate for now and show as a 2D map |
+| `worldSize` | scalar, log slider | 1024 km | Flat only. 256–4096 km; preset stops at 512 / 1024 / 2048 / 4096 |
+| `planetSize` | scalar, log slider | AUTO ← archetype (4,096 km) | Sphere only. Circumference, 2,048–40,030 km; radius and surface area shown read-only. AUTO formulas that scale with the world read the equal-area size √(4πR²) instead of `worldSize` |
 | `landFraction` | scalar | AUTO ← archetype (0.40) | 0.05–0.80 |
 | `tectonicActivity` | scalar 0–1 | AUTO ← archetype (0.5) | From a dead craton (0) to very active (1): more plates, faster motion, higher peaks, more volcanoes and rifts |
 | `geologicAge` | scalar 0–1 | AUTO ← archetype (0.5) | From young (0) to old (1). Old worlds are lower and rounder, keep more surviving craters, have wider valleys and plains, and show more inselbergs and mesas |
-| `latitudeSpan` | directional range | AUTO ← archetype (65° → 20°) | −90…90. Drives the climate belts |
+| `latitudeSpan` | directional range | AUTO ← archetype (65° → 20°) | Flat only. −90…90. Drives the climate belts |
+| `axialTilt` | scalar | AUTO ← archetype (23.4°) | Sphere only. 0–45°; sets `seasonality` (tilt / 23.4) |
 | `temperatureOffset` | scalar | AUTO ← archetype (0 °C) | −15…+15 °C |
 | `humidity` | scalar | AUTO ← archetype (1.0) | 0.2–2.5 |
 | `quality` | enum | Standard | Fast / Standard / High. Sets the grid resolutions (§3 table); not part of world identity |
