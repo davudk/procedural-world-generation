@@ -151,6 +151,11 @@ body {
   width: 100%;
 }
 
+#layers .exag select {
+  width: auto;
+  flex: 1;
+}
+
 .minimap {
   display: block;
   margin-bottom: 8px;

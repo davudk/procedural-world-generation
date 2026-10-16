@@ -10,13 +10,14 @@ A configurable procedural world generator in the browser. It builds a finite reg
 
 The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 
-**Status: milestone M3 (water).** It includes:
+**Status: milestone M4 (climate & biomes).** It includes:
 - the hierarchical config system and the staged generation pipeline;
 - tectonic plates with motion and boundary classes;
 - continents grown to a target count;
 - uplift and erodibility maps;
 - volcanoes, hotspot chains and old craters;
 - a stream-power erosion model that carves dendritic mountain ranges;
+- a climate model: latitude-band winds, upwind moisture advection (summer and winter), orographic rain and rain shadows, ocean currents, and 25 biomes classified from Köppen-style variables;
 - hydrology: lakes decided by water balance (through-flow, salt lakes, playas), a river graph with Strahler orders, meanders, waterfalls and rapids, deltas and estuaries, and wetlands;
 - a 3D world view: CDLOD terrain with a water lid for sea and lakes, river ribbons that fade in by drainage area as you zoom, an orbit camera with zoom-to-cursor, tilt and rotate, a minimap and a compass;
 - a 2D raster debug viewer.
@@ -54,7 +55,7 @@ The world opens in **3D**. Press **V**, or the 2D/3D button, to switch to the 2D
 | Touch | 1 finger pan; 2 fingers pan, zoom and rotate; 2 fingers moving vertically tilt | Pan, pinch |
 | B | Full-quality build | Full-quality build |
 
-The layer picker drapes any generated layer (plates, boundaries, uplift, drainage…) over the 3D terrain. The relief slider sets vertical exaggeration.
+Realistic colouring comes from a biome colour table over temperature and aridity, with snow, rock, sand and marsh overlays. Palettes: Satellite, Stylised and Hypsometric. The layer picker drapes any generated layer (plates, boundaries, uplift, drainage…) over the 3D terrain. The relief slider sets vertical exaggeration.
 
 ## Configuration
 

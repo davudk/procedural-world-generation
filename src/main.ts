@@ -18,6 +18,7 @@ import { ConfigPanel } from './ui/configPanel';
 const BUILD_IDLE_MS = 900;
 const LAYER_KEY = 'pwg.layer';
 const MODE_KEY = 'pwg.mode';
+const PALETTE_KEY = 'pwg.palette';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('view');
@@ -49,6 +50,7 @@ const camCtl = new CameraController(canvas, cam, () => ({ w: currentWorldKm(), h
 Object.assign(window, { __pwg: { world, orbit, layers: () => layers } });
 let mode: '3d' | '2d' = readStored(MODE_KEY) === '2d' ? '2d' : '3d';
 let terrainShown: { elev: Layer; water: Layer | null } | null = null;
+let surfaceShown: Layer | null = null;
 let drapeShown: Layer | null | undefined;
 
 const panel = new ConfigPanel($('panel'), spec, {
@@ -74,6 +76,15 @@ $('dice').addEventListener('click', () => setSeed(randomSeed()));
 $('build').addEventListener('click', () => startGen('build'));
 $('panel-toggle').addEventListener('click', () => $('panel').classList.toggle('open'));
 $('mode').addEventListener('click', () => setMode(mode === '3d' ? '2d' : '3d'));
+const paletteSelect = $<HTMLSelectElement>('palette');
+paletteSelect.value = readStored(PALETTE_KEY) ?? 'satellite';
+const applyPalette = (): void => {
+  const v = paletteSelect.value;
+  world.setPalette(v === 'stylised' ? 'stylised' : v === 'hypsometric' ? 'hypsometric' : 'satellite');
+  writeStored(PALETTE_KEY, v);
+};
+paletteSelect.addEventListener('change', applyPalette);
+applyPalette();
 const exagInput = $<HTMLInputElement>('exag');
 exagInput.addEventListener('input', () => {
   world.setExaggeration(Number(exagInput.value));
@@ -195,6 +206,18 @@ function showSelected(): void {
     world.setTerrain(elev, wl, cls && cls.stage === elev.stage ? cls : null);
     world.setRivers(rivers);
     minimap.setTerrain(elev, wl);
+  }
+  // Realistic colouring needs the biome stage's rasters, which match the hydro-stage terrain grid.
+  const biome = layers.get('biome');
+  if (biome && biome !== surfaceShown && elev && biome.w === elev.w) {
+    const temperature = layers.get('temperature');
+    const aridity = layers.get('aridity');
+    const canopy = layers.get('canopy');
+    const snow = layers.get('snow');
+    if (temperature && aridity && canopy && snow) {
+      surfaceShown = biome;
+      world.setSurface({ temperature, aridity, summerRain: layers.get('summerRain') ?? null, canopy, snow, biome });
+    }
   }
   const drape = l.id === 'elevation' ? null : l;
   if (drape !== drapeShown) {

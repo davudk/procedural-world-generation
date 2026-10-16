@@ -21,6 +21,11 @@
     <div id="compass-host"></div>
     <section id="layers">
       <select id="layer-select" title="Layer"></select>
+      <label class="exag" title="Colouring of the realistic view">palette <select id="palette">
+          <option value="satellite">Satellite</option>
+          <option value="stylised">Stylised</option>
+          <option value="hypsometric">Hypsometric</option>
+        </select></label>
       <label class="exag" title="Vertical exaggeration of the 3D terrain">relief × <input id="exag" type="range" min="1" max="5" step="0.25" value="1.5" /><span id="exag-value">1.5</span></label>
       <div id="legend"></div>
       <div id="inspect"></div>

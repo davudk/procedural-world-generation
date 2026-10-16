@@ -3,7 +3,8 @@ import type { GroundQuery, Vec3 } from './camera/ground';
 import { OrbitCamera } from './camera/orbitCamera';
 import { HeightField, prepareWater } from './heightField';
 import { CdlodSelector } from './terrain/cdlod';
-import { TerrainPass } from './terrain/terrainPass';
+import type { Palette } from './terrain/biomeLut';
+import { TerrainPass, type SurfaceLayers } from './terrain/terrainPass';
 import { RiverPass } from './water/rivers';
 
 const MSAA = 4;
@@ -79,6 +80,14 @@ export class WorldView {
   setExaggeration(x: number): void {
     this.exaggeration = x;
     if (this.hf) this.hf.exaggeration = x;
+  }
+
+  setSurface(s: SurfaceLayers | null): void {
+    this.terrain.setSurface(s);
+  }
+
+  setPalette(p: Palette | 'hypsometric'): void {
+    this.terrain.palette = p;
   }
 
   setRivers(graph: RiverGraph | null): void {

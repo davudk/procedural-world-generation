@@ -678,3 +678,40 @@ Each research note lists its sources with URLs. The core references are:
 - No oxbow lakes or braided rendering yet.
 - Small placed lakes and creeks arrive with detail (M5).
 - The climate model is a placeholder until M4.
+
+### M4 — Climate & biomes (2026-10-16)
+
+**What landed:**
+- **S6 Climate** (`src/gen/climate/*`), replacing the M3 placeholder:
+  - Warped latitude, zonal temperature, lapse rate.
+  - Marine influence advected inland, and a coast-orientation SST anomaly for currents.
+  - Wind bands with noise and an optional override.
+  - Fast-sweeping upwind moisture advection, run for summer and winter with the bands shifted ±5°.
+  - Orographic uplift with a cap, snow-out, recycling, and Holdridge PET.
+- **S9 Biomes:**
+  - Ordered Köppen-style rules on jittered inputs.
+  - Overrides: ice from a P-dependent ELA, rock, beach / salt marsh / mangrove, salt flats from hydrology playas, marsh and bog from hydrology wetlands.
+  - A 3×3 majority filter.
+  - Canopy, aridity and snow layers. Five new L3 parameters for the climate model.
+- **Rendering:**
+  - A 64×64 colour table over (temperature, aridity), Gaussian-blurred, plus a dry-summer variant blended by summer rain share.
+  - Inputs jittered by noise for lobed ecotones, and colour variation at three scales.
+  - Canopy darkening; sand, marsh and rock overlays (rock also from slope); aspect- and noise-broken snow.
+  - Satellite, stylised and hypsometric palettes; a biome map mode with the biome palette when the biome layer is draped.
+
+**Measurements (node, seed 7, build):**
+- Climate ~0.26 s; biomes ~0.12 s; full build ~5.9 s.
+- Earth-like: 18 distinct biomes. Temperate broadleaf 29 %, Mediterranean 19 %, tundra 10 %, boreal 10 %, conifer 8 %.
+- Desert world: 74 % desert or xeric.
+- Ice age: ice, tundra and polar desert 50 %, against 11 % for Earth-like.
+- Rain shadow: about 4× behind ~3 km ranges and 2–2.5× behind 1.5–2 km ranges.
+
+**Notes:**
+- While these screenshots were taken, the pane's generation ran about 4× slower than in node because the machine was under load. Node timings were unchanged.
+- The moisture sweeps run on a ≥ 2 km grid and are upsampled.
+
+**Known gaps:**
+- Snow patches still have fairly hard edges at the 2 km Fast grid.
+- The minimap still uses hypsometric colours.
+- No sea ice, terrain wind deflection, dunes behind beaches, or coastal sabkha yet.
+- The glacial carving stage (S7) is still M6.

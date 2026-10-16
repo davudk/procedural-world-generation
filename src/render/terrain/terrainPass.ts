@@ -2,6 +2,8 @@ import type { Layer, LayerKind } from '../../shared/protocol';
 import { compileProgram, uniforms } from '../gl/util';
 import { COLORMAPS_GLSL } from '../glsl/colormaps';
 import { waterSurface } from '../heightField';
+import { BIOME } from '../../shared/biomes';
+import { buildBiomeLut, buildBiomePalette, LUT_SIZE, type Palette } from './biomeLut';
 import { GRID, INSTANCE_FLOATS, MAX_NODES } from './cdlod';
 
 const HEIGHT_GLSL = /* glsl */ `
@@ -94,9 +96,16 @@ uniform sampler2D u_grad;    // RG16F + mipmaps: surface dh/dx, dh/dy (world axe
 uniform sampler2D u_wclass;  // R32F water class (0 land, 1 ocean, 2 lake, 3 river, 4 wetland, 5 playa, 6 salt lake)
 uniform int u_hasClass;
 uniform sampler2D u_masks;   // RGBA8, linear: r wetland, g salt flat (blurred one cell)
+uniform sampler2D u_climate; // RGBA16F, linear: mean T (°C), aridity P/PET, summer rain share, canopy
+uniform sampler2D u_cover;   // RGBA8, linear: snow/ice, bare rock, sand (beach + salt flat), marsh/bog/mangrove
+uniform sampler2D u_lut;     // biome colour LUT over (T, aridity), and its dry-summer variant
+uniform sampler2D u_lutDry;
+uniform sampler2D u_biomePal; // 32×1 biome colours (biome map mode)
+uniform int u_hasSurface;
+uniform int u_palette;       // 0 biome LUT (satellite / stylised), 1 hypsometric
 uniform sampler2D u_layer;   // optional draped layer
 uniform ivec2 u_layerSize;
-uniform int u_layerMode;     // 0 realistic, 1 categorical, 2 scalar
+uniform int u_layerMode;     // 0 realistic, 1 categorical, 2 scalar, 3 biome palette
 uniform float u_layerMin, u_layerMax;
 ${HEIGHT_GLSL}
 ${COLORMAPS_GLSL}
@@ -108,6 +117,46 @@ vec2 gradAt(vec2 w) {
   vec2 uv = vec2(w.x, u_size - w.y) / u_size;
   float texelsPerPx = length(fwidth(w)) / u_cell;
   return textureLod(u_grad, uv, max(0.0, log2(max(texelsPerPx, 1e-6)) - 0.5)).rg;
+}
+
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash12(i), hash12(i + vec2(1, 0)), u.x), mix(hash12(i + vec2(0, 1)), hash12(i + 1.0), u.x), u.y);
+}
+float fbm3(vec2 p) { return 0.5 * vnoise(p) + 0.3 * vnoise(p * 2.03 + 7.1) + 0.2 * vnoise(p * 4.1 - 3.3); }
+
+// Biome colour from climate (research 03 §3.4, §5.3): LUT over jittered (T, aridity), dry-summer
+// blend, colour variation at three scales, canopy, then overrides (sand, marsh, rock, snow).
+vec3 landColor(vec2 w, float h, vec3 n, float pxFoot) {
+  vec2 uv = vec2(w.x, u_size - w.y) / u_size;
+  vec4 cl = texture(u_climate, uv);
+  vec4 cv = texture(u_cover, uv);
+  // Footprint fade so sub-pixel noise doesn't shimmer.
+  float fine = 1.0 - smoothstep(600.0, 2500.0, pxFoot);
+  float t = cl.r + 3.0 * (fbm3(w / 35000.0) - 0.5);
+  float ai = max(0.02, cl.g) * exp(0.4 * (fbm3(w / 28000.0 + 11.0) - 0.5));
+  vec2 luv = vec2((t + 20.0) / 50.0, log(ai * 10.0) / log(10.0) / 2.0);
+  vec3 c = mix(texture(u_lut, luv).rgb, texture(u_lutDry, luv).rgb, smoothstep(0.45, 0.30, cl.b));
+  c *= 0.88 + 0.24 * fbm3(w / 90000.0 + 3.0);                    // geology scale
+  c *= mix(1.0, 0.9 + 0.2 * vnoise(w / 3500.0), fine);           // field / patch mosaic
+  c *= 1.0 - 0.1 * cl.a;                                         // dense canopy reads darker
+  c = mix(c, vec3(0.86, 0.80, 0.66), smoothstep(0.15, 0.7, cv.b) * 0.9);   // beach / dunes / salt
+  c = mix(c, vec3(0.24, 0.32, 0.22), smoothstep(0.15, 0.8, cv.a) * 0.5);   // marsh / bog / mangrove
+  float slope = length(gradAt(w));
+  float rock = max(smoothstep(0.2, 0.75, cv.g), smoothstep(0.35, 0.75, slope));
+  vec3 rockCol = vec3(0.44, 0.42, 0.40) * (0.85 + 0.3 * fbm3(w / 6000.0));
+  c = mix(c, rockCol, rock * 0.85);
+  // Snow lingers on poleward (north-facing) and gentle slopes; elevation noise breaks the snowline.
+  float snow = cv.r + 0.15 * n.y + 0.35 * (fbm3(w / 7000.0) - 0.5) + 0.15 * (vnoise(w / 1800.0) - 0.5) * fine
+    - 0.3 * smoothstep(0.6, 1.2, slope);
+  c = mix(c, vec3(0.93, 0.95, 0.98), smoothstep(0.3, 0.75, snow) * 0.92);
+  return c;
 }
 
 float layerFetch(ivec2 t) { return texelFetch(u_layer, clamp(t, ivec2(0), u_layerSize - 1), 0).r; }
@@ -149,6 +198,8 @@ void main() {
   } else {
     if (u_layerMode == 1) col = categorical(floor(layerAt(w, true) + 0.5));
     else if (u_layerMode == 2) col = viridis((layerAt(w, false) - u_layerMin) / max(1e-6, u_layerMax - u_layerMin));
+    else if (u_layerMode == 3) col = pow(texelFetch(u_biomePal, ivec2(int(layerAt(w, true) + 0.5), 0), 0).rgb, vec3(1.1));
+    else if (u_hasSurface == 1 && u_palette == 0) col = landColor(w, h, n, length(fwidth(w)));
     else col = hypsometric(h);
     if (u_layerMode == 0 && u_hasClass == 1) {
       vec2 m = texture(u_masks, vec2(w.x, u_size - w.y) / u_size).rg;
@@ -157,7 +208,9 @@ void main() {
     }
     float lambert = max(dot(n, u_sun), 0.0);
     float sky = 0.5 + 0.5 * n.z;
-    col *= 0.28 * sky + 0.95 * lambert;
+    // Biome colours are muted satellite tones: give them more light than the bright hypsometric tints.
+    bool biomeLit = u_layerMode == 0 && u_hasSurface == 1 && u_palette == 0;
+    col *= biomeLit ? 0.30 * sky + 1.25 * lambert : 0.28 * sky + 0.95 * lambert;
   }
   col = mix(col, u_hazeColor, 1.0 - exp(-v_dist * u_haze));
   o = vec4(pow(col, vec3(1.0 / 1.1)), 1.0);
@@ -191,6 +244,15 @@ export class TerrainPass {
   private readonly waterTex: WebGLTexture;
   private readonly classTex: WebGLTexture;
   private readonly maskTex: WebGLTexture;
+  private readonly climateTex: WebGLTexture;
+  private readonly coverTex: WebGLTexture;
+  private readonly lutTex: WebGLTexture;
+  private readonly lutDryTex: WebGLTexture;
+  private readonly paletteTex: WebGLTexture;
+  private hasSurface = 0;
+  /** 'hypsometric' ignores biomes and colours by elevation only. */
+  palette: Palette | 'hypsometric' = 'satellite';
+  private lutPalette: Palette | null = null;
   private hasWater = 0;
   private hasClass = 0;
   private hn = 1;
@@ -204,7 +266,8 @@ export class TerrainPass {
     this.prog = compileProgram(gl, 'terrain', VS, FS);
     this.u = uniforms(gl, this.prog, [
       'u_viewProj', 'u_exag', 'u_height', 'u_hn', 'u_size', 'u_origin', 'u_sun', 'u_normalExag', 'u_cell', 'u_haze', 'u_hazeColor',
-      'u_time', 'u_grad', 'u_water', 'u_hasWater', 'u_wclass', 'u_hasClass', 'u_masks', 'u_layer', 'u_layerSize', 'u_layerMode', 'u_layerMin', 'u_layerMax',
+      'u_time', 'u_grad', 'u_water', 'u_hasWater', 'u_wclass', 'u_hasClass', 'u_masks', 'u_climate', 'u_cover', 'u_lut', 'u_lutDry',
+      'u_biomePal', 'u_hasSurface', 'u_palette', 'u_layer', 'u_layerSize', 'u_layerMode', 'u_layerMin', 'u_layerMax',
     ] as const);
 
     const verts = new Float32Array((GRID + 1) * (GRID + 1) * 2);
@@ -255,6 +318,34 @@ export class TerrainPass {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+    this.climateTex = linearTexture(gl);
+    this.coverTex = linearTexture(gl);
+    this.lutTex = linearTexture(gl);
+    this.lutDryTex = linearTexture(gl);
+    this.paletteTex = linearTexture(gl);
+  }
+
+  /**
+   * Climate and biome rasters for realistic colouring. Rasters may be on any grid; null clears them
+   * (colours fall back to hypsometric).
+   */
+  setSurface(s: SurfaceLayers | null): void {
+    const gl = this.gl;
+    this.hasSurface = s ? 1 : 0;
+    if (!s) return;
+    const n = s.temperature.w;
+    const N = n * n;
+    const clim = new Float32Array(N * 4);
+    for (let i = 0; i < N; i++) {
+      clim[i * 4] = s.temperature.data[i];
+      clim[i * 4 + 1] = s.aridity.data[i];
+      clim[i * 4 + 2] = s.summerRain ? s.summerRain.data[i] : 0.5;
+      clim[i * 4 + 3] = s.canopy.data[i];
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.climateTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, n, n, 0, gl.RGBA, gl.FLOAT, clim);
+    gl.bindTexture(gl.TEXTURE_2D, this.coverTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, n, n, 0, gl.RGBA, gl.UNSIGNED_BYTE, coverMasks(s.biome, s.snow, n));
   }
 
   /** Terrain elevation plus optional prepared water rasters (see prepareWater) on the same grid. */
@@ -294,9 +385,25 @@ export class TerrainPass {
     }
     upload(this.gl, this.layerTex, layer);
     this.layerSize = [layer.w, layer.h];
-    this.layerMode = LAYER_MODE[layer.kind];
+    this.layerMode = layer.id === 'biome' ? 3 : LAYER_MODE[layer.kind];
     this.layerMin = layer.min;
     this.layerMax = layer.max;
+  }
+
+  /** (Re)builds the colour LUTs when the palette changes. */
+  private ensureLut(): void {
+    const p: Palette = this.palette === 'stylised' ? 'stylised' : 'satellite';
+    if (this.lutPalette === p) return;
+    this.lutPalette = p;
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, LUT_SIZE, LUT_SIZE, 0, gl.RGBA, gl.UNSIGNED_BYTE, buildBiomeLut(p, false));
+    gl.bindTexture(gl.TEXTURE_2D, this.lutDryTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, LUT_SIZE, LUT_SIZE, 0, gl.RGBA, gl.UNSIGNED_BYTE, buildBiomeLut(p, true));
+    gl.bindTexture(gl.TEXTURE_2D, this.paletteTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 32, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, buildBiomePalette(p));
   }
 
   draw(f: TerrainFrame): void {
@@ -339,6 +446,19 @@ export class TerrainPass {
     gl.activeTexture(gl.TEXTURE5);
     gl.bindTexture(gl.TEXTURE_2D, this.maskTex);
     gl.uniform1i(this.u.u_masks, 5);
+    this.ensureLut();
+    const bind = (unit: number, tex: WebGLTexture, loc: WebGLUniformLocation | null): void => {
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniform1i(loc, unit);
+    };
+    bind(6, this.climateTex, this.u.u_climate);
+    bind(7, this.coverTex, this.u.u_cover);
+    bind(8, this.lutTex, this.u.u_lut);
+    bind(9, this.lutDryTex, this.u.u_lutDry);
+    bind(10, this.paletteTex, this.u.u_biomePal);
+    gl.uniform1i(this.u.u_hasSurface, this.hasSurface);
+    gl.uniform1i(this.u.u_palette, this.palette === 'hypsometric' ? 1 : 0);
     gl.bindVertexArray(this.vao);
     gl.drawElementsInstanced(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_SHORT, 0, f.count);
     gl.bindVertexArray(null);
@@ -362,6 +482,56 @@ function gradients(d: Float32Array, layer: Layer): Float32Array {
     }
   }
   return out;
+}
+
+/** Rasters for realistic colouring (from the climate and biome stages). */
+export interface SurfaceLayers {
+  temperature: Layer;
+  aridity: Layer;
+  summerRain: Layer | null;
+  canopy: Layer;
+  snow: Layer;
+  biome: Layer;
+}
+
+/** Cover masks from biome ids and snow, blurred over 3×3 cells: r snow/ice, g rock, b sand, a marsh. */
+function coverMasks(biome: Layer, snow: Layer, n: number): Uint8Array {
+  const raw = new Float32Array(n * n * 4);
+  for (let i = 0; i < n * n; i++) {
+    const id = biome.data[i];
+    raw[i * 4] = Math.max(snow.data[i], id === BIOME.ICE ? 1 : 0);
+    raw[i * 4 + 1] = id === BIOME.ROCK || id === BIOME.NIVAL ? 1 : 0;
+    raw[i * 4 + 2] = id === BIOME.BEACH || id === BIOME.SALT_FLAT ? 1 : 0;
+    raw[i * 4 + 3] = id === BIOME.MARSH || id === BIOME.BOG || id === BIOME.SALT_MARSH || id === BIOME.MANGROVE ? 1 : 0;
+  }
+  const out = new Uint8Array(n * n * 4);
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      for (let c = 0; c < 4; c++) {
+        let acc = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = Math.min(n - 1, Math.max(0, x + dx));
+            const ny = Math.min(n - 1, Math.max(0, y + dy));
+            acc += raw[(ny * n + nx) * 4 + c];
+          }
+        }
+        out[(y * n + x) * 4 + c] = Math.round((255 * acc) / 9);
+      }
+    }
+  }
+  return out;
+}
+
+function linearTexture(gl: WebGL2RenderingContext): WebGLTexture {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+  return t;
 }
 
 /** 2×2 box-filtered half-resolution copy of an interleaved RG raster. */

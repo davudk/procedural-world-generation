@@ -436,6 +436,36 @@ export const PARAMS: readonly ParamDef[] = [
       return Math.round((60 + 60 * c.num('geologicAge')) * q);
     },
   }),
+  num({
+    id: 'latitudeWarp', label: 'Latitude warp', level: 3, section: 'advanced', stage: 'climate',
+    help: 'Wobble of the climate belts so isotherms and desert edges do not follow straight rows.',
+    min: 0, max: 8, step: 0.5, unit: '°',
+    deps: [], auto: () => 3,
+  }),
+  num({
+    id: 'windNoise', label: 'Wind noise', level: 3, section: 'advanced', stage: 'climate',
+    help: 'Random swing of the prevailing wind direction.',
+    min: 0, max: 45, step: 1, unit: '°',
+    deps: [], auto: () => 20,
+  }),
+  num({
+    id: 'orographicStrength', label: 'Orographic rain', level: 3, section: 'advanced', stage: 'climate',
+    help: 'Extra rain per metre-per-km of windward rise.',
+    min: 0, max: 0.2, step: 0.005,
+    deps: [], auto: () => 0.08,
+  }),
+  num({
+    id: 'rainShadowCap', label: 'Rain-shadow cap', level: 3, section: 'advanced', stage: 'climate',
+    help: 'Steepest windward rise that still adds rain; lower values soften rain shadows.',
+    min: 10, max: 150, step: 5, unit: 'm/km',
+    deps: [], auto: () => 60,
+  }),
+  num({
+    id: 'recycling', label: 'Moisture recycling', level: 3, section: 'advanced', stage: 'climate',
+    help: 'Share of rain that vegetation re-evaporates; keeps continental interiors from drying out.',
+    min: 0, max: 0.7, step: 0.05,
+    deps: [], auto: () => 0.35,
+  }),
 ];
 
 export const PARAM_BY_ID: ReadonlyMap<string, ParamDef> = new Map(PARAMS.map((p) => [p.id, p]));
