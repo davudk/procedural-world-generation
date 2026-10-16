@@ -1,5 +1,7 @@
 # Procedural World Generation
 
+**Live demo:** https://procedural-world-gen.web.app
+
 A configurable procedural world generator in the browser. It builds a finite region of a planet, seen top-down in 3D, with:
 - plate tectonics;
 - mountains formed by erosion;
@@ -99,3 +101,7 @@ The URL holds the seed, archetype and your pins, so a link reproduces the world.
 | `src/input/` | Camera gestures |
 | `src/ui/` | Config panel |
 | `docs/` | Plan, feature catalog, config design, research notes |
+
+## License
+
+[MIT](LICENSE)
