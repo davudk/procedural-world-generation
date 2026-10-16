@@ -940,3 +940,35 @@ Each research note lists its sources with URLs. The core references are:
 - Clouds freeze when frames stop.
 - Nothing has been tested on real phones.
 - The config panel's AUTO chips are smaller than 40 px.
+
+### Sphere phase 1 — Grid behind every stage (2026-10-16)
+
+Spherical worlds are being added as an option, with flat staying the default ([research 10](research/10-spherical-worlds.md)).
+
+**What landed:**
+- **Grid** (`src/gen/grid/grid.ts`): every stage and raster helper now takes a `Grid` instead of a bare side length.
+  - Only the flat implementation exists: a one-face grid whose border cells are the map edge.
+  - `StageCtx.grid(n)` builds each resolution once per world. `coarser`, `finer` and `blockGrid` derive the climate sweep grid, the registry's regional grid and the block lattices.
+- **Hot loops** keep their old shape: a fast path for interior cells and a slow path through `nbr` for border cells only. Each module keeps its own D8 neighbour order and tie-breaks.
+- **Climate kernels:** the separable blur and resampling kernels moved to `grid/smooth.ts`, where Phase 2 adds face padding.
+- **Golden hashes** (`tests/golden.test.ts`):
+  - 18 worlds: earth, fjordland and desert × seeds 7, 11 and 42 × preview and a 512 km build.
+  - Hashed per stage, layer, vector and private raster.
+  - Recorded before the refactor; outputs are byte-identical.
+  - Re-record with `GOLDEN_UPDATE=1`.
+- **Benchmark:** `npm run bench` (median of 5 runs).
+- **Lint test:** `tests/gridLint.test.ts` keeps raster index arithmetic out of stage code. 6 lines in 4 files remain, all planar noise lattices or km geometry that `Noise3` and `chart` replace in Phase 2.
+
+**Measurements:**
+- An interleaved A/B against the baseline puts the refactor at +0.9 % on a build and −0.1 % on a preview.
+- 230 tests pass.
+
+**Known issue: landmarks are nondeterministic under V8 Maglev.** On Node 24, Maglev sometimes rewrites a gulf candidate in `registry/water.ts` `embayments()`. The gulf keeps its name but moves and shrinks.
+- The pre-refactor code shows the same flake in 5 of 12 runs, so the golden test runs with `--no-maglev`.
+- Chrome also uses Maglev, so the app may give different landmarks for the same seed. This needs a real fix.
+
+**Phase 2 must revisit `border`:** on a sphere it means seam cells, not the map edge. These places use it:
+- biome river mouths and the majority filter;
+- `settleFixed`/`reconcileFixed`;
+- the world-ocean rule in `water.ts`;
+- climate inflow (`hasOutside`).
