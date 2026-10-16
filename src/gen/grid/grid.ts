@@ -11,6 +11,7 @@
  * Index layout: cell i = f·n² + y·n + x, face-major, row-major within a face, row 0 = the face's
  * north (flat: the map's north edge, y grows south).
  */
+import { cubeGrid } from './cube';
 
 export type WorldShape = 'flat' | 'sphere';
 export type MapEdge = 'ocean' | 'continent';
@@ -258,15 +259,15 @@ function derive(g: Grid, key: number, make: () => Grid): Grid {
 /** The same world at a coarser resolution (n / factor cells per face edge). */
 export function coarser(g: Grid, factor: number): Grid {
   if (factor === 1) return g;
-  if (g.shape !== 'flat') throw new Error('coarser: only flat grids exist yet');
   if (g.n % factor !== 0) throw new Error(`coarser: ${factor} does not divide ${g.n}`);
+  if (g.shape !== 'flat') return derive(g, factor, () => cubeGrid(g.n / factor, g.radiusM));
   return derive(g, factor, () => flatGrid(g.n / factor, g.cellKm * factor, g.mapEdge));
 }
 
 /** The same world at a finer resolution (n · factor cells per face edge). */
 export function finer(g: Grid, factor: number): Grid {
   if (factor === 1) return g;
-  if (g.shape !== 'flat') throw new Error('finer: only flat grids exist yet');
+  if (g.shape !== 'flat') return derive(g, 1 / factor, () => cubeGrid(g.n * factor, g.radiusM));
   return derive(g, 1 / factor, () => flatGrid(g.n * factor, g.cellKm / factor, g.mapEdge));
 }
 
@@ -351,6 +352,6 @@ export function tryCellIndex(g: Grid, x: number, y: number, face = 0): number {
  */
 export function blockGrid(g: Grid, block: number): Grid {
   if (g.n % block === 0) return coarser(g, block);
-  if (g.shape !== 'flat') throw new Error('blockGrid: only flat grids exist yet');
+  if (g.shape !== 'flat') throw new Error(`blockGrid: ${block} must divide the face size ${g.n} on the sphere`);
   return derive(g, -block, () => flatGrid(Math.ceil(g.n / block), g.cellKm * block, g.mapEdge));
 }

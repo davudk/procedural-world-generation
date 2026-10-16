@@ -1,9 +1,15 @@
 /** Small raster operations on world grids. */
+import { asCube, padFace, weightedQuantile, type CubeGrid } from './cube';
+import { distanceField } from './distance';
 import type { Grid } from './grid';
 
-/** In-place separable box blur with radius `r` cells (edges clamp). O(n) per pass. */
+/** In-place separable box blur with radius `r` cells (edges clamp; on the sphere per face with a halo). O(n) per pass. */
 export function boxBlur(a: Float32Array, g: Grid, r: number, passes = 1): void {
   if (r < 1) return;
+  if (g.faces !== 1) {
+    boxBlurCube(a, asCube(g), r, passes);
+    return;
+  }
   const n = g.n;
   const tmp = new Float32Array(n);
   const inv = 1 / (2 * r + 1);
@@ -24,10 +30,38 @@ function blurLine(a: Float32Array, start: number, stride: number, n: number, r: 
   for (let i = 0; i < n; i++) a[start + i * stride] = tmp[i];
 }
 
+/**
+ * Box blur on the cube-sphere: each face is copied with an r·passes halo from its neighbours, blurred
+ * as a plain raster (rows over the whole padded buffer, then columns) and its interior written back.
+ * All faces read the unblurred field, so the result does not depend on the face order.
+ */
+function boxBlurCube(a: Float32Array, g: CubeGrid, r: number, passes: number): void {
+  const n = g.n;
+  const pad = r * passes;
+  const m = n + 2 * pad;
+  const src = a.slice();
+  const buf = new Float32Array(m * m);
+  const tmp = new Float32Array(m);
+  const inv = 1 / (2 * r + 1);
+  for (let f = 0; f < 6; f++) {
+    padFace(g, src, f, pad, buf);
+    for (let p = 0; p < passes; p++) {
+      for (let y = 0; y < m; y++) blurLine(buf, y * m, 1, m, r, inv, tmp);
+      for (let x = 0; x < m; x++) blurLine(buf, x, m, m, r, inv, tmp);
+    }
+    for (let y = 0; y < n; y++) a.set(buf.subarray((y + pad) * m + pad, (y + pad) * m + pad + n), f * g.n2 + y * n);
+  }
+}
+
 /** Value below which a fraction `q` of the cells lie. */
 export function quantile(a: Float32Array, q: number): number {
   const s = a.slice().sort();
   return s[Math.min(s.length - 1, Math.max(0, Math.floor(q * s.length)))];
+}
+
+/** Value below which a fraction `q` of the surface lies: `quantile` on uniform grids, area-weighted on the sphere. */
+export function areaQuantile(a: Float32Array, g: Grid, q: number): number {
+  return g.uniform ? quantile(a, q) : weightedQuantile(a, asCube(g), q);
 }
 
 /**
@@ -70,6 +104,8 @@ export function smoothstep(e0: number, e1: number, x: number): number {
  * `source` is non-zero. O(n), for fields where approximate distance is fine (e.g. coast distance).
  */
 export function chamferDistance(source: Uint8Array, g: Grid): Float32Array {
+  // No scan order crosses the seams: the sphere uses the (exact, slower) vector-propagation field.
+  if (g.faces !== 1) return distanceField(source, g).dist;
   const n = g.n;
   const INF = 1e9;
   const d = new Float32Array(n * n);
