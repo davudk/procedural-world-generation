@@ -311,6 +311,14 @@ interface Frame {
   ny: Float64Array;
   /** 1 if the other side of the boundary at this cell is continental crust. */
   otherCont: Uint8Array;
+  /** Boundary index per grid cell (−1 elsewhere). */
+  index: Int32Array;
+  /**
+   * Smoothing neighbourhood of each boundary cell (CSR): the boundary cells of the same plate pair in
+   * its 7×7 window, in window order. Independent of plate motion, so built once for all candidates.
+   */
+  nearStart: Int32Array;
+  near: Int32Array;
 }
 
 function boundaryFrame(plate: Int32Array, continent: Int32Array, g: Grid): Frame {
@@ -348,12 +356,34 @@ function boundaryFrame(plate: Int32Array, continent: Int32Array, g: Grid): Frame
     nys.push(sy / len);
     oc.push(cont * 2 > cnt ? 1 : 0);
   }
+  const nb = cells.length;
+  const index = new Int32Array(N).fill(-1);
+  for (let i = 0; i < nb; i++) index[cells[i]] = i;
+  const nearStart = new Int32Array(nb + 1);
+  const near: number[] = [];
+  for (let i = 0; i < nb; i++) {
+    const c = cells[i];
+    const lo = Math.min(plate[c], other[i]);
+    const hi = Math.max(plate[c], other[i]);
+    forWindow(g, c, 3, (cj) => {
+      const j = index[cj];
+      if (j < 0) return;
+      const a = plate[cells[j]];
+      const b = other[j];
+      if (Math.min(a, b) !== lo || Math.max(a, b) !== hi) return;
+      near.push(j);
+    });
+    nearStart[i + 1] = near.length;
+  }
   return {
     cells: Int32Array.from(cells),
     other: Int32Array.from(other),
     nx: Float64Array.from(nxs),
     ny: Float64Array.from(nys),
     otherCont: Uint8Array.from(oc),
+    index,
+    nearStart,
+    near: Int32Array.from(near),
   };
 }
 
@@ -412,28 +442,19 @@ function classify(
     conv[i] = -(rx * f.nx[i] + ry * f.ny[i]);
     shear[i] = Math.abs(rx * f.ny[i] - ry * f.nx[i]);
   }
-  const index = new Int32Array(N).fill(-1);
-  for (let i = 0; i < nb; i++) index[f.cells[i]] = i;
+  const { index, nearStart, near } = f;
   // Smooth along the boundary so classes don't flicker between neighbouring cells.
   const sConv = new Float64Array(nb);
   const sShear = new Float64Array(nb);
   for (let i = 0; i < nb; i++) {
-    const c = f.cells[i];
-    const lo = Math.min(plate[c], f.other[i]);
-    const hi = Math.max(plate[c], f.other[i]);
     let sc = 0;
     let ss = 0;
-    let k = 0;
-    forWindow(g, c, 3, (cj) => {
-      const j = index[cj];
-      if (j < 0) return;
-      const a = plate[f.cells[j]];
-      const b = f.other[j];
-      if (Math.min(a, b) !== lo || Math.max(a, b) !== hi) return;
+    for (let t = nearStart[i]; t < nearStart[i + 1]; t++) {
+      const j = near[t];
       sc += conv[j];
       ss += shear[j];
-      k++;
-    });
+    }
+    const k = nearStart[i + 1] - nearStart[i];
     sConv[i] = sc / k;
     sShear[i] = ss / k;
   }

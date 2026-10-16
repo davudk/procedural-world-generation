@@ -27,6 +27,7 @@ export function coarseFbm(
     const fy = (y + 0.5) * k;
     const j = Math.floor(fy);
     const ty = fy - j;
+    const row = cellIndex(g, 0, y);
     for (let x = 0; x < n; x++) {
       const fx = (x + 0.5) * k;
       const i = Math.floor(fx);
@@ -35,7 +36,7 @@ export function coarseFbm(
       const r1 = r0 + m;
       const a = lat[r0] + tx * (lat[r0 + 1] - lat[r0]);
       const b = lat[r1] + tx * (lat[r1 + 1] - lat[r1]);
-      out[cellIndex(g, x, y)] = a + ty * (b - a);
+      out[row + x] = a + ty * (b - a);
     }
   }
   return out;

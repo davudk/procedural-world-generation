@@ -85,8 +85,9 @@ export function buildStencil(w: Wind, g: Grid): Stencil {
     const rx = (q & 1) !== 0;
     const ry = (q & 2) !== 0;
     for (let yy = 0; yy < n; yy++) {
+      const row = cellIndex(g, 0, ry ? n - 1 - yy : yy);
       for (let xx = 0; xx < n; xx++) {
-        const i = cellIndex(g, rx ? n - 1 - xx : xx, ry ? n - 1 - yy : yy);
+        const i = row + (rx ? n - 1 - xx : xx);
         if (quad[i] === q) order[k++] = i;
       }
     }
