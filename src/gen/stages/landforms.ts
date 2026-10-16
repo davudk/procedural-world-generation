@@ -37,11 +37,13 @@ export const landformsStage: StageDef = {
     const g = ctx.input('glacial').extra as GlacialExtra;
     const h = g.h.slice();
     const fixed = g.fixed.slice();
+    const plates = ctx.input('plates').extra as PlatesExtra;
+    const base = ctx.input('base').extra as BaseExtra;
     const c: LandformCtx = {
-      grid: ctx.grid(g.n), n: g.n, cellKm: g.cellKm, worldKm: ctx.num('worldSize'), h, fixed, ice: g.ice,
+      grid: ctx.grid(g.n), platesGrid: ctx.grid(plates.n), baseGrid: ctx.grid(base.n),
+      n: g.n, cellKm: g.cellKm, worldKm: ctx.num('worldSize'), h, fixed, ice: g.ice,
       climate: ctx.input('climate').extra as ClimateExtra,
-      plates: ctx.input('plates').extra as PlatesExtra,
-      base: ctx.input('base').extra as BaseExtra,
+      plates, base,
       num: ctx.num, range: ctx.range, str: ctx.str, drawn: ctx.drawn,
       rng: (...k) => ctx.rng(...k),
       features: [], masks: new Map(), stats: {},
@@ -57,7 +59,7 @@ export const landformsStage: StageDef = {
     }
 
     // Terrain changed: re-route so hydrology starts from current drainage.
-    const router = new FlowRouter(ctx.grid(g.n), fixed);
+    const router = new FlowRouter(c.grid, fixed);
     router.route(h, null);
     const area = Float32Array.from(router.area);
     const rcv = router.rcv.slice();

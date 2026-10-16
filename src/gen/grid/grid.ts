@@ -328,21 +328,29 @@ export function cellIndex(g: Grid, x: number, y: number, face = 0): number {
   return face * g.n * g.n + y * g.n + x;
 }
 
-// ── registry helpers ──
+// ── Per-feature helpers (planar walks and block lattices; Phase 2 replaces them with charts) ──
 
 /** Whether face-local column x, row y lie on the face (flat: on the map). */
 export function onFace(g: Grid, x: number, y: number): boolean {
   return x >= 0 && y >= 0 && x < g.n && y < g.n;
 }
 
-// ── hydro helpers ──
+/**
+ * Cell at face-local column x, row y of face `face`, or −1 when (x, y) is off the face (flat: off
+ * the map). For planar per-feature walks in cell coordinates (rays, meander room, spits).
+ */
+export function tryCellIndex(g: Grid, x: number, y: number, face = 0): number {
+  const n = g.n;
+  return x < 0 || y < 0 || x >= n || y >= n ? -1 : face * n * n + y * n + x;
+}
 
 /**
- * Cell at face-local column x, row y, or −1 when (x, y) lies off the map. For planar per-feature
- * walks in cell coordinates (flat only: on the sphere such walks cross seams).
+ * Lattice of block × block cell blocks covering the map, ⌈n / block⌉ per edge (the last row and
+ * column may be partial): `coarser(g, block)` when block divides n. Block (bx, by) holds the cells
+ * with ⌊x / block⌋ = bx, ⌊y / block⌋ = by.
  */
-export function cellIfOnMap(g: Grid, x: number, y: number): number {
-  if (g.shape !== 'flat') throw new Error('cellIfOnMap: only flat grids exist yet');
-  const n = g.n;
-  return x < 0 || y < 0 || x >= n || y >= n ? -1 : y * n + x;
+export function blockGrid(g: Grid, block: number): Grid {
+  if (g.n % block === 0) return coarser(g, block);
+  if (g.shape !== 'flat') throw new Error('blockGrid: only flat grids exist yet');
+  return derive(g, -block, () => flatGrid(Math.ceil(g.n / block), g.cellKm * block, g.mapEdge));
 }

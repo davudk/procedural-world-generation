@@ -1,10 +1,7 @@
+import { blockGrid, cellIndex, cellX, cellY, forWindow, tryCellIndex, type Grid } from '../../grid/grid';
 import { smoothstep } from '../../grid/ops';
 import type { LandformCtx } from '../types';
-import { blockMeanList, DX8, DY8 } from './grid';
-
-// Local copies: hot loops should not read the imported bindings.
-const DX = Int8Array.from(DX8);
-const DY = Int8Array.from(DY8);
+import { blockMeanList } from './grid';
 
 /** Coast classes (research 03 §3.2 rule 4, FEATURES F10–F19). */
 export const COAST = { NONE: 0, SANDY: 1, ROCKY: 2, SHELTERED: 3, ICE: 4 } as const;
@@ -63,27 +60,20 @@ export function windAt(lat: number): [number, number] {
  * sheltered / ice coasts.
  */
 export function classifyCoast(c: LandformCtx): CoastInfo {
-  const { n, cellKm, h, fixed, ice } = c;
-  const N = n * n;
+  const { grid: g, n, cellKm, h, fixed, ice } = c;
+  const N = g.cells;
   const sea = new Uint8Array(N);
   for (let i = 0; i < N; i++) sea[i] = fixed[i] && h[i] <= 0 ? 1 : 0;
   const slot = new Int32Array(N).fill(-1);
   const list: number[] = [];
   let edges = 0;
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      const i = y * n + x;
-      if (sea[i] || fixed[i]) continue;
-      let e = 0;
-      if (x > 0 && sea[i - 1]) e++;
-      if (x < n - 1 && sea[i + 1]) e++;
-      if (y > 0 && sea[i - n]) e++;
-      if (y < n - 1 && sea[i + n]) e++;
-      if (e > 0) {
-        slot[i] = list.length;
-        list.push(i);
-        edges += e;
-      }
+  for (let i = 0; i < N; i++) {
+    if (sea[i] || fixed[i]) continue;
+    const e = seaEdges(g, sea, i);
+    if (e > 0) {
+      slot[i] = list.length;
+      list.push(i);
+      edges += e;
     }
   }
   const cells = Int32Array.from(list);
@@ -105,8 +95,9 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
   const sat = new Int32Array(W * W);
   for (let y = 0; y < n; y++) {
     let row = 0;
+    const r = cellIndex(g, 0, y);
     for (let x = 0; x < n; x++) {
-      row += sea[y * n + x] ? 0 : 1;
+      row += sea[r + x] ? 0 : 1;
       sat[(y + 1) * W + x + 1] = sat[y * W + x + 1] + row;
     }
   }
@@ -119,32 +110,29 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
       const x = Math.round(x0 + dx * s);
       const y = Math.round(y0 + dy * s);
       // Off the map counts as open sea: on 'continent' edges the map border is land anyway.
-      if (x < 0 || y < 0 || x >= n || y >= n) return 1;
-      if (!sea[y * n + x]) return s / fetchMax;
+      const j = tryCellIndex(g, x, y);
+      if (j < 0) return 1;
+      if (!sea[j]) return s / fetchMax;
     }
     return 1;
   };
 
   const fb = Math.max(1, Math.round(3 / cellKm));
-  const fm = Math.ceil(n / fb);
-  const origin = new Uint8Array(fm * fm);
+  const fg = blockGrid(g, fb);
+  const origin = new Uint8Array(fg.cells);
   const isOrigin = new Uint8Array(M);
+  const { border, off4, axialToRaster } = g;
   for (let k = 0; k < M; k++) {
     const i = cells[k];
-    const x = i % n;
-    const y = (i - x) / n;
+    const x = cellX(g, i);
+    const y = cellY(g, i);
     let mx = 0;
     let my = 0;
-    for (let dy = -rN; dy <= rN; dy++) {
-      const yy = y + dy;
-      if (yy < 0 || yy >= n) continue;
-      for (let dx = -rN; dx <= rN; dx++) {
-        const xx = x + dx;
-        if (xx < 0 || xx >= n || dx * dx + dy * dy > rN * rN || sea[yy * n + xx]) continue;
-        mx += dx;
-        my += dy;
-      }
-    }
+    forWindow(g, i, rN, (j, dx, dy) => {
+      if (dx * dx + dy * dy > rN * rN || sea[j]) return;
+      mx += dx;
+      my += dy;
+    });
     {
       const x0 = Math.max(0, x - rL);
       const x1 = Math.min(n, x + rL + 1);
@@ -156,8 +144,14 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
     let len = Math.hypot(mx, my);
     if (len < 1e-6) {
       // Symmetric neighbourhood (a point or a strip): fall back to the 4-neighbour sea direction.
-      mx = (x > 0 && sea[i - 1] ? 1 : 0) - (x < n - 1 && sea[i + 1] ? 1 : 0);
-      my = (y > 0 && sea[i - n] ? 1 : 0) - (y < n - 1 && sea[i + n] ? 1 : 0);
+      const b = border[i];
+      const s4 = (k4: number): number => {
+        const j = b === 0 ? i + off4[k4] : g.nbr(i, axialToRaster[k4]);
+        return j >= 0 && sea[j] ? 1 : 0;
+      };
+      // Axial order E W S N: west minus east, north minus south.
+      mx = s4(1) - s4(0);
+      my = s4(3) - s4(2);
       len = Math.hypot(mx, my) || 1;
     }
     nx[k] = -mx / len;
@@ -168,7 +162,7 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
 
     // Fetch: upwind (waves travel with the wind) plus swell from all eight directions.
     // Fetch rays from one coastal cell per ~3 km block (exposure is smoothed along the coast anyway).
-    const ob = Math.floor(y / fb) * fm + Math.floor(x / fb);
+    const ob = cellIndex(fg, Math.floor(x / fb), Math.floor(y / fb));
     if (origin[ob] === 0) {
       origin[ob] = 1;
       isOrigin[k] = 1;
@@ -182,23 +176,21 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
     const steps = Math.max(1, Math.round(2.5 / cellKm));
     let rel = h[i];
     for (let s = 1; s <= steps; s++) {
-      const xx = Math.round(x - nx[k] * s);
-      const yy = Math.round(y - ny[k] * s);
-      if (xx < 0 || yy < 0 || xx >= n || yy >= n) break;
-      const j = yy * n + xx;
+      const j = tryCellIndex(g, Math.round(x - nx[k] * s), Math.round(y - ny[k] * s));
+      if (j < 0) break;
       if (!sea[j]) rel = Math.max(rel, h[j]);
     }
     relief[k] = rel;
     const off = Math.max(1, Math.round(8 / cellKm));
     const sxx = Math.min(n - 1, Math.max(0, Math.round(x + nx[k] * off)));
     const syy = Math.min(n - 1, Math.max(0, Math.round(y + ny[k] * off)));
-    shelf[k] = Math.min(0, h[syy * n + sxx]);
+    shelf[k] = Math.min(0, h[cellIndex(g, sxx, syy)]);
   }
 
   // Smooth exposure and relief along the coast over ~10 km blocks so classes come in stretches.
   const block = Math.max(1, Math.round(4 / cellKm));
-  const me = blockMeanList(cells, exposure, isOrigin, n, block, 1);
-  const mr = blockMeanList(cells, relief, null, n, block, 1);
+  const me = blockMeanList(cells, exposure, isOrigin, g, block, 1);
+  const mr = blockMeanList(cells, relief, null, g, block, 1);
   const waveMul = 0.5 + c.num('waveEnergy');
   const wave = new Float32Array(M);
   const cls = new Uint8Array(M);
@@ -218,15 +210,7 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
     else if (wave[k] < 0.17 || landShare[k] > 0.72) k2 = COAST.SHELTERED;
     cls[k] = k2;
     classOf[i] = k2;
-    const x = i % n;
-    const y = (i - x) / n;
-    let e = 0;
-    for (let d = 0; d < 4; d++) {
-      const xx = x + DX[d];
-      const yy = y + DY[d];
-      if (xx >= 0 && yy >= 0 && xx < n && yy < n && sea[yy * n + xx]) e++;
-    }
-    const km = e * edgeKm;
+    const km = seaEdges(g, sea, i) * edgeKm;
     if (k2 === COAST.SANDY) lengthKm.sandy += km;
     else if (k2 === COAST.ROCKY) lengthKm.rocky += km;
     else if (k2 === COAST.SHELTERED) lengthKm.sheltered += km;
@@ -234,4 +218,18 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
   }
   lengthKm.total = edges * edgeKm;
   return { sea, cells, slot, nx, ny, wx, wy, exposure, wave, relief, shelf, landShare, cls, classOf, lengthKm };
+}
+
+/** Sea 4-neighbours of cell i (its coast edges). */
+function seaEdges(g: Grid, sea: Uint8Array, i: number): number {
+  if (g.border[i] === 0) {
+    const o = g.off4;
+    return sea[i + o[0]] + sea[i + o[1]] + sea[i + o[2]] + sea[i + o[3]];
+  }
+  let e = 0;
+  for (let k = 0; k < 4; k++) {
+    const j = g.nbr(i, g.axialToRaster[k]);
+    if (j >= 0 && sea[j]) e++;
+  }
+  return e;
 }

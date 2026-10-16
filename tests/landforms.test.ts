@@ -62,11 +62,13 @@ async function run(archetype: string, seed = 7, pins: WorldSpec['pins'] = {}): P
     if (!landformsStage.reads.includes(id)) throw new Error(`landforms reads undeclared parameter ${id}`);
     return resolved.values[id];
   };
+  const plates = pl.output('plates')!.extra as PlatesExtra;
+  const base = pl.output('base')!.extra as BaseExtra;
   const c: LandformCtx = {
-    grid: flatGrid(g.n, g.cellKm), n: g.n, cellKm: g.cellKm, worldKm: get('worldSize') as number, h: g.h.slice(), fixed: g.fixed.slice(), ice: g.ice,
+    grid: flatGrid(g.n, g.cellKm), platesGrid: flatGrid(plates.n, plates.cellKm), baseGrid: flatGrid(base.n, base.cellKm),
+    n: g.n, cellKm: g.cellKm, worldKm: get('worldSize') as number, h: g.h.slice(), fixed: g.fixed.slice(), ice: g.ice,
     climate: pl.output('climate')!.extra as ClimateExtra,
-    plates: pl.output('plates')!.extra as PlatesExtra,
-    base: pl.output('base')!.extra as BaseExtra,
+    plates, base,
     num: (id) => get(id) as number,
     range: (id) => get(id) as Range,
     str: (id) => get(id) as string,
@@ -127,7 +129,7 @@ describe('landform helpers', () => {
       h[y * n] = -50;
       fixed[y * n] = 1;
     }
-    const c = { n, h, fixed } as unknown as LandformCtx;
+    const c = { grid: flatGrid(n, 1), n, h, fixed } as unknown as LandformCtx;
     const s = snapshot(c);
     h[3 * n + 1] = -10; // touches the sea column → becomes sea
     h[3 * n + 5] = -10; // enclosed → clamped, stays land

@@ -1,5 +1,5 @@
 import {
-  areaFactor, aridityAt, bigRegions, centreOf, coarseNoise, concavity, DiskSet, drains, DX8, DY8, poisson, settleFixed, snapshot, sstep,
+  areaFactor, aridityAt, bigRegions, centreOf, coarseNoise, concavity, DiskSet, drains, poisson, settleFixed, snapshot, sstep,
 } from './profiles';
 import type { LandformCtx } from './types';
 
@@ -20,8 +20,8 @@ const DOLINES_PER_KM2 = 1 / 40;
  */
 export function applyKarst(c: LandformCtx): void {
   const snap = snapshot(c);
-  const { n, h, fixed } = c;
-  const N = n * n;
+  const { h, fixed } = c;
+  const { cells: N, border, off8Axial } = c.grid;
   const ck = c.cellKm;
   const ckm2 = ck * ck;
   const af = areaFactor(c);
@@ -68,10 +68,8 @@ export function applyKarst(c: LandformCtx): void {
   for (const k of towerAreas) c.features.push({ type: 'tower-karst', x: k.x * 1000, y: k.y * 1000, size: Math.sqrt(k.km2) * 1000, data: { areaKm2: k.km2 } });
 
   const isolated = (i: number, marks: Uint8Array): boolean => {
-    const x = i % n;
-    const y = (i - x) / n;
-    if (x === 0 || y === 0 || x === n - 1 || y === n - 1) return false;
-    for (let k = 0; k < 8; k++) if (marks[i + DY8[k] * n + DX8[k]]) return false;
+    if (border[i]) return false;
+    for (let k = 0; k < 8; k++) if (marks[i + off8Axial[k]]) return false;
     return true;
   };
 
@@ -105,10 +103,9 @@ export function applyKarst(c: LandformCtx): void {
     if (!isolated(i, towersMark) || concavity(c, i) < 0) continue;
     const before = h[i];
     h[i] += trng.range(80, 220) * Math.min(1, Math.sqrt(1.5 / ck));
+    // Isolated cells are interior, so all eight neighbours exist.
     let ok = true;
-    const x = i % n;
-    const y = (i - x) / n;
-    for (let k = 0; k < 8 && ok; k++) ok = drains(c, (y + DY8[k]) * n + x + DX8[k]);
+    for (let k = 0; k < 8 && ok; k++) ok = drains(c, i + off8Axial[k]);
     if (!ok) {
       h[i] = before;
       continue;

@@ -1,15 +1,17 @@
 import type { Rng } from '../../../shared/rng';
+import { blockGrid, cellIndex, cellX, cellY, type Grid } from '../../grid/grid';
 
-/** 8-neighbourhood offsets: the first four are the 4-neighbours. */
-export const DX8 = [1, -1, 0, 0, 1, 1, -1, -1] as const;
-export const DY8 = [0, 0, 1, -1, 1, -1, 1, -1] as const;
+/*
+ * Coast-module neighbour walks use the grid's axial-first D8 order (`off8Axial`: E W S N SE NE SW NW;
+ * the first four are the 4-neighbours), which sets their tie-breaks.
+ */
 
 /**
  * Two-pass chamfer distance (cells, 1 / 1.4 weights) to the nearest source cell, carrying the index
  * of that source. O(n²); approximate nearest (good to about a cell), which is all the coastal bands need.
  */
-export function chamferNearest(source: Uint8Array, n: number): { dist: Float32Array; nearest: Int32Array } {
-  const N = n * n;
+export function chamferNearest(source: Uint8Array, g: Grid): { dist: Float32Array; nearest: Int32Array } {
+  const { cells: N, border, off8 } = g;
   const d = new Float32Array(N);
   const near = new Int32Array(N);
   for (let i = 0; i < N; i++) {
@@ -21,67 +23,76 @@ export function chamferNearest(source: Uint8Array, n: number): { dist: Float32Ar
       near[i] = -1;
     }
   }
-  // Forward pass (W, NW, N, NE), then backward pass (E, SE, S, SW); relaxations inlined.
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      const i = y * n + x;
-      let best = d[i];
-      let src = near[i];
-      if (x > 0 && d[i - 1] + 1 < best) {
-        best = d[i - 1] + 1;
-        src = near[i - 1];
-      }
-      if (y > 0) {
-        if (d[i - n] + 1 < best) {
-          best = d[i - n] + 1;
-          src = near[i - n];
-        }
-        if (x > 0 && d[i - n - 1] + 1.4 < best) {
-          best = d[i - n - 1] + 1.4;
-          src = near[i - n - 1];
-        }
-        if (x < n - 1 && d[i - n + 1] + 1.4 < best) {
-          best = d[i - n + 1] + 1.4;
-          src = near[i - n + 1];
-        }
-      }
-      d[i] = best;
-      near[i] = src;
+  // Raster offsets (NW N NE W E SW S SE); border cells read theirs from nbr (−1 off the map).
+  const oNW = off8[0];
+  const oN = off8[1];
+  const oNE = off8[2];
+  const oW = off8[3];
+  const oE = off8[4];
+  const oSW = off8[5];
+  const oS = off8[6];
+  const oSE = off8[7];
+  // Forward pass in scan order (W, N, NW, NE), then backward (E, S, SE, SW); relaxations inlined.
+  for (let i = 0; i < N; i++) {
+    let best = d[i];
+    let src = near[i];
+    const b = border[i] === 0;
+    const jW = b ? i + oW : g.nbr(i, 3);
+    const jN = b ? i + oN : g.nbr(i, 1);
+    const jNW = b ? i + oNW : g.nbr(i, 0);
+    const jNE = b ? i + oNE : g.nbr(i, 2);
+    if (jW >= 0 && d[jW] + 1 < best) {
+      best = d[jW] + 1;
+      src = near[jW];
     }
+    if (jN >= 0 && d[jN] + 1 < best) {
+      best = d[jN] + 1;
+      src = near[jN];
+    }
+    if (jNW >= 0 && d[jNW] + 1.4 < best) {
+      best = d[jNW] + 1.4;
+      src = near[jNW];
+    }
+    if (jNE >= 0 && d[jNE] + 1.4 < best) {
+      best = d[jNE] + 1.4;
+      src = near[jNE];
+    }
+    d[i] = best;
+    near[i] = src;
   }
-  for (let y = n - 1; y >= 0; y--) {
-    for (let x = n - 1; x >= 0; x--) {
-      const i = y * n + x;
-      let best = d[i];
-      let src = near[i];
-      if (x < n - 1 && d[i + 1] + 1 < best) {
-        best = d[i + 1] + 1;
-        src = near[i + 1];
-      }
-      if (y < n - 1) {
-        if (d[i + n] + 1 < best) {
-          best = d[i + n] + 1;
-          src = near[i + n];
-        }
-        if (x < n - 1 && d[i + n + 1] + 1.4 < best) {
-          best = d[i + n + 1] + 1.4;
-          src = near[i + n + 1];
-        }
-        if (x > 0 && d[i + n - 1] + 1.4 < best) {
-          best = d[i + n - 1] + 1.4;
-          src = near[i + n - 1];
-        }
-      }
-      d[i] = best;
-      near[i] = src;
+  for (let i = N - 1; i >= 0; i--) {
+    let best = d[i];
+    let src = near[i];
+    const b = border[i] === 0;
+    const jE = b ? i + oE : g.nbr(i, 4);
+    const jS = b ? i + oS : g.nbr(i, 6);
+    const jSE = b ? i + oSE : g.nbr(i, 7);
+    const jSW = b ? i + oSW : g.nbr(i, 5);
+    if (jE >= 0 && d[jE] + 1 < best) {
+      best = d[jE] + 1;
+      src = near[jE];
     }
+    if (jS >= 0 && d[jS] + 1 < best) {
+      best = d[jS] + 1;
+      src = near[jS];
+    }
+    if (jSE >= 0 && d[jSE] + 1.4 < best) {
+      best = d[jSE] + 1.4;
+      src = near[jSE];
+    }
+    if (jSW >= 0 && d[jSW] + 1.4 < best) {
+      best = d[jSW] + 1.4;
+      src = near[jSW];
+    }
+    d[i] = best;
+    near[i] = src;
   }
   return { dist: d, nearest: near };
 }
 
 /** Labels 8-connected components of non-zero `mask` cells; −1 outside. Returns labels and sizes. */
-export function components8(mask: Uint8Array, n: number): { label: Int32Array; sizes: number[] } {
-  const N = n * n;
+export function components8(mask: Uint8Array, g: Grid): { label: Int32Array; sizes: number[] } {
+  const { cells: N, border, off8Axial, axialToRaster } = g;
   const label = new Int32Array(N).fill(-1);
   const sizes: number[] = [];
   const stack = new Int32Array(N);
@@ -95,14 +106,10 @@ export function components8(mask: Uint8Array, n: number): { label: Int32Array; s
     while (top > 0) {
       const c = stack[--top];
       size++;
-      const x = c % n;
-      const y = (c - x) / n;
+      const b = border[c];
       for (let k = 0; k < 8; k++) {
-        const nx = x + DX8[k];
-        const ny = y + DY8[k];
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        const j = ny * n + nx;
-        if (mask[j] && label[j] === -1) {
+        const j = b === 0 ? c + off8Axial[k] : g.nbr(c, axialToRaster[k]);
+        if (j >= 0 && mask[j] && label[j] === -1) {
           label[j] = id;
           stack[top++] = j;
         }
@@ -118,11 +125,10 @@ export function components8(mask: Uint8Array, n: number): { label: Int32Array; s
  * reachable from `list`), writing ids into `label` (which must be −1 on those cells). Touches only
  * the listed components, so it costs O(list) instead of O(n²). Returns the component sizes.
  */
-export function labelList(list: readonly number[], mask: Uint8Array, n: number, label: Int32Array): number[] {
+export function labelList(list: readonly number[], mask: Uint8Array, g: Grid, label: Int32Array): number[] {
+  const { border, off8Axial, axialToRaster } = g;
   const sizes: number[] = [];
   const stack: number[] = [];
-  const dx = DX8;
-  const dy = DY8;
   for (const s of list) {
     if (!mask[s] || label[s] !== -1) continue;
     const id = sizes.length;
@@ -132,14 +138,10 @@ export function labelList(list: readonly number[], mask: Uint8Array, n: number, 
     while (stack.length) {
       const c = stack.pop()!;
       size++;
-      const x = c % n;
-      const y = (c - x) / n;
+      const b = border[c];
       for (let k = 0; k < 8; k++) {
-        const nx = x + dx[k];
-        const ny = y + dy[k];
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        const j = ny * n + nx;
-        if (mask[j] && label[j] === -1) {
+        const j = b === 0 ? c + off8Axial[k] : g.nbr(c, axialToRaster[k]);
+        if (j >= 0 && mask[j] && label[j] === -1) {
           label[j] = id;
           stack.push(j);
         }
@@ -211,11 +213,11 @@ export class DiskSet {
 }
 
 /** Cells on the 4-connected digital line from a to b (inclusive), so water or land cannot leak diagonally. */
-export function line4(n: number, a: number, b: number): number[] {
-  let x = a % n;
-  let y = (a - x) / n;
-  const x1 = b % n;
-  const y1 = (b - x1) / n;
+export function line4(g: Grid, a: number, b: number): number[] {
+  let x = cellX(g, a);
+  let y = cellY(g, a);
+  const x1 = cellX(g, b);
+  const y1 = cellY(g, b);
   const out = [a];
   const sx = Math.sign(x1 - x);
   const sy = Math.sign(y1 - y);
@@ -232,7 +234,7 @@ export function line4(n: number, a: number, b: number): number[] {
       y += sy;
       ey++;
     }
-    out.push(y * n + x);
+    out.push(cellIndex(g, x, y));
   }
   return out;
 }
@@ -242,25 +244,24 @@ export function line4(n: number, a: number, b: number): number[] {
  * block means, box-blurred over `r` blocks, read back per listed cell. O(list + (n / block)²).
  */
 export function blockMeanList(
-  cells: Int32Array, val: Float32Array, w: Uint8Array | null, n: number, block: number, r: number,
+  cells: Int32Array, val: Float32Array, w: Uint8Array | null, g: Grid, block: number, r: number,
 ): Float32Array {
-  const m = Math.ceil(n / block);
+  const bg = blockGrid(g, block);
+  const m = bg.n;
   const sv = new Float32Array(m * m);
   const sw = new Float32Array(m * m);
   const bOf = new Int32Array(cells.length);
   for (let k = 0; k < cells.length; k++) {
     const i = cells[k];
-    const x = i % n;
-    const y = (i - x) / n;
-    const b = Math.floor(y / block) * m + Math.floor(x / block);
+    const b = cellIndex(bg, Math.floor(cellX(g, i) / block), Math.floor(cellY(g, i) / block));
     bOf[k] = b;
     const wk = w ? w[k] : 1;
     if (wk <= 0) continue;
     sv[b] += val[k] * wk;
     sw[b] += wk;
   }
-  boxBlurSmall(sv, m, r);
-  boxBlurSmall(sw, m, r);
+  boxBlurSmall(sv, bg, r);
+  boxBlurSmall(sw, bg, r);
   const out = new Float32Array(cells.length);
   for (let k = 0; k < cells.length; k++) {
     const b = bOf[k];
@@ -269,13 +270,16 @@ export function blockMeanList(
   return out;
 }
 
-/** Separable box blur (radius r, zero outside) on a small square grid. */
-function boxBlurSmall(a: Float32Array, m: number, r: number): void {
+/** Separable box blur (radius r, zero outside) on a small grid: rows, then columns. */
+function boxBlurSmall(a: Float32Array, g: Grid, r: number): void {
   if (r < 1) return;
+  const m = g.n;
   const tmp = new Float32Array(m);
+  // Cell k along row (pass 0) or column (pass 1) `line`.
+  const cellAt = (pass: number, line: number, k: number): number => (pass === 0 ? cellIndex(g, k, line) : cellIndex(g, line, k));
   for (let pass = 0; pass < 2; pass++) {
     for (let line = 0; line < m; line++) {
-      const at = (k: number): number => (pass === 0 ? a[line * m + k] : a[k * m + line]);
+      const at = (k: number): number => a[cellAt(pass, line, k)];
       let s = 0;
       for (let k = 0; k <= Math.min(m - 1, r); k++) s += at(k);
       for (let k = 0; k < m; k++) {
@@ -283,10 +287,7 @@ function boxBlurSmall(a: Float32Array, m: number, r: number): void {
         if (k + r + 1 < m) s += at(k + r + 1);
         if (k - r >= 0) s -= at(k - r);
       }
-      for (let k = 0; k < m; k++) {
-        if (pass === 0) a[line * m + k] = tmp[k];
-        else a[k * m + line] = tmp[k];
-      }
+      for (let k = 0; k < m; k++) a[cellAt(pass, line, k)] = tmp[k];
     }
   }
 }

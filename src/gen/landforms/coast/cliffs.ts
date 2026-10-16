@@ -1,10 +1,7 @@
+import { cellX, cellY, tryCellIndex } from '../../grid/grid';
 import type { LandformCtx } from '../types';
 import { COAST, type CoastInfo } from './classify';
-import { DiskSet, DX8, DY8, poisson, shuffle } from './grid';
-
-// Local copies: hot loops should not read the imported bindings.
-const DX = Int8Array.from(DX8);
-const DY = Int8Array.from(DY8);
+import { DiskSet, poisson, shuffle } from './grid';
 
 /** Sea stacks per 1000 km of exposed cliff coast at density 1 (FEATURES F12: uncommon). */
 const STACK_RATE = 8;
@@ -19,7 +16,10 @@ const STACK_SPACING_KM = 6;
  * Returns the cliff coast length (km) and the stack count.
  */
 export function placeCliffs(c: LandformCtx, info: CoastInfo, edited: Uint8Array, mask: Uint8Array): { km: number; stacks: number } {
-  const { n, cellKm, h } = c;
+  const { grid: g, cellKm, h } = c;
+  const { border, off8Axial, axialToRaster } = g;
+  // Neighbour k of cell i in axial order (E W S N SE NE SW NW; the first four are the 4-neighbours), −1 off the map.
+  const nb = (i: number, k: number): number => (border[i] === 0 ? i + off8Axial[k] : g.nbr(i, axialToRaster[k]));
   const { sea, cells, slot, cls, wave } = info;
   const rng = c.rng('coastal', 'cliffs');
   const cliffCells: number[] = [];
@@ -27,16 +27,11 @@ export function placeCliffs(c: LandformCtx, info: CoastInfo, edited: Uint8Array,
   for (let k = 0; k < cells.length; k++) {
     const i = cells[k];
     if (cls[k] !== COAST.ROCKY || h[i] <= 0 || c.fixed[i] || edited[i]) continue;
-    const x = i % n;
-    const y = (i - x) / n;
     // Lowest interior (non-coastal) land neighbour: the cliff top may rise to just below it.
     let lo = Infinity;
     for (let d = 0; d < 8; d++) {
-      const xx = x + DX[d];
-      const yy = y + DY[d];
-      if (xx < 0 || yy < 0 || xx >= n || yy >= n) continue;
-      const j = yy * n + xx;
-      if (sea[j] || slot[j] >= 0) continue;
+      const j = nb(i, d);
+      if (j < 0 || sea[j] || slot[j] >= 0) continue;
       lo = Math.min(lo, h[j]);
     }
     const strength = Math.min(1, Math.max(0, (wave[k] - 0.15) / 0.35));
@@ -54,11 +49,8 @@ export function placeCliffs(c: LandformCtx, info: CoastInfo, edited: Uint8Array,
     // Deepen the sea cells at the cliff foot (wave-cut platform edge).
     let e = 0;
     for (let d = 0; d < 4; d++) {
-      const xx = x + DX[d];
-      const yy = y + DY[d];
-      if (xx < 0 || yy < 0 || xx >= n || yy >= n) continue;
-      const j = yy * n + xx;
-      if (!sea[j]) continue;
+      const j = nb(i, d);
+      if (j < 0 || !sea[j]) continue;
       e++;
       const foot = -(6 + 0.12 * top) * strength;
       if (h[j] > foot) {
@@ -78,25 +70,24 @@ export function placeCliffs(c: LandformCtx, info: CoastInfo, edited: Uint8Array,
     if (stacks >= want) break;
     if (wave[k] < 0.35) continue;
     const i = cells[k];
-    const cx = ((i % n) + 0.5) * cellKm;
-    const cy = (Math.floor(i / n) + 0.5) * cellKm;
+    const cx = (cellX(g, i) + 0.5) * cellKm;
+    const cy = (cellY(g, i) + 0.5) * cellKm;
     const offKm = cellKm * 0.5 + rng.range(0.1, 0.8);
     const px = cx + info.nx[k] * offKm;
     const py = cy + info.ny[k] * offKm;
-    const gx = Math.floor(px / cellKm);
-    const gy = Math.floor(py / cellKm);
-    if (gx < 0 || gy < 0 || gx >= n || gy >= n || !sea[gy * n + gx]) continue;
+    const gc = tryCellIndex(g, Math.floor(px / cellKm), Math.floor(py / cellKm));
+    if (gc < 0 || !sea[gc]) continue;
     if (!disk.free(px, py)) continue;
     disk.add(px, py);
     stacks++;
     const size = rng.range(40, 250);
     c.features.push({ type: 'sea-stack', x: px * 1000, y: py * 1000, size, data: { height: rng.range(15, 70) } });
     // Stacks are far below a macro cell; only a grid finer than the stack gets a bump.
-    if (size >= cellKm * 1000) h[gy * n + gx] = Math.max(h[gy * n + gx], 10);
+    if (size >= cellKm * 1000) h[gc] = Math.max(h[gc], 10);
   }
 
   // Cliff features: one per contiguous stretch of ≥ ~10 km, from a coarse walk over cliff cells.
-  const seen = new Uint8Array(n * n);
+  const seen = new Uint8Array(g.cells);
   for (const k of cliffCells) seen[cells[k]] = 1;
   for (const k of cliffCells) {
     const s = cells[k];
@@ -110,17 +101,12 @@ export function placeCliffs(c: LandformCtx, info: CoastInfo, edited: Uint8Array,
     while (stack.length) {
       const q = stack.pop()!;
       count++;
-      const x = q % n;
-      const y = (q - x) / n;
-      sx += x;
-      sy += y;
+      sx += cellX(g, q);
+      sy += cellY(g, q);
       top = Math.max(top, h[q]);
       for (let d = 0; d < 8; d++) {
-        const xx = x + DX[d];
-        const yy = y + DY[d];
-        if (xx < 0 || yy < 0 || xx >= n || yy >= n) continue;
-        const j = yy * n + xx;
-        if (seen[j] === 1) {
+        const j = nb(q, d);
+        if (j >= 0 && seen[j] === 1) {
           seen[j] = 2;
           stack.push(j);
         }

@@ -26,6 +26,9 @@ export interface Feature {
  */
 export interface LandformCtx {
   grid: Grid;
+  /** Grids of the plates and base stage rasters (`plates.n`, `base.n` cells per edge). */
+  platesGrid: Grid;
+  baseGrid: Grid;
   n: number;
   cellKm: number;
   worldKm: number;

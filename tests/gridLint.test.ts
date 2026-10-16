@@ -33,18 +33,7 @@ const ALLOW: Record<string, number> = {
   // climate
   'src/gen/climate/fields.ts': 2,
   // landforms
-  'src/gen/landforms/arid.ts': 17,
-  'src/gen/landforms/coast/barriers.ts': 37,
-  'src/gen/landforms/coast/classify.ts': 19,
-  'src/gen/landforms/coast/cliffs.ts': 14,
-  'src/gen/landforms/coast/fixed.ts': 10,
-  'src/gen/landforms/coast/grid.ts': 41,
-  'src/gen/landforms/coast/reefs.ts': 24,
-  'src/gen/landforms/coast/rias.ts': 14,
-  'src/gen/landforms/coastal.ts': 2,
-  'src/gen/landforms/karst.ts': 7,
-  'src/gen/landforms/profiles.ts': 30,
-  'src/gen/landforms/volcanic.ts': 6,
+  'src/gen/landforms/profiles.ts': 1,
   // registry
   'src/gen/registry/fill.ts': 2,
 };

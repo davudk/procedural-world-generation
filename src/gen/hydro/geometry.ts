@@ -1,6 +1,6 @@
 import { hashMix } from '../../shared/hash';
 import { RIVER } from '../../shared/protocol';
-import { cellIfOnMap, cellIndex, cellX, cellY, type Grid } from '../grid/grid';
+import { tryCellIndex, cellIndex, cellX, cellY, type Grid } from '../grid/grid';
 import { smoothstep } from '../grid/ops';
 import type { GraphBuilder } from './graph';
 import { kinoshita, sinuosity, targetSinuosity, thetaForAmplitude, thetaForSinuosity, THETA_MAX } from './meander';
@@ -145,7 +145,7 @@ export function meanderRoom(g: GeometryInput, cc: CellChannel): Float32Array {
     let best = ROOM_MAX;
     for (const side of [-1, 1]) {
       for (let k = 1; k < best; k++) {
-        const j = cellIfOnMap(grid, Math.round(x - side * k * dy), Math.round(y + side * k * dx));
+        const j = tryCellIndex(grid, Math.round(x - side * k * dy), Math.round(y + side * k * dx));
         if (j < 0) {
           best = Math.min(best, k - 0.5);
           break;

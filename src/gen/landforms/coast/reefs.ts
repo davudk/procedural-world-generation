@@ -1,4 +1,5 @@
 import { Noise2 } from '../../../shared/noise';
+import { blockGrid, cellIndex, cellX, cellY, tryCellIndex } from '../../grid/grid';
 import type { LandformCtx } from '../types';
 import { COAST, type CoastInfo } from './classify';
 import { components8, DiskSet, poisson, shuffle } from './grid';
@@ -31,8 +32,8 @@ export interface ReefResult {
 export function placeReefs(
   c: LandformCtx, info: CoastInfo, dist: Float32Array, nearest: Int32Array, edited: Uint8Array, mask: Uint8Array,
 ): ReefResult {
-  const { n, cellKm, h } = c;
-  const N = n * n;
+  const { grid: g, n, cellKm, h } = c;
+  const N = g.cells;
   const { temp, tAmp } = c.climate;
   const { sea, slot, cls, exposure } = info;
   const rng = c.rng('coastal', 'reefs');
@@ -42,8 +43,8 @@ export function placeReefs(
   const res: ReefResult = { fringingCells: 0, barrierCells: 0, reefs: 0, atolls: 0, warmOceanKm2: 0 };
 
   const sst = (j: number): number => {
-    const xk = (j % n) * cellKm;
-    const yk = Math.floor(j / n) * cellKm;
+    const xk = cellX(g, j) * cellKm;
+    const yk = cellY(g, j) * cellKm;
     return temp[j] + 0.0065 * Math.max(0, h[j]) - 0.5 * tAmp[j] + noise.noise(xk / 80, yk / 80);
   };
   // Warm sea cells (coarse estimate on a strided sample is enough for the area).
@@ -51,7 +52,7 @@ export function placeReefs(
   let warm = 0;
   for (let y = 0; y < n; y += stride) {
     for (let x = 0; x < n; x += stride) {
-      const j = y * n + x;
+      const j = cellIndex(g, x, y);
       if (sea[j] && temp[j] - 0.5 * tAmp[j] >= REEF_SST) warm++;
     }
   }
@@ -67,8 +68,8 @@ export function placeReefs(
     const offR = new Float32Array(M);
     for (let k = 0; k < M; k++) {
       const i = info.cells[k];
-      const xk = (i % n) * cellKm;
-      const yk = Math.floor(i / n) * cellKm;
+      const xk = cellX(g, i) * cellKm;
+      const yk = cellY(g, i) * cellKm;
       if (cls[k] === COAST.ICE || noise.fbm(xk / 160 - 21, yk / 160 + 37, 2) < 0.62 - 1.6 * BARRIER_REEF_SHARE) continue;
       offR[k] = Math.max(3, Math.round((10 + 15 * (0.5 + 0.5 * noise.noise(xk / 120 + 41, yk / 120 - 9))) / cellKm));
     }
@@ -83,8 +84,8 @@ export function placeReefs(
       const band = !fringe && offR[k] > 0 && Math.abs(d - offR[k]) <= 0.6 && h[j] >= -70 && h[j] <= -2 && !edited[j];
       if (!fringe && !band) continue;
       if (temp[j] - 0.5 * tAmp[j] < REEF_SST - 2 || sst(j) < REEF_SST) continue;
-      const xk = (j % n) * cellKm;
-      const yk = Math.floor(j / n) * cellKm;
+      const xk = cellX(g, j) * cellKm;
+      const yk = cellY(g, j) * cellKm;
       if (fringe) {
         // Muddy, sheltered shores (mangrove and marsh coasts) rarely carry reefs.
         const clear = cls[k] === COAST.SHELTERED ? -0.35 : exposure[k] < 0.12 ? -0.1 : 0.2;
@@ -111,15 +112,15 @@ export function placeReefs(
 
   // Reef features: contiguous reef tracts of ≥ ~25 km² (atolls are features of their own).
   const minCells = Math.max(3, Math.round(25 / cellKm));
-  const rc = components8(reefCell, n);
+  const rc = components8(reefCell, g);
   const sx = new Float64Array(rc.sizes.length);
   const sy = new Float64Array(rc.sizes.length);
   const crest = new Uint8Array(rc.sizes.length);
   for (let j = 0; j < N; j++) {
     const l = rc.label[j];
     if (l < 0) continue;
-    sx[l] += j % n;
-    sy[l] += Math.floor(j / n);
+    sx[l] += cellX(g, j);
+    sy[l] += cellY(g, j);
     if (mask[j] === 255) crest[l] = 1;
   }
   for (let l = 0; l < rc.sizes.length; l++) {
@@ -137,22 +138,27 @@ function placeAtolls(
   c: LandformCtx, edited: Uint8Array, mask: Uint8Array, reefCell: Uint8Array,
   sst: (j: number) => number, warmKm2: number, dens: number, isl: number,
 ): number {
-  const { n, cellKm, h } = c;
+  const { grid: g, n, cellKm, h } = c;
   const P = c.plates;
+  const pg = c.platesGrid;
   const rng = c.rng('coastal', 'atolls');
   if (warmKm2 <= 0) return 0;
   // Coarse 6 km blocks: max height and where it is.
   const B = Math.max(1, Math.round(6 / cellKm));
-  const m = Math.ceil(n / B);
+  const bg = blockGrid(g, B);
+  const m = bg.n;
   const mx = new Float32Array(m * m).fill(-Infinity);
   const arg = new Int32Array(m * m).fill(-1);
-  for (let i = 0; i < n * n; i++) {
-    const x = i % n;
-    const y = (i - x) / n;
-    const b = Math.floor(y / B) * m + Math.floor(x / B);
-    if (h[i] > mx[b]) {
-      mx[b] = h[i];
-      arg[b] = i;
+  for (let y = 0; y < n; y++) {
+    const br = cellIndex(bg, 0, Math.floor(y / B));
+    const row = cellIndex(g, 0, y);
+    for (let x = 0; x < n; x++) {
+      const i = row + x;
+      const b = br + Math.floor(x / B);
+      if (h[i] > mx[b]) {
+        mx[b] = h[i];
+        arg[b] = i;
+      }
     }
   }
   const bKm = B * cellKm;
@@ -162,15 +168,16 @@ function placeAtolls(
   const cand: { i: number; score: number }[] = [];
   for (let by = ring1; by < m - ring1; by++) {
     for (let bx = ring1; bx < m - ring1; bx++) {
-      const b = by * m + bx;
+      const b = cellIndex(bg, bx, by);
       const pk = mx[b];
       if (pk < -1800 || pk > 300) continue;
       let isMax = true;
       for (let dy = -peakR; dy <= peakR && isMax; dy++) {
         for (let dx = -peakR; dx <= peakR; dx++) {
           if (!dx && !dy) continue;
-          const v = mx[(by + dy) * m + bx + dx];
-          if (v > pk || (v === pk && (by + dy) * m + bx + dx < b)) {
+          const o = cellIndex(bg, bx + dx, by + dy);
+          const v = mx[o];
+          if (v > pk || (v === pk && o < b)) {
             isMax = false;
             break;
           }
@@ -183,7 +190,7 @@ function placeAtolls(
         for (let dx = -ring1; dx <= ring1; dx++) {
           const r = Math.max(Math.abs(dx), Math.abs(dy));
           if (r < ring0) continue;
-          sum += mx[(by + dy) * m + bx + dx];
+          sum += mx[cellIndex(bg, bx + dx, by + dy)];
           cnt++;
         }
       }
@@ -192,18 +199,17 @@ function placeAtolls(
       const i = arg[b];
       if (sst(i) < REEF_SST + 0.5) continue;
       // Old end of a hotspot chain: a taller (younger) edifice along the plate motion within 300 km.
-      const pu = Math.min(P.n - 1, Math.floor(((i % n) / n) * P.n));
-      const pv = Math.min(P.n - 1, Math.floor((Math.floor(i / n) / n) * P.n));
-      const pl = P.plate[pv * P.n + pu];
+      const pu = Math.min(P.n - 1, Math.floor((cellX(g, i) / n) * P.n));
+      const pv = Math.min(P.n - 1, Math.floor((cellY(g, i) / n) * P.n));
+      const pl = P.plate[cellIndex(pg, pu, pv)];
       const sp = Math.hypot(P.vx[pl], P.vy[pl]) || 1;
       const ux = P.vx[pl] / sp;
       const uy = P.vy[pl] / sp;
       let chain = 0;
       for (let s = 40; s <= 300; s += bKm) {
-        const qx = Math.round(bx + (ux * s) / bKm);
-        const qy = Math.round(by + (uy * s) / bKm);
-        if (qx < 0 || qy < 0 || qx >= m || qy >= m) break;
-        if (mx[qy * m + qx] > pk + 500) {
+        const q = tryCellIndex(bg, Math.round(bx + (ux * s) / bKm), Math.round(by + (uy * s) / bKm));
+        if (q < 0) break;
+        if (mx[q] > pk + 500) {
           chain = 1;
           break;
         }
@@ -220,8 +226,8 @@ function placeAtolls(
   let made = 0;
   for (const { i } of cand) {
     if (made >= want) break;
-    const cx = (i % n) + 0.5;
-    const cy = Math.floor(i / n) + 0.5;
+    const cx = cellX(g, i) + 0.5;
+    const cy = cellY(g, i) + 0.5;
     if (!disk.free(cx * cellKm, cy * cellKm)) continue;
     const R = Math.max(1.6, rng.range(3, 9) / cellKm);
     const half = 0.55;
@@ -230,7 +236,7 @@ function placeAtolls(
     const ring: number[] = [];
     for (let y = Math.max(0, Math.floor(cy - reach)); y <= Math.min(n - 1, Math.ceil(cy + reach)); y++) {
       for (let x = Math.max(0, Math.floor(cx - reach)); x <= Math.min(n - 1, Math.ceil(cx + reach)); x++) {
-        const j = y * n + x;
+        const j = cellIndex(g, x, y);
         if (edited[j] || (!c.fixed[j] && h[j] > 250)) continue;
         const r = Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
         if (r < R - half) {
