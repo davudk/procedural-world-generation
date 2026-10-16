@@ -1,3 +1,4 @@
+import { cellIndex, cellX as colOf, cellY as rowOf } from '../grid/grid';
 import { B } from '../stages/plates';
 import { cellAtM, cellX, cellY, insideDistance, label, labelAngle, mergeTree, nearestWhere, pca, resolveOwners, type MergeTree } from './grid';
 import { G } from './shared';
@@ -41,11 +42,12 @@ export interface ReliefResult {
  * the landform features.
  */
 export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): ReliefResult {
-  const { n, cellM } = I.fine;
-  const N = n * n;
+  const fine = I.fine;
+  const { n, cellM } = fine;
+  const N = fine.cells;
   const land = new Uint8Array(N);
   for (let c = 0; c < N; c++) land[c] = I.sea[c] ? 0 : 1;
-  const t = mergeTree(I.h, land, n, true, 1);
+  const t = mergeTree(I.h, land, fine, true, 1);
   const prom = new Float32Array(t.count);
   let kingK = -1;
   for (let k = 0; k < t.count; k++) {
@@ -78,12 +80,14 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
     const r = Math.ceil(rad);
     const x0 = Math.floor(fx);
     const y0 = Math.floor(fy);
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        const x = x0 + dx;
-        const y = y0 + dy;
-        if (x < 0 || y < 0 || x >= n || y >= n || dx * dx + dy * dy > rad * rad) continue;
-        const c = y * n + x;
+    const xb = Math.min(n - 1, x0 + r);
+    const yb = Math.min(n - 1, y0 + r);
+    for (let y = Math.max(0, y0 - r); y <= yb; y++) {
+      for (let x = Math.max(0, x0 - r); x <= xb; x++) {
+        const dx = x - x0;
+        const dy = y - y0;
+        if (dx * dx + dy * dy > rad * rad) continue;
+        const c = cellIndex(fine, x, y);
         if (!land[c]) continue;
         if (best < 0 || I.h[c] > I.h[best]) best = c;
       }
@@ -101,7 +105,7 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
     let k = t.owner[best];
     if (k >= 0) {
       const pc = t.peak[k];
-      if (((pc % n) + 0.5 - fx) ** 2 + (Math.floor(pc / n) + 0.5 - fy) ** 2 > (rad + 1) ** 2) k = -1;
+      if ((colOf(fine, pc) + 0.5 - fx) ** 2 + (rowOf(fine, pc) + 0.5 - fy) ** 2 > (rad + 1) ** 2) k = -1;
     }
     if (k >= 0) used[k] = 1;
     const hgt = I.h[best];
@@ -135,6 +139,7 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
   // Caps scale with land area only (research 05 §3.1: size changes quantity, not density; M8 rec. 9).
   const cap = Math.round(Math.max(8, S.landKm2 / 7000));
   const sp = (PEAK_SPACING_KM * 1000) / cellM;
+  /** Cell columns and rows of the peaks taken so far. */
   const taken: number[] = [];
   const peaks: Candidate[] = [];
   const peakComps: number[] = [];
@@ -143,9 +148,11 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
   for (const k of cand) {
     if (peaks.length >= cap) break;
     const c = t.peak[k];
-    const x = c % n;
-    const y = (c - x) / n;
-    if (taken.some((o) => ((o % n) - x) ** 2 + (Math.floor(o / n) - y) ** 2 < sp * sp)) continue;
+    const x = colOf(fine, c);
+    const y = rowOf(fine, c);
+    let near = false;
+    for (let i = 0; i < taken.length && !near; i += 2) near = (taken[i] - x) ** 2 + (taken[i + 1] - y) ** 2 < sp * sp;
+    if (near) continue;
     const ext = Math.max(cellM, Math.min(prom[k] * 6, PEAK_MAX_EXTENT_M));
     if (ext >= PEAK_R_LO_M && k !== kingK) {
       const px = cellX(I.fine, c);
@@ -155,7 +162,7 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
       if (near >= PEAK_R_MAX) continue;
     }
     if (ext >= PEAK_R_LO_M) rVis.push(cellX(I.fine, c), cellY(I.fine, c));
-    taken.push(c);
+    taken.push(x, y);
     used[k] = 1;
     peakComps.push(k);
     const p = prom[k];
@@ -189,15 +196,14 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
  */
 function detectRanges(I: RegistryInput, S: Shared, out: Candidate[], peaks: Candidate[]): Int32Array {
   const R = S.reg;
-  const m = R.n;
-  const MM = m * m;
+  const MM = R.cells;
   const rKm = R.cellM / 1000;
   let top = 0;
   for (let i = 0; i < MM; i++) if (S.land[i] && S.hSmooth[i] > top) top = S.hSmooth[i];
   const T = Math.max(700, 0.3 * top);
   const mask = new Uint8Array(MM);
   for (let i = 0; i < MM; i++) mask[i] = S.land[i] && S.hSmooth[i] >= T && S.relief[i] >= 120 ? 1 : 0;
-  const t = mergeTree(S.hSmooth, mask, m, true, 5);
+  const t = mergeTree(S.hSmooth, mask, R, true, 5);
   const minKm2 = 1500;
   const keep = new Uint8Array(t.count);
   for (let k = 0; k < t.count; k++) {
@@ -217,7 +223,7 @@ function detectRanges(I: RegistryInput, S: Shared, out: Candidate[], peaks: Cand
   }
   const ranges: { c: Candidate; id: number }[] = [];
   for (const [id, cells] of cellsOf) {
-    const ax = pca(cells, m, (c) => S.hSmooth[c] - T + 50);
+    const ax = pca(cells, R, (c) => S.hSmooth[c] - T + 50);
     const lenKm = ax.length * rKm;
     if (lenKm < 50) continue;
     const widthKm = ax.width * rKm;
@@ -228,8 +234,8 @@ function detectRanges(I: RegistryInput, S: Shared, out: Candidate[], peaks: Cand
     let maxH = 0;
     let sumRel = 0;
     for (const c of cells) {
-      const dx = (c % m) - ax.cx;
-      const dy = Math.floor(c / m) - ax.cy;
+      const dx = colOf(R, c) - ax.cx;
+      const dy = rowOf(R, c) - ax.cy;
       const s = dx * ax.ux + dy * ax.uy;
       const b = Math.min(bins - 1, Math.max(0, Math.floor(((s + half) / ax.length) * bins)));
       if (bestC[b] < 0 || S.hSmooth[c] > S.hSmooth[bestC[b]]) bestC[b] = c;
@@ -254,7 +260,7 @@ function detectRanges(I: RegistryInput, S: Shared, out: Candidate[], peaks: Cand
       path[2 * i + 1] = sy / w;
     }
     const mid = pts[Math.floor(pts.length / 2)];
-    const fa = nearestWhere(I.fine.n, cellX(R, mid) / I.fine.cellM, cellY(R, mid) / I.fine.cellM, 3 * S.f, (c) => !I.sea[c]);
+    const fa = nearestWhere(I.fine, cellX(R, mid) / I.fine.cellM, cellY(R, mid) / I.fine.cellM, 3 * S.f, (c) => !I.sea[c]);
     const x = fa >= 0 ? cellX(I.fine, fa) : cellX(R, mid);
     const y = fa >= 0 ? cellY(I.fine, fa) : cellY(R, mid);
     const meanRel = sumRel / cells.length;
@@ -338,8 +344,7 @@ function detectPasses(I: RegistryInput, S: Shared, out: Candidate[], t: MergeTre
 /** Plateaus (high and flat) and plains (low and flat): large regional components. */
 function detectFlats(I: RegistryInput, S: Shared, out: Candidate[], rangeOf: Int32Array): void {
   const R = S.reg;
-  const m = R.n;
-  const MM = m * m;
+  const MM = R.cells;
   const rKm2 = (R.cellM / 1000) ** 2;
   const plateau = new Uint8Array(MM);
   const plain = new Uint8Array(MM);
@@ -350,7 +355,7 @@ function detectFlats(I: RegistryInput, S: Shared, out: Candidate[], rangeOf: Int
     if (S.hSmooth[i] < 200 && S.relief[i] < 50 && S.dSea[i] * R.cellM >= 8000 && S.groupShare[G.DESERT][i] < 0.5) plain[i] = 1;
   }
   const emit = (mask: Uint8Array, kind: 'plateau' | 'plain', minKm2: number, cap: number): void => {
-    const comps = label(mask, m, true);
+    const comps = label(mask, R, true);
     const inside = insideDistance(mask, R);
     const pole = new Int32Array(comps.count).fill(-1);
     const sumH = new Float64Array(comps.count);
@@ -366,7 +371,7 @@ function detectFlats(I: RegistryInput, S: Shared, out: Candidate[], rangeOf: Int
       if (areaKm2 < minKm2) continue;
       const px = cellX(R, pole[k]);
       const py = cellY(R, pole[k]);
-      const fa = nearestWhere(I.fine.n, px / I.fine.cellM, py / I.fine.cellM, 3 * S.f, (c) => !I.sea[c]);
+      const fa = nearestWhere(I.fine, px / I.fine.cellM, py / I.fine.cellM, 3 * S.f, (c) => !I.sea[c]);
       const x = fa >= 0 ? cellX(I.fine, fa) : px;
       const y = fa >= 0 ? cellY(I.fine, fa) : py;
       list.push({
@@ -388,7 +393,7 @@ function detectRifts(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const P = I.plates;
   const pg = I.platesGrid;
   const cells = new Map<number, number[]>();
-  for (let c = 0; c < P.n * P.n; c++) {
+  for (let c = 0; c < pg.cells; c++) {
     const s = P.bSeg[c];
     if (s < 0 || P.segments[s].cls !== B.RIFT) continue;
     let a = cells.get(s);
@@ -402,7 +407,7 @@ function detectRifts(I: RegistryInput, S: Shared, out: Candidate[]): void {
     let onLand = 0;
     for (const c of cs) if (!I.sea[cellAtM(I.fine, cellX(pg, c), cellY(pg, c))]) onLand++;
     if (onLand < 0.6 * cs.length) continue;
-    const ax = pca(cs, P.n);
+    const ax = pca(cs, pg);
     const bins = Math.max(3, Math.min(16, Math.round(seg.lengthKm / 40)));
     const sx = new Float64Array(bins);
     const sy = new Float64Array(bins);
@@ -410,8 +415,8 @@ function detectRifts(I: RegistryInput, S: Shared, out: Candidate[]): void {
     let mid = cs[0];
     let md = Infinity;
     for (const c of cs) {
-      const dx = (c % P.n) - ax.cx;
-      const dy = Math.floor(c / P.n) - ax.cy;
+      const dx = colOf(pg, c) - ax.cx;
+      const dy = rowOf(pg, c) - ax.cy;
       const t = dx * ax.ux + dy * ax.uy;
       const b = Math.min(bins - 1, Math.max(0, Math.floor(((t + ax.length / 2) / ax.length) * bins)));
       sx[b] += cellX(pg, c);

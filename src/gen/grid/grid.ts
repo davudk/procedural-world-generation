@@ -327,3 +327,10 @@ export function cellY(g: Grid, i: number): number {
 export function cellIndex(g: Grid, x: number, y: number, face = 0): number {
   return face * g.n * g.n + y * g.n + x;
 }
+
+// ── registry helpers ──
+
+/** Whether face-local column x, row y lie on the face (flat: on the map). */
+export function onFace(g: Grid, x: number, y: number): boolean {
+  return x >= 0 && y >= 0 && x < g.n && y < g.n;
+}

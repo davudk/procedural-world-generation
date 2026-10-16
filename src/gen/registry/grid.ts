@@ -1,45 +1,47 @@
-import type { Grid } from '../grid/grid';
+import { cellIndex, coarser, cellX as colOf, cellY as rowOf, type Grid } from '../grid/grid';
 import { chamferDistance } from '../grid/ops';
 
 /**
  * Raster helpers for the landmark registry (S11). Everything runs on world grids: the
  * macro grid (1 km cells on the build, 4 km on the preview at the default size) and a "regional"
  * grid of ~4 km cells used for seas, coasts, ranges and biome regions, so those detectors cost the
- * same on the build and the preview and find the same features in both.
+ * same on the build and the preview and find the same features in both. Neighbour loops use the
+ * grid's axial-first D8 order (E W S N SE NE SW NW: `off8Axial`, `off4`).
  */
-
-export const DX8 = [1, -1, 0, 0, 1, 1, -1, -1];
-export const DY8 = [0, 0, 1, -1, 1, -1, 1, -1];
 
 /** A registry grid; positions are map metres (x from the west edge, y from the north edge). */
 export type GridSpec = Grid;
 
-export const cellX = (g: GridSpec, c: number): number => ((c % g.n) + 0.5) * g.cellM;
-export const cellY = (g: GridSpec, c: number): number => (Math.floor(c / g.n) + 0.5) * g.cellM;
+/** Cell centre, map metres. */
+export const cellX = (g: GridSpec, c: number): number => (colOf(g, c) + 0.5) * g.cellM;
+export const cellY = (g: GridSpec, c: number): number => (rowOf(g, c) + 0.5) * g.cellM;
 
 /** Cell containing a map position (clamped to the grid). */
 export function cellAtM(g: GridSpec, x: number, y: number): number {
   const i = Math.min(g.n - 1, Math.max(0, Math.floor(x / g.cellM)));
   const j = Math.min(g.n - 1, Math.max(0, Math.floor(y / g.cellM)));
-  return j * g.n + i;
+  return cellIndex(g, i, j);
 }
 
-/** Largest power-of-two factor ≤ n/16 that brings the cell size to about `targetM`. */
-export function coarseFactor(n: number, cellM: number, targetM: number): number {
+/** Largest power-of-two factor ≤ n/16 that brings the cell size of `g` to about `targetM`. */
+export function coarseFactor(g: GridSpec, targetM: number): number {
   let f = 1;
-  while (f * 2 * cellM <= targetM * 1.01 && n / (f * 2) >= 64) f *= 2;
+  while (f * 2 * g.cellM <= targetM * 1.01 && g.n / (f * 2) >= 64) f *= 2;
   return f;
 }
 
-/** Mean of `a` over each coarse block. */
-export function blockMean(a: Float32Array, n: number, f: number): Float32Array {
+/** Mean of `a` (on `g`) over each block of f × f cells: a field on `coarser(g, f)`. */
+export function blockMean(a: Float32Array, g: GridSpec, f: number): Float32Array {
   if (f === 1) return a.slice();
-  const m = n / f;
-  const out = new Float32Array(m * m);
+  const cg = coarser(g, f);
+  const out = new Float32Array(cg.cells);
   const inv = 1 / (f * f);
-  for (let y = 0; y < n; y++) {
-    const row = Math.floor(y / f) * m;
-    for (let x = 0; x < n; x++) out[row + Math.floor(x / f)] += a[y * n + x] * inv;
+  for (let face = 0; face < g.faces; face++) {
+    for (let y = 0; y < g.n; y++) {
+      const row = cellIndex(cg, 0, Math.floor(y / f), face);
+      const i0 = cellIndex(g, 0, y, face);
+      for (let x = 0; x < g.n; x++) out[row + Math.floor(x / f)] += a[i0 + x] * inv;
+    }
   }
   return out;
 }
@@ -53,46 +55,49 @@ export interface Components {
   sy: Float64Array;
 }
 
-export function label(mask: Uint8Array, n: number, conn8: boolean): Components {
-  const N = n * n;
+export function label(mask: Uint8Array, g: GridSpec, conn8: boolean): Components {
+  const { cells: N, off8Axial: off, border, axialToRaster } = g;
   const lab = new Int32Array(N).fill(-1);
   const stack = new Int32Array(N);
   const sizes: number[] = [];
-  const sxs: number[] = [];
-  const sys: number[] = [];
   const kmax = conn8 ? 8 : 4;
   for (let s = 0; s < N; s++) {
     if (!mask[s] || lab[s] !== -1) continue;
     const id = sizes.length;
     let top = 0;
     let size = 0;
-    let sx = 0;
-    let sy = 0;
     stack[top++] = s;
     lab[s] = id;
     while (top > 0) {
       const c = stack[--top];
-      const x = c % n;
-      const y = (c - x) / n;
       size++;
-      sx += x;
-      sy += y;
+      const b = border[c];
       for (let k = 0; k < kmax; k++) {
-        const nx = x + DX8[k];
-        const ny = y + DY8[k];
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        const nc = ny * n + nx;
-        if (mask[nc] && lab[nc] === -1) {
+        const nc = b === 0 ? c + off[k] : g.nbr(c, axialToRaster[k]);
+        if (nc >= 0 && mask[nc] && lab[nc] === -1) {
           lab[nc] = id;
           stack[top++] = nc;
         }
       }
     }
     sizes.push(size);
-    sxs.push(sx);
-    sys.push(sy);
   }
-  return { label: lab, count: sizes.length, size: Int32Array.from(sizes), sx: Float64Array.from(sxs), sy: Float64Array.from(sys) };
+  // Centroid sums in a raster pass: sums of integer cell coordinates are exact in any order.
+  const count = sizes.length;
+  const sx = new Float64Array(count);
+  const sy = new Float64Array(count);
+  for (let face = 0; face < g.faces; face++) {
+    for (let y = 0; y < g.n; y++) {
+      const i0 = cellIndex(g, 0, y, face);
+      for (let x = 0; x < g.n; x++) {
+        const k = lab[i0 + x];
+        if (k < 0) continue;
+        sx[k] += x;
+        sy[k] += y;
+      }
+    }
+  }
+  return { label: lab, count, size: Int32Array.from(sizes), sx, sy };
 }
 
 /**
@@ -149,8 +154,8 @@ export interface MergeTree {
   owner: Int32Array;
 }
 
-export function mergeTree(v: Float32Array, mask: Uint8Array, n: number, conn8: boolean, step: number): MergeTree {
-  const N = n * n;
+export function mergeTree(v: Float32Array, mask: Uint8Array, g: GridSpec, conn8: boolean, step: number): MergeTree {
+  const { cells: N, off8Axial: off, border, axialToRaster } = g;
   const order = orderDesc(v, mask, step);
   const uf = new Int32Array(N).fill(-1);
   const compOfRoot = new Int32Array(N).fill(-1);
@@ -172,15 +177,11 @@ export function mergeTree(v: Float32Array, mask: Uint8Array, n: number, conn8: b
   const roots = new Int32Array(8);
   for (let oi = 0; oi < order.length; oi++) {
     const c = order[oi];
-    const x = c % n;
-    const y = (c - x) / n;
+    const b = border[c];
     let nr = 0;
     for (let k = 0; k < kmax; k++) {
-      const nx = x + DX8[k];
-      const ny = y + DY8[k];
-      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-      const nc = ny * n + nx;
-      if (uf[nc] < 0) continue;
+      const nc = b === 0 ? c + off[k] : g.nbr(c, axialToRaster[k]);
+      if (nc < 0 || uf[nc] < 0) continue;
       const r = find(nc);
       let dup = false;
       for (let j = 0; j < nr; j++) if (roots[j] === r) dup = true;
@@ -258,7 +259,7 @@ export interface Axes {
   width: number;
 }
 
-export function pca(cells: ArrayLike<number>, n: number, weight?: (c: number) => number): Axes {
+export function pca(cells: ArrayLike<number>, g: GridSpec, weight?: (c: number) => number): Axes {
   let sw = 0;
   let sx = 0;
   let sy = 0;
@@ -266,8 +267,8 @@ export function pca(cells: ArrayLike<number>, n: number, weight?: (c: number) =>
     const c = cells[i];
     const w = weight ? weight(c) : 1;
     sw += w;
-    sx += w * (c % n);
-    sy += w * Math.floor(c / n);
+    sx += w * colOf(g, c);
+    sy += w * rowOf(g, c);
   }
   const cx = sx / Math.max(sw, 1e-9);
   const cy = sy / Math.max(sw, 1e-9);
@@ -277,8 +278,8 @@ export function pca(cells: ArrayLike<number>, n: number, weight?: (c: number) =>
   for (let i = 0; i < cells.length; i++) {
     const c = cells[i];
     const w = weight ? weight(c) : 1;
-    const dx = (c % n) - cx;
-    const dy = Math.floor(c / n) - cy;
+    const dx = colOf(g, c) - cx;
+    const dy = rowOf(g, c) - cy;
     xx += w * dx * dx;
     yy += w * dy * dy;
     xy += w * dx * dy;
@@ -313,22 +314,24 @@ export function insideDistance(mask: Uint8Array, g: Grid): Float32Array {
   return chamferDistance(inv, g);
 }
 
-/** Nearest cell to (cx, cy) (cells) within `radius` cells for which `ok` holds, or −1. */
-export function nearestWhere(n: number, cx: number, cy: number, radius: number, ok: (c: number) => boolean): number {
+/**
+ * Nearest cell to (cx, cy) (face-local cells) within `radius` cells for which `ok` holds, or −1.
+ * Scans the clipped window rows north to south, west to east; ties go to the first cell.
+ */
+export function nearestWhere(g: GridSpec, cx: number, cy: number, radius: number, ok: (c: number) => boolean): number {
   const x0 = Math.round(cx - 0.5);
   const y0 = Math.round(cy - 0.5);
   let best = -1;
   let bd = Infinity;
   const r = Math.ceil(radius);
-  for (let dy = -r; dy <= r; dy++) {
-    const y = y0 + dy;
-    if (y < 0 || y >= n) continue;
-    for (let dx = -r; dx <= r; dx++) {
-      const x = x0 + dx;
-      if (x < 0 || x >= n) continue;
+  const xa = Math.max(0, x0 - r);
+  const xb = Math.min(g.n - 1, x0 + r);
+  const yb = Math.min(g.n - 1, y0 + r);
+  for (let y = Math.max(0, y0 - r); y <= yb; y++) {
+    for (let x = xa; x <= xb; x++) {
       const d = (x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2;
       if (d >= bd || d > radius * radius) continue;
-      const c = y * n + x;
+      const c = cellIndex(g, x, y);
       if (ok(c)) {
         bd = d;
         best = c;

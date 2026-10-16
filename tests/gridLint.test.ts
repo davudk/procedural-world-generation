@@ -57,13 +57,7 @@ const ALLOW: Record<string, number> = {
   'src/gen/landforms/profiles.ts': 30,
   'src/gen/landforms/volcanic.ts': 6,
   // registry
-  'src/gen/registry/fill.ts': 6,
-  'src/gen/registry/grid.ts': 19,
-  'src/gen/registry/land.ts': 9,
-  'src/gen/registry/relief.ts': 10,
-  'src/gen/registry/rivers.ts': 6,
-  'src/gen/registry/shared.ts': 4,
-  'src/gen/registry/water.ts': 20,
+  'src/gen/registry/fill.ts': 2,
 };
 
 function files(dir: string): string[] {

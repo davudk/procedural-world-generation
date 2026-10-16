@@ -1,3 +1,4 @@
+import { cellIndex, cellX as colOf, cellY as rowOf } from '../grid/grid';
 import { chamferDistance } from '../grid/ops';
 import { RIVER } from '../../shared/protocol';
 import type { LandmarkKind } from '../../shared/landmarks';
@@ -62,7 +63,7 @@ function fillBand(I: RegistryInput, S: Shared, out: Candidate[], relief: ReliefR
   const fine = I.fine;
   // Coverage raster: the macro grid for the area band, the ~4 km regional grid for the region band.
   const cg = area ? fine : S.reg;
-  const covered = new Uint8Array(cg.n * cg.n);
+  const covered = new Uint8Array(cg.cells);
   const mark = (x: number, y: number): void => {
     covered[cellAtM(cg, x, y)] = 1;
   };
@@ -165,19 +166,19 @@ const PATCH_MAX_KM2 = 160;
  * the band's smallest feature and PATCH_MAX_KM2, standing in land not already covered.
  */
 function patches(I: RegistryInput, S: Shared, B: Band, far: (c: number) => boolean): FillItem[] {
-  const { n, cellM } = I.fine;
-  const N = n * n;
-  const cellKm2 = (cellM / 1000) ** 2;
+  const fine = I.fine;
+  const N = fine.cells;
+  const cellKm2 = (fine.cellM / 1000) ** 2;
   const out: FillItem[] = [];
   for (const [kind, groups] of [['forest', [G.BOREAL, G.TEMPERATE, G.TROPICAL]], ['wetland', [G.WET]]] as const) {
     const mask = new Uint8Array(N);
     for (let c = 0; c < N; c++) if (!I.sea[c] && (groups as readonly number[]).includes(groupOf(I.biome.biome[c], I.hydro.waterClass[c]))) mask[c] = 1;
-    const comps = label(mask, n, true);
+    const comps = label(mask, fine, true);
     const list: { k: number; c: number; a: number }[] = [];
     for (let k = 0; k < comps.count; k++) {
       const a = comps.size[k] * cellKm2;
       if (Math.sqrt(a) * 1000 < B.lo || a > PATCH_MAX_KM2) continue;
-      const c = nearestWhere(n, comps.sx[k] / comps.size[k] + 0.5, comps.sy[k] / comps.size[k] + 0.5, Math.max(4, Math.sqrt(comps.size[k])), (q) => comps.label[q] === k);
+      const c = nearestWhere(fine, comps.sx[k] / comps.size[k] + 0.5, comps.sy[k] / comps.size[k] + 0.5, Math.max(4, Math.sqrt(comps.size[k])), (q) => comps.label[q] === k);
       if (c < 0 || !far(c)) continue;
       list.push({ k, c, a });
     }
@@ -216,8 +217,7 @@ const W_FILL_MIN_SHARE = 0.4;
 
 export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number {
   const R = S.reg;
-  const m = R.n;
-  const MM = m * m;
+  const MM = R.cells;
   const worldM = I.worldKm * 1000;
   const lo = worldM / 80;
   const covered = new Uint8Array(MM);
@@ -248,17 +248,19 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number
     for (let i = 0; i < MM; i++) if (S.land[i] && !tried[i] && dist[i] > need && (best < 0 || dist[i] > dist[best])) best = i;
     if (best < 0) break;
     tried[best] = 1;
-    const bx = best % m;
-    const by = (best - bx) / m;
+    const bx = colOf(R, best);
+    const by = rowOf(R, best);
     const r = Math.ceil(rad);
     const sum = new Float64Array(covers.length);
     let landSum = 0;
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        const x = bx + dx;
-        const y = by + dy;
-        if (x < 0 || y < 0 || x >= m || y >= m || dx * dx + dy * dy > rad * rad) continue;
-        const c = y * m + x;
+    const xb = Math.min(R.n - 1, bx + r);
+    const yb = Math.min(R.n - 1, by + r);
+    for (let y = Math.max(0, by - r); y <= yb; y++) {
+      for (let x = Math.max(0, bx - r); x <= xb; x++) {
+        const dx = x - bx;
+        const dy = y - by;
+        if (dx * dx + dy * dy > rad * rad) continue;
+        const c = cellIndex(R, x, y);
         landSum += S.landShare[c];
         covers.forEach(([, , gs], k) => {
           for (const gg of gs) sum[k] += S.groupShare[gg][c];
@@ -274,7 +276,7 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number
     }
     const [kind, v] = covers[k];
     const areaKm2 = sum[k] * rKm2;
-    const fc = nearestWhere(I.fine.n, cellX(R, best) / I.fine.cellM, cellY(R, best) / I.fine.cellM, 3 * S.f, (q) => !I.sea[q]);
+    const fc = nearestWhere(I.fine, cellX(R, best) / I.fine.cellM, cellY(R, best) / I.fine.cellM, 3 * S.f, (q) => !I.sea[q]);
     const x = fc >= 0 ? cellX(I.fine, fc) : cellX(R, best);
     const y = fc >= 0 ? cellY(I.fine, fc) : cellY(R, best);
     let variant = v;
