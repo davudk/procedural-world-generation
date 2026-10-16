@@ -1,8 +1,10 @@
 import type { Rng } from '../../shared/rng';
 import { Noise2 } from '../../shared/noise';
+import { Noise3 } from '../../shared/noise3';
 import type { Layer } from '../../shared/protocol';
+import { asCube, cellOfDir, unitPositions, type CubeGrid } from '../grid/cube';
 import { distanceField } from '../grid/distance';
-import { blockGrid, cellIndex, cellX, cellY, forWindow, mapEdgeDistance, onFace, type Grid } from '../grid/grid';
+import { blockGrid, cellFace, cellIndex, cellX, cellY, forWindow, mapEdgeDistance, onFace, type Grid } from '../grid/grid';
 import { MinHeap } from '../grid/heap';
 import { cellAt } from '../grid/sample';
 import type { StageCtx, StageDef } from '../pipeline';
@@ -52,9 +54,19 @@ export interface PlatesExtra {
   /** Nearest boundary cell of every cell, and the distance to it in km. */
   nearest: Int32Array;
   dBKm: Float32Array;
-  /** Plate velocities at each plate's centroid, mm/yr (for hotspot tracks). */
+  /** Plate velocities at each plate's centroid, mm/yr (for hotspot tracks; 0 on the sphere). */
   vx: Float64Array;
   vy: Float64Array;
+  /**
+   * Sphere only: Euler pole of each plate (3 per plate), scaled to the surface speed in mm/yr at 90°
+   * from the pole; the velocity at unit vector p is ω × p (research 10 §5.1).
+   */
+  omega?: Float64Array;
+}
+
+/** Layer header fields of a grid: none on flat maps (stages keep their own w, h, worldKm); cube faces on the sphere. */
+export function shapeHeader(g: Grid): { worldKm?: number; faces?: 6; radiusKm?: number } {
+  return g.shape === 'sphere' ? { worldKm: g.cellKm * g.n, faces: 6, radiusKm: g.radiusM / 1000 } : {};
 }
 
 /** Step length per axial-order neighbour (E W S N, then the diagonals), in cells. */
@@ -83,10 +95,12 @@ export const platesStage: StageDef = {
   inputs: [],
   reads: [
     'worldSize', 'plateCount', 'microplateCount', 'plateSizeSkew', 'boundaryWarp', 'continentalShare', 'continentCount',
-    'continentSizeSkew', 'tectonicActivity', 'mountainRangeCount', 'riftCount', 'mapEdge',
+    'continentSizeSkew', 'tectonicActivity', 'mountainRangeCount', 'riftCount', 'mapEdge', 'worldShape', 'planetSize',
   ],
   async run(ctx) {
-    const n = ctx.mode === 'preview' ? 128 : 256;
+    const sphere = ctx.str('worldShape') === 'sphere';
+    // Sphere: 6 × 64² / 6 × 128² cells (8 km faces at the default 4,096 km circumference).
+    const n = sphere ? (ctx.mode === 'preview' ? 64 : 128) : ctx.mode === 'preview' ? 128 : 256;
     const g = ctx.grid(n);
     const worldKm = ctx.num('worldSize');
     const cellKm = g.cellKm;
@@ -102,8 +116,10 @@ export const platesStage: StageDef = {
     const area = new Float64Array(count);
     for (let c = 0; c < g.cells; c++) {
       const p = plate[c];
-      cx[p] += (cellX(g, c) + 0.5) * cellKm;
-      cy[p] += (cellY(g, c) + 0.5) * cellKm;
+      if (!sphere) {
+        cx[p] += (cellX(g, c) + 0.5) * cellKm;
+        cy[p] += (cellY(g, c) + 0.5) * cellKm;
+      }
       area[p]++;
     }
     for (let p = 0; p < count; p++) {
@@ -122,8 +138,11 @@ export const platesStage: StageDef = {
     const miss = (v: number, r: readonly [number, number], drawn: number): number =>
       Math.max(0, r[0] - v, v - r[1]) + 0.1 * Math.abs(v - drawn);
     for (let k = 0; k < CANDIDATES; k++) {
-      const motion = randomMotion(ctx.rng('motion', k), count, major, area, cellKm, activity);
-      const cand = classify(frame, plate, continent, g, cx, cy, motion, ctx.rng('override', k));
+      const motion = sphere
+        ? eulerMotion(ctx.rng('motion', k), count, major, activity)
+        : randomMotion(ctx.rng('motion', k), count, major, area, cellKm, activity);
+      const rates = sphere ? eulerRates(frame, plate, asCube(g), motion) : planarRates(frame, plate, g, cx, cy, motion);
+      const cand = classify(frame, plate, continent, g, rates, ctx.rng('override', k));
       const score = miss(cand.ranges, rangeR, targetRanges) + miss(cand.rifts, riftR, targetRifts);
       if (!best || score < best.score) best = { ...cand, score, motion };
       if (score === 0) break;
@@ -140,16 +159,18 @@ export const platesStage: StageDef = {
 
     const crustLayer = new Int32Array(N);
     for (let c = 0; c < N; c++) crustLayer[c] = continent[c] + 1;
+    const sh = shapeHeader(g);
     const layers: Layer[] = [
-      { id: 'plates', label: 'Plates', stage: 'plates', kind: 'categorical', w: n, h: n, worldKm, unit: '', min: 0, max: count - 1, data: plate },
-      { id: 'continents', label: 'Continents (0 = ocean)', stage: 'plates', kind: 'categorical', w: n, h: n, worldKm, unit: '', min: 0, max: ctx.drawn('continentCount'), data: crustLayer },
-      { id: 'boundaries', label: 'Plate boundaries', stage: 'plates', kind: 'categorical', w: n, h: n, worldKm, unit: '', min: 0, max: 6, data: chosen.bClass },
+      { id: 'plates', label: 'Plates', stage: 'plates', kind: 'categorical', w: n, h: n, worldKm, ...sh, unit: '', min: 0, max: count - 1, data: plate },
+      { id: 'continents', label: 'Continents (0 = ocean)', stage: 'plates', kind: 'categorical', w: n, h: n, worldKm, ...sh, unit: '', min: 0, max: ctx.drawn('continentCount'), data: crustLayer },
+      { id: 'boundaries', label: 'Plate boundaries', stage: 'plates', kind: 'categorical', w: n, h: n, worldKm, ...sh, unit: '', min: 0, max: 6, data: chosen.bClass },
     ];
     const extra: PlatesExtra = {
       n, cellKm, plate, plateCount: count, continent, continentCount: ctx.drawn('continentCount'),
       bClass: chosen.bClass, bSeg: chosen.bSeg, segments: chosen.segments, nearest, dBKm,
       vx: chosen.motion.tx, vy: chosen.motion.ty,
     };
+    if (chosen.motion.pole) extra.omega = chosen.motion.pole;
     return {
       layers,
       stats: {
@@ -174,22 +195,31 @@ function growPlates(ctx: StageCtx, g: Grid): { plate: Int32Array; count: number;
   const micro = ctx.drawn('microplateCount');
   const count = major + micro;
   const rng = ctx.rng('seeds');
-  const { xs, ys } = spacedPoints(rng, count, 0.03);
+  const sphere = g.shape === 'sphere';
+  const seeds = sphere ? spacedCells(rng, count, asCube(g)) : null;
+  const { xs, ys } = sphere ? { xs: null, ys: null } : spacedPoints(rng, count, 0.03);
   const skew = ctx.num('plateSizeSkew');
   const weight = new Float64Array(count);
   for (let i = 0; i < count; i++) weight[i] = i < major ? Math.exp(skew * 0.9 * gaussian(rng)) : 0.3;
 
-  const noise = new Noise2(ctx.rng('noise').nextU32());
   const warp = ctx.num('boundaryWarp');
   const cost = new Float32Array(N);
-  for (let c = 0; c < N; c++) {
-    cost[c] = 1 + warp * 4 * (0.5 + 0.5 * noise.fbm((cellX(g, c) * cellKm) / 180, (cellY(g, c) * cellKm) / 180, 4));
+  if (sphere) {
+    const noise = new Noise3(ctx.rng('noise').nextU32());
+    const p = unitPositions(asCube(g));
+    const k = g.radiusM / 1000 / 180;
+    for (let c = 0; c < N; c++) cost[c] = 1 + warp * 4 * (0.5 + 0.5 * noise.fbm3(p[c * 3] * k, p[c * 3 + 1] * k, p[c * 3 + 2] * k, 4));
+  } else {
+    const noise = new Noise2(ctx.rng('noise').nextU32());
+    for (let c = 0; c < N; c++) {
+      cost[c] = 1 + warp * 4 * (0.5 + 0.5 * noise.fbm((cellX(g, c) * cellKm) / 180, (cellY(g, c) * cellKm) / 180, 4));
+    }
   }
   const plate = new Int32Array(N).fill(-1);
   const dist = new Float64Array(N).fill(Infinity);
   const heap = new MinHeap(n * 4);
   for (let i = 0; i < count; i++) {
-    const c = cellAt(g, xs[i], ys[i]);
+    const c = seeds ? seeds[i] : cellAt(g, xs![i], ys![i]);
     if (dist[c] === 0) continue;
     dist[c] = 0;
     plate[c] = i;
@@ -205,7 +235,8 @@ function growPlates(ctx: StageCtx, g: Grid): { plate: Int32Array; count: number;
       let nc: number;
       if (b === 0) nc = c + off[k];
       else if ((nc = g.nbr(c, axialToRaster[k])) < 0) continue;
-      const nd = d + (DL[k] * 0.5 * (cost[c] + cost[nc])) / weight[p];
+      const dl = sphere ? g.dist(c, axialToRaster[k]) / g.cellM : DL[k];
+      const nd = d + (dl * 0.5 * (cost[c] + cost[nc])) / weight[p];
       if (nd < dist[nc]) {
         dist[nc] = nd;
         plate[nc] = p;
@@ -227,8 +258,10 @@ function growContinents(ctx: StageCtx, g: Grid): Int32Array {
   const { n, cells: N, cellKm, off8Axial: off, axialToRaster, border } = g;
   const count = ctx.drawn('continentCount');
   const rng = ctx.rng('continents');
+  const sphere = g.shape === 'sphere';
   const margin = ctx.str('mapEdge') === 'ocean' ? 0.2 : 0.08;
-  const { xs, ys } = spacedPoints(rng, count, margin);
+  const seeds = sphere ? spacedCells(rng, count, asCube(g)) : null;
+  const { xs, ys } = sphere ? { xs: null, ys: null } : spacedPoints(rng, count, margin);
   const skew = ctx.num('continentSizeSkew');
   const w = Array.from({ length: count }, (_, i) => (i === 0 ? 1 + 4 * skew : 1 - 0.5 * skew) * rng.range(0.8, 1.2));
   const wSum = w.reduce((a, b) => a + b, 0);
@@ -244,6 +277,7 @@ function growContinents(ctx: StageCtx, g: Grid): Int32Array {
     ay[i] = Math.sin(a);
     stretch[i] = rng.range(0.3, 1.6);
   }
+  if (sphere) return growContinentsSphere(ctx, asCube(g), seeds!, w, ax, ay, stretch);
   const noise = new Noise2(ctx.rng('continent-noise').nextU32());
   const cost = new Float32Array(N);
   for (let c = 0; c < N; c++) {
@@ -261,7 +295,7 @@ function growContinents(ctx: StageCtx, g: Grid): Int32Array {
   const blockOwner = new Int32Array(bg.cells).fill(-1);
   const area = new Float64Array(count);
   const heap = new MinHeap(n * 4);
-  for (let i = 0; i < count; i++) heap.push(0, cellAt(g, xs[i], ys[i]) * 16 + i);
+  for (let i = 0; i < count; i++) heap.push(0, cellAt(g, xs![i], ys![i]) * 16 + i);
   while (heap.size > 0) {
     const d = heap.peekKey();
     const v = heap.pop();
@@ -286,6 +320,111 @@ function growContinents(ctx: StageCtx, g: Grid): Int32Array {
     }
   }
   return label;
+}
+
+/**
+ * growContinents on the cube-sphere: the same noisy anisotropic Dijkstra, with the elongation axis a
+ * great circle through the seed (pole P; steps toward P are "across") and ownership blocks on the
+ * coarse cube grid with their 7×7 neighbourhoods taken across seams.
+ */
+function growContinentsSphere(
+  ctx: StageCtx, g: CubeGrid, seeds: Int32Array, w: readonly number[], ax: Float64Array, ay: Float64Array, stretch: Float64Array,
+): Int32Array {
+  const { cells: N, cellKm } = g;
+  const count = seeds.length;
+  const wSum = w.reduce((a, b) => a + b, 0);
+  // Continental share of the surface area: cells differ in area, so targets are in m².
+  const total = ctx.num('continentalShare') * g.totalArea;
+  const target = w.map((v) => (total * v) / wSum);
+  const p = unitPositions(g);
+  // Elongation pole per continent: the seed's local frame rotated by the drawn axis angle.
+  const pole = new Float64Array(count * 3);
+  const up = new Float64Array(3);
+  const east = new Float64Array(3);
+  const north = new Float64Array(3);
+  for (let i = 0; i < count; i++) {
+    g.frame(seeds[i], east, north, up);
+    // Along-axis direction t = ax·east + ay·north; the pole is up × t.
+    const tx = ax[i] * east[0] + ay[i] * north[0];
+    const ty = ax[i] * east[1] + ay[i] * north[1];
+    const tz = ax[i] * east[2] + ay[i] * north[2];
+    pole[i * 3] = up[1] * tz - up[2] * ty;
+    pole[i * 3 + 1] = up[2] * tx - up[0] * tz;
+    pole[i * 3 + 2] = up[0] * ty - up[1] * tx;
+  }
+  const noise = new Noise3(ctx.rng('continent-noise').nextU32());
+  const kn = g.radiusM / 1000 / 260;
+  const cost = new Float32Array(N);
+  for (let c = 0; c < N; c++) cost[c] = 1 + 2.5 * (0.5 + 0.5 * noise.fbm3(p[c * 3] * kn, p[c * 3 + 1] * kn, p[c * 3 + 2] * kn, 5));
+
+  const label = new Int32Array(N).fill(-1);
+  const bs = Math.max(2, Math.round(CONTINENT_GAP_KM / 3 / cellKm));
+  let b = 1;
+  while (b * 2 <= bs && g.n % (b * 2) === 0) b *= 2;
+  const bg = blockGrid(g, b) as CubeGrid;
+  const near = blockWindows(bg, 3);
+  const blockOwner = new Int32Array(bg.cells).fill(-1);
+  const area = new Float64Array(count);
+  const heap = new MinHeap(g.n * 24);
+  for (let i = 0; i < count; i++) heap.push(0, seeds[i] * 16 + i);
+  const blockOf = (c: number): number => cellIndex(bg, Math.floor(cellX(g, c) / b), Math.floor(cellY(g, c) / b), cellFace(g, c));
+  while (heap.size > 0) {
+    const d = heap.peekKey();
+    const v = heap.pop();
+    const c = v >> 4;
+    const L = v & 15;
+    if (label[c] !== -1 || area[L] >= target[L]) continue;
+    const blk = blockOf(c);
+    let taken = false;
+    for (let t = near.start[blk]; t < near.start[blk + 1] && !taken; t++) {
+      const o = blockOwner[near.list[t]];
+      taken = o !== -1 && o !== L;
+    }
+    if (taken) continue;
+    label[c] = L;
+    if (blockOwner[blk] === -1) blockOwner[blk] = L;
+    area[L] += g.area(c);
+    for (let k = 0; k < 8; k++) {
+      const nc = g.nbr(c, k);
+      if (nc < 0 || label[nc] !== -1) continue;
+      const dx = p[nc * 3] - p[c * 3];
+      const dy = p[nc * 3 + 1] - p[c * 3 + 1];
+      const dz = p[nc * 3 + 2] - p[c * 3 + 2];
+      const len = Math.hypot(dx, dy, dz) || 1;
+      const across = Math.abs(dx * pole[L * 3] + dy * pole[L * 3 + 1] + dz * pole[L * 3 + 2]) / len;
+      const dl = g.dist(c, k) / g.cellM;
+      heap.push(d + dl * 0.5 * (cost[c] + cost[nc]) * (1 + stretch[L] * across), nc * 16 + L);
+    }
+  }
+  return label;
+}
+
+/** Per cell of a cube grid, the cells within `r` steps (Chebyshev rings across seams), as CSR. */
+function blockWindows(g: CubeGrid, r: number): { start: Int32Array; list: Int32Array } {
+  const start = new Int32Array(g.cells + 1);
+  const list: number[] = [];
+  const seen = new Map<number, number>();
+  for (let c = 0; c < g.cells; c++) {
+    seen.clear();
+    seen.set(c, 0);
+    let ring = [c];
+    for (let s = 1; s <= r; s++) {
+      const next: number[] = [];
+      for (const i of ring) {
+        for (let k = 0; k < 8; k++) {
+          const j = g.nbr(i, k);
+          if (j >= 0 && !seen.has(j)) {
+            seen.set(j, s);
+            next.push(j);
+          }
+        }
+      }
+      ring = next;
+    }
+    for (const j of seen.keys()) list.push(j);
+    start[c + 1] = list.length;
+  }
+  return { start, list: Int32Array.from(list) };
 }
 
 function nearOtherContinent(owner: Int32Array, bg: Grid, bx: number, by: number, L: number): boolean {
@@ -337,18 +476,21 @@ function boundaryFrame(plate: Int32Array, continent: Int32Array, g: Grid): Frame
       if (j >= 0 && plate[j] !== p) q = plate[j];
     }
     if (q === -1) continue;
-    // Normal from this plate toward q: mean offset of q's cells in a 5×5 window.
+    // Normal from this plate toward q: mean offset of q's cells in a 5×5 window (sphere: a disk of
+    // 2.5 cells, offsets east / north in cells).
     let sx = 0;
     let sy = 0;
     let cont = 0;
     let cnt = 0;
-    forWindow(g, c, 2, (j, dx, dy) => {
+    const add = (j: number, dx: number, dy: number): void => {
       if (plate[j] !== q) return;
       sx += dx;
       sy += dy;
       cnt++;
       if (continent[j] !== -1) cont++;
-    });
+    };
+    if (g.shape === 'sphere') g.chart(g.point(c), 2.5 * g.cellM, (j, e, nn) => add(j, e / g.cellM, nn / g.cellM));
+    else forWindow(g, c, 2, add);
     const len = Math.hypot(sx, sy) || 1;
     cells.push(c);
     other.push(q);
@@ -365,14 +507,16 @@ function boundaryFrame(plate: Int32Array, continent: Int32Array, g: Grid): Frame
     const c = cells[i];
     const lo = Math.min(plate[c], other[i]);
     const hi = Math.max(plate[c], other[i]);
-    forWindow(g, c, 3, (cj) => {
+    const visit = (cj: number): void => {
       const j = index[cj];
       if (j < 0) return;
       const a = plate[cells[j]];
       const b = other[j];
       if (Math.min(a, b) !== lo || Math.max(a, b) !== hi) return;
       near.push(j);
-    });
+    };
+    if (g.shape === 'sphere') g.chart(g.point(c), 3.5 * g.cellM, visit);
+    else forWindow(g, c, 3, visit);
     nearStart[i + 1] = near.length;
   }
   return {
@@ -391,6 +535,8 @@ interface Motion {
   tx: Float64Array;
   ty: Float64Array;
   omega: Float64Array;
+  /** Sphere: Euler pole per plate (3 per plate), |ω| = surface speed at 90° in mm/yr. */
+  pole?: Float64Array;
 }
 
 /** Rigid plate motion: translation of 1–8 cm/yr scaled by activity, plus a small rotation. */
@@ -409,21 +555,36 @@ function randomMotion(rng: Rng, count: number, major: number, area: Float64Array
   return { tx, ty, omega };
 }
 
-interface Classified {
-  bClass: Uint8Array;
-  bSeg: Int32Array;
-  segments: Segment[];
-  ranges: number;
-  rifts: number;
-  score: number;
-  motion: Motion;
+/**
+ * Rigid motion on the sphere (research 10 §5.1): every plate rotates about its own Euler pole, uniform
+ * on the sphere, at 1–8 cm/yr at 90° from the pole (scaled by activity, microplates a little faster).
+ */
+function eulerMotion(rng: Rng, count: number, major: number, activity: number): Motion {
+  const pole = new Float64Array(count * 3);
+  for (let p = 0; p < count; p++) {
+    const speed = (10 + 70 * activity) * rng.range(0.4, 1.0) * (p < major ? 1 : 1.3);
+    let x = gaussian(rng);
+    let y = gaussian(rng);
+    let z = gaussian(rng);
+    const len = Math.hypot(x, y, z) || 1;
+    x /= len;
+    y /= len;
+    z /= len;
+    pole[p * 3] = x * speed;
+    pole[p * 3 + 1] = y * speed;
+    pole[p * 3 + 2] = z * speed;
+  }
+  return { tx: new Float64Array(count), ty: new Float64Array(count), omega: new Float64Array(count), pole };
 }
 
-function classify(
-  f: Frame, plate: Int32Array, continent: Int32Array, g: Grid,
-  cx: Float64Array, cy: Float64Array, m: Motion, rng: Rng,
-): Omit<Classified, 'score' | 'motion'> {
-  const { cells: N, cellKm, off8Axial: off, axialToRaster, border } = g;
+/** Convergence (mm/yr, + = converging) and shear speed at every boundary cell, before smoothing. */
+interface Rates {
+  conv: Float64Array;
+  shear: Float64Array;
+}
+
+function planarRates(f: Frame, plate: Int32Array, g: Grid, cx: Float64Array, cy: Float64Array, m: Motion): Rates {
+  const { cellKm } = g;
   const nb = f.cells.length;
   const conv = new Float64Array(nb);
   const shear = new Float64Array(nb);
@@ -442,6 +603,53 @@ function classify(
     conv[i] = -(rx * f.nx[i] + ry * f.ny[i]);
     shear[i] = Math.abs(rx * f.ny[i] - ry * f.nx[i]);
   }
+  return { conv, shear };
+}
+
+/** Sphere: relative surface velocity (ω_q − ω_p) × p in the local east / north frame of the boundary normal. */
+function eulerRates(f: Frame, plate: Int32Array, g: CubeGrid, m: Motion): Rates {
+  const w = m.pole!;
+  const nb = f.cells.length;
+  const conv = new Float64Array(nb);
+  const shear = new Float64Array(nb);
+  const up = new Float64Array(3);
+  const east = new Float64Array(3);
+  const north = new Float64Array(3);
+  for (let i = 0; i < nb; i++) {
+    const c = f.cells[i];
+    g.frame(c, east, north, up);
+    const p = plate[c] * 3;
+    const q = f.other[i] * 3;
+    const ox = w[q] - w[p];
+    const oy = w[q + 1] - w[p + 1];
+    const oz = w[q + 2] - w[p + 2];
+    const vx = oy * up[2] - oz * up[1];
+    const vy = oz * up[0] - ox * up[2];
+    const vz = ox * up[1] - oy * up[0];
+    const rx = vx * east[0] + vy * east[1] + vz * east[2];
+    const ry = vx * north[0] + vy * north[1] + vz * north[2];
+    conv[i] = -(rx * f.nx[i] + ry * f.ny[i]);
+    shear[i] = Math.abs(rx * f.ny[i] - ry * f.nx[i]);
+  }
+  return { conv, shear };
+}
+
+interface Classified {
+  bClass: Uint8Array;
+  bSeg: Int32Array;
+  segments: Segment[];
+  ranges: number;
+  rifts: number;
+  score: number;
+  motion: Motion;
+}
+
+function classify(
+  f: Frame, plate: Int32Array, continent: Int32Array, g: Grid, rates: Rates, rng: Rng,
+): Omit<Classified, 'score' | 'motion'> {
+  const { cells: N, cellKm, off8Axial: off, axialToRaster, border } = g;
+  const nb = f.cells.length;
+  const { conv, shear } = rates;
   const { index, nearStart, near } = f;
   // Smooth along the boundary so classes don't flicker between neighbouring cells.
   const sConv = new Float64Array(nb);
@@ -518,6 +726,34 @@ function classify(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────────────────
+
+/** Best-candidate sampling of `count` well-spaced cells on the sphere (area-uniform candidates). */
+function spacedCells(rng: Rng, count: number, g: CubeGrid): Int32Array {
+  const pts = new Float64Array(count * 3);
+  const out = new Int32Array(count);
+  for (let i = 0; i < count; i++) {
+    let best = -1;
+    for (let k = 0; k < 12; k++) {
+      let x = gaussian(rng);
+      let y = gaussian(rng);
+      let z = gaussian(rng);
+      const len = Math.hypot(x, y, z) || 1;
+      x /= len;
+      y /= len;
+      z /= len;
+      let dmin = Infinity;
+      for (let j = 0; j < i; j++) dmin = Math.min(dmin, (x - pts[j * 3]) ** 2 + (y - pts[j * 3 + 1]) ** 2 + (z - pts[j * 3 + 2]) ** 2);
+      if (dmin > best) {
+        best = dmin;
+        pts[i * 3] = x;
+        pts[i * 3 + 1] = y;
+        pts[i * 3 + 2] = z;
+      }
+    }
+    out[i] = cellOfDir(g, pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]);
+  }
+  return out;
+}
 
 /** Best-candidate sampling of `count` well-spaced points in [margin, 1 − margin]². */
 function spacedPoints(rng: Rng, count: number, margin: number): { xs: Float64Array; ys: Float64Array } {

@@ -324,6 +324,11 @@ export function cellY(g: Grid, i: number): number {
   return (f - (f % g.n)) / g.n;
 }
 
+/** Face of cell i (0 on flat maps). */
+export function cellFace(g: Grid, i: number): number {
+  return Math.floor(i / (g.n * g.n));
+}
+
 /** Cell at face-local column x, row y of face `face` (no bounds check). */
 export function cellIndex(g: Grid, x: number, y: number, face = 0): number {
   return face * g.n * g.n + y * g.n + x;

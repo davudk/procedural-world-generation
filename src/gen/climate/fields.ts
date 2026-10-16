@@ -1,19 +1,43 @@
 import type { Noise2 } from '../../shared/noise';
-import { cellIndex, type Grid } from '../grid/grid';
+import type { Noise3 } from '../../shared/noise3';
+import { asCube, unitPositions, type CubeGrid } from '../grid/cube';
+import { cellIndex, coarser, type Grid } from '../grid/grid';
+import { upsample } from '../grid/smooth';
 
 /**
  * fBm sampled on a coarse lattice (step = wavelength / perWave) and bilinearly interpolated onto the
  * grid. The climate noises are all ≥ 20 km features, so this costs a few thousand noise calls
- * instead of n² per field.
+ * instead of n² per field. On the sphere (Noise3) the lattice is the coarsest cube grid whose cells
+ * are no larger than the step, sampled at unit·R.
  */
 export function coarseFbm(
-  noise: Noise2,
+  noise: Noise2 | Noise3,
   g: Grid,
   wavelengthKm: number,
   octaves: number,
   offset: number,
   perWave = 8,
 ): Float32Array {
+  if (g.shape === 'sphere') return coarseFbmCube(noise as Noise3, asCube(g), wavelengthKm, octaves, offset, perWave);
+  return coarseFbmFlat(noise as Noise2, g, wavelengthKm, octaves, offset, perWave);
+}
+
+function coarseFbmCube(noise: Noise3, g: CubeGrid, wavelengthKm: number, octaves: number, offset: number, perWave: number): Float32Array {
+  const stepKm = Math.max(g.cellKm, wavelengthKm / perWave);
+  let f = 1;
+  while (f * 2 * g.cellKm <= stepKm && g.n % (f * 2) === 0 && g.n / (f * 2) >= 4) f *= 2;
+  const cg = coarser(g, f) as CubeGrid;
+  const p = unitPositions(cg);
+  const k = cg.radiusM / 1000 / wavelengthKm;
+  const c = new Float32Array(cg.cells);
+  for (let i = 0; i < cg.cells; i++) c[i] = noise.fbm3(p[i * 3] * k + offset, p[i * 3 + 1] * k - offset, p[i * 3 + 2] * k + offset, octaves);
+  if (f === 1) return c;
+  const out = new Float32Array(g.cells);
+  upsample(c, cg, f, out);
+  return out;
+}
+
+function coarseFbmFlat(noise: Noise2, g: Grid, wavelengthKm: number, octaves: number, offset: number, perWave: number): Float32Array {
   const { n, cellKm } = g;
   const stepKm = Math.max(cellKm, wavelengthKm / perWave);
   const m = Math.ceil((n * cellKm) / stepKm) + 2;

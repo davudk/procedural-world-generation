@@ -1,13 +1,15 @@
 import { Noise2 } from '../../shared/noise';
+import { Noise3, planarNoise, type SurfaceNoise } from '../../shared/noise3';
 import type { Layer } from '../../shared/protocol';
 import type { Rng } from '../../shared/rng';
+import { angle, asCube, cellOfDir, unitPositions } from '../grid/cube';
 import { signedDistance } from '../grid/distance';
 import { cellIndex, cellX, cellY, edgeCells, forWindow, type Grid } from '../grid/grid';
-import { boxBlur, quantile, smoothstep } from '../grid/ops';
+import { areaQuantile, boxBlur, quantile, smoothstep } from '../grid/ops';
 import { cellAt } from '../grid/sample';
 import { upliftForPeak } from '../lem/streamPower';
 import type { StageDef } from '../pipeline';
-import { B, type PlatesExtra, type Segment } from './plates';
+import { B, shapeHeader, type PlatesExtra, type Segment } from './plates';
 
 /** Bedrock erodibility (research 01 §3.5), m^0.2/yr for m = 0.4. */
 export const K0 = 1e-5;
@@ -77,39 +79,76 @@ export const baseStage: StageDef = {
   inputs: ['plates'],
   reads: [
     'worldSize', 'landFraction', 'lemGrid', 'coastRoughness', 'islandAbundance', 'peakHeight', 'rangeWidth', 'rangeLength',
-    'plateauChance', 'geologicAge', 'strataShare',
+    'plateauChance', 'geologicAge', 'strataShare', 'worldShape', 'faceGrid',
   ],
   async run(ctx) {
     const P = ctx.input('plates').extra as PlatesExtra;
-    const n = ctx.mode === 'preview' ? 256 : Number(ctx.str('lemGrid'));
-    const worldKm = ctx.num('worldSize');
-    const cellKm = worldKm / n;
-    const cellM = cellKm * 1000;
-    const N = n * n;
+    const sphere = ctx.str('worldShape') === 'sphere';
+    // Sphere: the erosion grid has half the macro face size (6 × 128² in previews).
+    const n = sphere ? (ctx.mode === 'preview' ? 128 : Number(ctx.str('faceGrid')) / 2) : ctx.mode === 'preview' ? 256 : Number(ctx.str('lemGrid'));
     const g = ctx.grid(n);
+    const worldKm = ctx.num('worldSize');
+    const cellKm = sphere ? g.cellKm : worldKm / n;
+    const cellM = cellKm * 1000;
+    const N = g.cells;
     const pg = ctx.grid(P.n);
-    const noise = new Noise2(ctx.rng('noise').nextU32());
-    const warpN = new Noise2(ctx.rng('warp').nextU32());
-    const coastN = new Noise2(ctx.rng('coast').nextU32());
-    const segN = new Noise2(ctx.rng('segments').nextU32());
+    // Planar noise on flat maps (bit-identical to Noise2), 3D noise at the surface position on the sphere.
+    const surfaceNoise = (seed: number): SurfaceNoise => (sphere ? new Noise3(seed) : planarNoise(new Noise2(seed)));
+    const noise = surfaceNoise(ctx.rng('noise').nextU32());
+    const warpN = surfaceNoise(ctx.rng('warp').nextU32());
+    const coastN = surfaceNoise(ctx.rng('coast').nextU32());
+    const segN = surfaceNoise(ctx.rng('segments').nextU32());
+    // Surface position in km of every cell: map x / y (z = 0) on flat, unit vector × R on the sphere.
+    const P3 = sphere ? unitPositions(asCube(g)) : null;
+    const Rk = g.radiusM / 1000;
+    const posKm = (i: number, out: Float64Array): void => {
+      if (P3) {
+        out[0] = P3[i * 3] * Rk;
+        out[1] = P3[i * 3 + 1] * Rk;
+        out[2] = P3[i * 3 + 2] * Rk;
+      } else {
+        out[0] = (cellX(g, i) + 0.5) * cellKm;
+        out[1] = (cellY(g, i) + 0.5) * cellKm;
+        out[2] = 0;
+      }
+    };
+    const w3 = new Float64Array(3);
 
     // Warped lookup into the plate grid, so coasts and ranges don't trace the coarse grid.
     const pcell = new Int32Array(N);
     const wxs = new Float32Array(N);
     const wys = new Float32Array(N);
+    const wzs = sphere ? new Float32Array(N) : wxs;
     const cont = new Uint8Array(N);
-    for (let y = 0; y < n; y++) {
-      for (let x = 0; x < n; x++) {
-        const i = cellIndex(g, x, y);
-        const wx = (x + 0.5) * cellKm;
-        const wy = (y + 0.5) * cellKm;
-        const qx = wx + 30 * warpN.fbm(wx / 220, wy / 220, 3);
-        const qy = wy + 30 * warpN.fbm(wx / 220 + 19.1, wy / 220 - 7.3, 3);
+    if (sphere) {
+      const pc3 = asCube(pg);
+      for (let i = 0; i < N; i++) {
+        posKm(i, w3);
+        const [wx, wy, wz] = w3;
+        const qx = wx + 30 * warpN.fbm3(wx / 220, wy / 220, wz / 220, 3);
+        const qy = wy + 30 * warpN.fbm3(wx / 220 + 19.1, wy / 220 - 7.3, wz / 220 + 4.2, 3);
+        const qz = wz + 30 * warpN.fbm3(wx / 220 - 11.7, wy / 220 + 5.5, wz / 220 - 9.9, 3);
         wxs[i] = qx;
         wys[i] = qy;
-        const pc = cellAt(pg, qx / worldKm, qy / worldKm);
+        wzs[i] = qz;
+        const pc = cellOfDir(pc3, qx, qy, qz);
         pcell[i] = pc;
         cont[i] = P.continent[pc] !== -1 ? 1 : 0;
+      }
+    } else {
+      for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) {
+          const i = cellIndex(g, x, y);
+          const wx = (x + 0.5) * cellKm;
+          const wy = (y + 0.5) * cellKm;
+          const qx = wx + 30 * warpN.fbm3(wx / 220, wy / 220, 0, 3);
+          const qy = wy + 30 * warpN.fbm3(wx / 220 + 19.1, wy / 220 - 7.3, 0, 3);
+          wxs[i] = qx;
+          wys[i] = qy;
+          const pc = cellAt(pg, qx / worldKm, qy / worldKm);
+          pcell[i] = pc;
+          cont[i] = P.continent[pc] !== -1 ? 1 : 0;
+        }
       }
     }
     await ctx.checkpoint();
@@ -127,7 +166,7 @@ export const baseStage: StageDef = {
     const islands = ctx.num('islandAbundance');
     const age = ctx.num('geologicAge');
     const strataShare = ctx.num('strataShare');
-    const strataCut = quantileOfNoise(ctx.rng('strata-q'), 1 - strataShare);
+    const strataCut = quantileOfNoise(ctx.rng('strata-q'), 1 - strataShare, sphere);
 
     const h0 = new Float32Array(N);
     const U = new Float32Array(N);
@@ -138,25 +177,36 @@ export const baseStage: StageDef = {
     const uOro = new Float32Array(N);
     const uBg = upliftForPeak(400 + 900 * (1 - age), K0, LEM_M, 30_000, cellM);
 
-    for (let y = 0; y < n; y++) {
-      for (let x = 0; x < n; x++) {
-        const i = cellIndex(g, x, y);
-        const wx = (x + 0.5) * cellKm;
-        const wy = (y + 0.5) * cellKm;
+    const PB = sphere ? unitPositions(asCube(pg)) : null;
+    const q3 = new Float64Array(3);
+    for (let i = 0; i < N; i++) {
+      {
+        posKm(i, w3);
+        const wx = w3[0];
+        const wy = w3[1];
+        const wz = w3[2];
         // Coast field (km, + inland): warped distance + fractal noise + ridged peninsulas near the coast.
         const s = sdf[i] * cellKm;
         const near = 1 - smoothstep(60, 180, Math.abs(s));
         const coast =
           s +
-          45 * coastN.fbm(wx / 200 + 0.6 * coastN.fbm(wx / 500, wy / 500, 2), wy / 200, 6, 2, gain) +
-          55 * near * islands * (coastN.ridged(wx / 260 + 31, wy / 260 - 11, 3) - 0.45);
+          45 * coastN.fbm3(wx / 200 + 0.6 * coastN.fbm3(wx / 500, wy / 500, wz / 500, 2), wy / 200, wz / 200, 6, 2, gain) +
+          55 * near * islands * (coastN.ridged3(wx / 260 + 31, wy / 260 - 11, wz / 260 + 7, 3) - 0.45);
 
-        // Nearest plate boundary.
+        // Nearest plate boundary (sphere: great-circle distance from the warped point).
         const pc = pcell[i];
         const nb = P.nearest[pc];
-        const bx = (cellX(pg, nb) + 0.5) * P.cellKm;
-        const by = (cellY(pg, nb) + 0.5) * P.cellKm;
-        const dB = Math.hypot(wxs[i] - bx, wys[i] - by);
+        let dB: number;
+        if (PB) {
+          q3[0] = wxs[i];
+          q3[1] = wys[i];
+          q3[2] = wzs[i];
+          dB = Rk * angle(q3, PB.subarray(nb * 3, nb * 3 + 3));
+        } else {
+          const bx = (cellX(pg, nb) + 0.5) * P.cellKm;
+          const by = (cellY(pg, nb) + 0.5) * P.cellKm;
+          dB = Math.hypot(wxs[i] - bx, wys[i] - by);
+        }
         const cls = P.bClass[nb];
         const segId = P.bSeg[nb];
         const seg = segId >= 0 ? P.segments[segId] : null;
@@ -165,16 +215,17 @@ export const baseStage: StageDef = {
         const ownCont = cont[i] === 1;
         const activeMargin = seg !== null && dB < 400 && (cls === B.SUBDUCTION || cls === B.ARC || cls === B.COLLISION);
 
-        let h = coast >= 0 ? landBase(coast, noise, wx, wy) : oceanProfile(-coast, activeMargin ? 25 : 75, noise, wx, wy);
+        let h = coast >= 0 ? landBase(coast, noise, wx, wy, wz) : oceanProfile(-coast, activeMargin ? 25 : 75, noise, wx, wy, wz);
         // Background hills are patchy: about a third of the land stays as quiet lowland plains.
-        const hilly = 0.25 + 0.75 * smoothstep(-0.15, 0.25, noise.fbm(wx / 420 + 13, wy / 420 - 5, 3));
-        let u = coast >= 0 ? uBg * hilly * (0.4 + 0.6 * (0.5 + 0.5 * noise.fbm(wx / 120, wy / 120, 3))) : 0;
+        const hilly = 0.25 + 0.75 * smoothstep(-0.15, 0.25, noise.fbm3(wx / 420 + 13, wy / 420 - 5, wz / 420 + 3, 3));
+        let u = coast >= 0 ? uBg * hilly * (0.4 + 0.6 * (0.5 + 0.5 * noise.fbm3(wx / 120, wy / 120, wz / 120, 3))) : 0;
         const uBack = u;
         let lith = 1;
 
         if (seg && sp) {
-          const along = ALONG_FLOOR + (1 - ALONG_FLOOR) * segN.ridged(wx / segWavelength + sp.phase, wy / segWavelength - sp.phase, 3);
-          const gap = smoothstep(GAP_START, -0.15, segN.fbm(wx / (segWavelength * 2) - sp.phase, wy / (segWavelength * 2), 2));
+          const along =
+            ALONG_FLOOR + (1 - ALONG_FLOOR) * segN.ridged3(wx / segWavelength + sp.phase, wy / segWavelength - sp.phase, wz / segWavelength + 0.5 * sp.phase, 3);
+          const gap = smoothstep(GAP_START, -0.15, segN.fbm3(wx / (segWavelength * 2) - sp.phase, wy / (segWavelength * 2), wz / (segWavelength * 2) + sp.phase, 2));
           const convK = Math.min(1.3, Math.max(CONV_FLOOR, Math.abs(seg.conv) / 40));
           const U0 = OROGEN_GAIN * upliftForPeak(sp.peak, K0, LEM_M, sp.halfWidthKm * 1000, cellM) * convK * along * gap;
           const w = sp.halfWidthKm;
@@ -212,11 +263,13 @@ export const baseStage: StageDef = {
         }
 
         // Lithology: provinces, old cratons, hard intrusions (inselbergs), layered rock.
-        lith *= Math.exp(0.45 * noise.fbm(wx / 300 + 51, wy / 300 - 23, 3));
+        lith *= Math.exp(0.45 * noise.fbm3(wx / 300 + 51, wy / 300 - 23, wz / 300 + 17, 3));
         if (coast > 0 && dB > 450) lith *= 0.6;
-        const hard = noise.ridged(wx / 45 - 77, wy / 45 + 13, 2);
+        const hard = noise.ridged3(wx / 45 - 77, wy / 45 + 13, wz / 45 - 31, 2);
         if (hard > 0.93 - 0.05 * age) lith *= 0.15;
-        if (noise.fbm(wx / 350 - 140, wy / 350 + 90, 3) > strataCut && coast > 30) strata[i] = 120 + 120 * (0.5 + 0.5 * noise.fbm(wx / 90, wy / 90, 2));
+        if (noise.fbm3(wx / 350 - 140, wy / 350 + 90, wz / 350 + 60, 3) > strataCut && coast > 30) {
+          strata[i] = 120 + 120 * (0.5 + 0.5 * noise.fbm3(wx / 90, wy / 90, wz / 90, 2));
+        }
 
         h0[i] = h;
         coastA[i] = coast;
@@ -225,7 +278,7 @@ export const baseStage: StageDef = {
         U[i] = u;
         K[i] = K0 * lith;
       }
-      if ((y & 31) === 0) await ctx.checkpoint();
+      if ((i & 16383) === 16383) await ctx.checkpoint();
     }
 
     // Intraplate swells (Colorado / East African / Iranian plateaus): broad highlands that need no
@@ -237,13 +290,11 @@ export const baseStage: StageDef = {
     if (swellShare > 0 && uSwell > 0) {
       const sv = new Float32Array(N).fill(-Infinity);
       const inland: number[] = [];
-      for (let y = 0; y < n; y++) {
-        for (let x = 0; x < n; x++) {
-          const i = cellIndex(g, x, y);
-          if (coastA[i] <= 30) continue;
-          sv[i] = noise.fbm(((x + 0.5) * cellKm) / SWELL_KM + 211, ((y + 0.5) * cellKm) / SWELL_KM - 97, 3);
-          if (coastA[i] > 150) inland.push(sv[i]);
-        }
+      for (let i = 0; i < N; i++) {
+        if (coastA[i] <= 30) continue;
+        posKm(i, w3);
+        sv[i] = noise.fbm3(w3[0] / SWELL_KM + 211, w3[1] / SWELL_KM - 97, w3[2] / SWELL_KM + 41, 3);
+        if (coastA[i] > 150) inland.push(sv[i]);
       }
       // Small worlds may have no land far enough inland: then there are no swells (and no NaN cut).
       const cut = inland.length ? quantile(Float32Array.from(inland), 1 - swellShare) : Infinity;
@@ -251,7 +302,8 @@ export const baseStage: StageDef = {
         if (sv[i] === -Infinity) continue;
         const sw = smoothstep(cut - 0.1, cut + 0.1, sv[i]);
         if (!(sw > 0)) continue;
-        const k = sw * smoothstep(30, 150, coastA[i]) * (0.75 + 0.25 * noise.fbm((cellX(g, i) + 0.5) * cellKm / 90 - 3, (cellY(g, i) + 0.5) * cellKm / 90 + 8, 2));
+        posKm(i, w3);
+        const k = sw * smoothstep(30, 150, coastA[i]) * (0.75 + 0.25 * noise.fbm3(w3[0] / 90 - 3, w3[1] / 90 + 8, w3[2] / 90 - 5, 2));
         U[i] += uSwell * k;
       }
     }
@@ -267,7 +319,8 @@ export const baseStage: StageDef = {
     // Uplift ends abruptly where a boundary segment ends; a blur tapers range ends naturally.
     boxBlur(U, g, Math.max(1, Math.round(10 / cellKm)), 2);
 
-    const sea = quantile(h0, 1 - ctx.num('landFraction'));
+    // Area-weighted on the sphere (cells differ by up to √2 in area); plain quantile on flat maps.
+    const sea = areaQuantile(h0, g, 1 - ctx.num('landFraction'));
     // King massif (research 05 §3.6: highest summit ≥ 1.5 × the 95th-percentile peak): one uplift
     // cone with a uniform crystalline core, preferably on the strongest orogen well inland, standing
     // clear above every other range. Placed after sea level is known, so the whole cone is on land.
@@ -276,13 +329,14 @@ export const baseStage: StageDef = {
       const rCells = king.rKm / cellKm;
       const r0 = Math.ceil(rCells);
       const uKing = OROGEN_GAIN * upliftForPeak(Math.min(KING_MAX_M, KING_REL * ctx.range('peakHeight')[1]), K0, LEM_M, king.rKm * 1000, cellM);
-      forWindow(g, king.c, r0, (i, dx, dy) => {
-        const t = Math.hypot(dx, dy) / rCells;
+      const cone = (i: number, t: number): void => {
         if (t >= 1) return;
         U[i] = Math.max(U[i], uKing * (1 - t * t) ** KING_SHAPE);
         K[i] = K0;
         strata[i] = 0;
-      });
+      };
+      if (sphere) g.chart(g.point(king.c), king.rKm * 1000, (i, e, nn) => cone(i, Math.hypot(e, nn) / (king.rKm * 1000)));
+      else forWindow(g, king.c, r0, (i, dx, dy) => cone(i, Math.hypot(dx, dy) / rCells));
     }
     let lo = Infinity;
     let hi = -Infinity;
@@ -298,10 +352,11 @@ export const baseStage: StageDef = {
     const Klog = new Float32Array(N);
     for (let i = 0; i < N; i++) Klog[i] = Math.log10(K[i]);
 
+    const sh = shapeHeader(g);
     const layers: Layer[] = [
-      { id: 'h0', label: 'Initial elevation', stage: 'base', kind: 'elevation', w: n, h: n, worldKm, unit: 'm', min: lo, max: hi, data: h0 },
-      { id: 'uplift', label: 'Uplift', stage: 'base', kind: 'scalar', w: n, h: n, worldKm, unit: 'mm/yr', min: 0, max: uMax * 1000, data: Umm },
-      { id: 'erodibility', label: 'Erodibility (log10 K)', stage: 'base', kind: 'scalar', w: n, h: n, worldKm, unit: '', min: -6.5, max: -4.3, data: Klog },
+      { id: 'h0', label: 'Initial elevation', stage: 'base', kind: 'elevation', w: n, h: n, worldKm, ...sh, unit: 'm', min: lo, max: hi, data: h0 },
+      { id: 'uplift', label: 'Uplift', stage: 'base', kind: 'scalar', w: n, h: n, worldKm, ...sh, unit: 'mm/yr', min: 0, max: uMax * 1000, data: Umm },
+      { id: 'erodibility', label: 'Erodibility (log10 K)', stage: 'base', kind: 'scalar', w: n, h: n, worldKm, ...sh, unit: '', min: -6.5, max: -4.3, data: Klog },
     ];
     const extra: BaseExtra = { n, cellKm, h0, U, K, strata };
     return { layers, stats: { maxUpliftMmYr: uMax * 1000, seaLevelShift: sea, beltShare, beltMul, kingRadiusKm: king ? king.rKm : 0, kingCell: king ? king.c : -1 }, outcomes: {}, extra };
@@ -322,20 +377,23 @@ function segProps(rng: Rng, s: Segment, ctx: { range(id: string): readonly [numb
 }
 
 /** Land base: low plains rising gently inland, with rolling noise. */
-function landBase(s: number, noise: Noise2, wx: number, wy: number): number {
+function landBase(s: number, noise: SurfaceNoise, wx: number, wy: number, wz: number): number {
   // The last term is small-scale roughness: on low-uplift plains the erosion model otherwise routes
   // water over a near-planar surface and D8 cuts straight, parallel, axis-aligned channels.
-  return 120 + 380 * smoothstep(0, 320, s) + 220 * noise.fbm(wx / 160, wy / 160, 4) + 35 * noise.fbm(wx / 14 + 71, wy / 14 - 29, 3);
+  return (
+    120 + 380 * smoothstep(0, 320, s) + 220 * noise.fbm3(wx / 160, wy / 160, wz / 160, 4) +
+    35 * noise.fbm3(wx / 14 + 71, wy / 14 - 29, wz / 14 + 13, 3)
+  );
 }
 
 /** Ocean profile by distance from the coast (research 01 §1.4). */
-function oceanProfile(d: number, shelfKm: number, noise: Noise2, wx: number, wy: number): number {
+function oceanProfile(d: number, shelfKm: number, noise: SurfaceNoise, wx: number, wy: number, wz: number): number {
   let h: number;
   if (d < shelfKm) h = -130 * (d / shelfKm) ** 0.7;
   else if (d < shelfKm + 60) h = -130 - 2870 * smoothstep(0, 1, (d - shelfKm) / 60);
   else if (d < shelfKm + 260) h = -3000 - 1500 * ((d - shelfKm - 60) / 200);
-  else h = -4500 - 500 * (0.5 + 0.5 * noise.fbm(wx / 400, wy / 400, 2));
-  return h + 120 * noise.fbm(wx / 35, wy / 35, 3) * smoothstep(shelfKm, shelfKm + 100, d);
+  else h = -4500 - 500 * (0.5 + 0.5 * noise.fbm3(wx / 400, wy / 400, wz / 400, 2));
+  return h + 120 * noise.fbm3(wx / 35, wy / 35, wz / 35, 3) * smoothstep(shelfKm, shelfKm + 100, d);
 }
 
 /** Smooth compact bump: 1 at x = 0, 0 beyond |x| ≥ w. */
@@ -368,7 +426,11 @@ function placeKing(
     for (const c of cands.slice(0, 400)) {
       // The whole cone must fit on the map and stand on land.
       let dry = edgeCells(g, c) >= r0;
-      if (dry) {
+      if (dry && g.shape === 'sphere') {
+        g.chart(g.point(c), rKm * 1000, (j, e, nn) => {
+          if (Math.hypot(e, nn) < rKm * 1000 && h0[j] <= sea + 50) dry = false;
+        });
+      } else if (dry) {
         forWindow(g, c, r0, (j, dx, dy) => {
           if (Math.hypot(dx, dy) < rCells && h0[j] <= sea + 50) dry = false;
           return dry;
@@ -384,7 +446,7 @@ function placeKing(
 function beltCoreShare(P: PlatesExtra, segs: readonly SegProps[]): number {
   let cont = 0;
   let core = 0;
-  for (let c = 0; c < P.n * P.n; c++) {
+  for (let c = 0; c < P.continent.length; c++) {
     if (P.continent[c] === -1) continue;
     cont++;
     const id = P.bSeg[P.nearest[c]];
@@ -408,10 +470,14 @@ function plateau(dB: number, w: number, len: number): number {
   return smoothstep(0.5 * w, w, dB) * (1 - smoothstep(w + len * 0.6, w + len, dB));
 }
 
-/** fBm value below which a fraction `q` of samples fall (estimated from random samples). */
-function quantileOfNoise(rng: Rng, q: number): number {
+/** fBm value below which a fraction `q` of samples fall (estimated from random samples of 2D or 3D noise). */
+function quantileOfNoise(rng: Rng, q: number, sphere: boolean): number {
   if (q >= 1) return Infinity;
   if (q <= 0) return -Infinity;
+  if (sphere) {
+    const nz = new Noise3(rng.nextU32());
+    return quantile(Float32Array.from({ length: 2048 }, () => nz.fbm3(rng.range(0, 64), rng.range(0, 64), rng.range(0, 64), 3)), q);
+  }
   const nz = new Noise2(rng.nextU32());
   const s = Float32Array.from({ length: 2048 }, () => nz.fbm(rng.range(0, 64), rng.range(0, 64), 3));
   return quantile(s, q);
