@@ -305,6 +305,13 @@ export function forWindow(g: Grid, c: number, r: number, visit: (j: number, dx: 
   }
 }
 
+/** Whether neighbouring cells i and j are diagonal neighbours (false for i === j). */
+export function isDiagonalStep(g: Grid, i: number, j: number): boolean {
+  if (g.shape !== 'flat') throw new Error('isDiagonalStep: only flat grids exist yet');
+  const d = Math.abs(j - i);
+  return d !== 0 && d !== 1 && d !== g.n;
+}
+
 /** Face-local column of cell i. */
 export function cellX(g: Grid, i: number): number {
   return (i % (g.n * g.n)) % g.n;

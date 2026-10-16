@@ -46,7 +46,7 @@ export const glacialStage: StageDef = {
     const g = ctx.num('glaciation');
     const grid = ctx.grid(n);
     const r = glaciate(
-      { grid, n, cellKm: t.cellKm, h: t.h, fixed: t.fixed, rcv: t.rcv, temp: cl.temp, tAmp: cl.tAmp, precip: cl.precip },
+      { grid, h: t.h, fixed: t.fixed, rcv: t.rcv, temp: cl.temp, tAmp: cl.tAmp, precip: cl.precip },
       { presentShift: 2 * (g - 1), pastShift: PAST_COOLING * g, fjords: ctx.bool('fjords') },
       ctx.rng('carve'),
     );
