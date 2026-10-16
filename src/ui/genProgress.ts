@@ -1,5 +1,5 @@
 import './genProgress.css';
-import type { StageId } from '../shared/config/types';
+import { SPHERE_STAGES, type StageId, type WorldShape } from '../shared/config/types';
 import type { GenMode } from '../shared/protocol';
 
 /** Pipeline order and names (mirrors `src/gen/stages/index.ts`; events override the labels). */
@@ -19,7 +19,8 @@ type StepState = 'pending' | 'running' | 'done' | 'cached';
 /**
  * Generation timeline under the top bar: one segment per pipeline stage, sized by its expected
  * duration (last measured run per mode), plus a short status ("Erosion · 4 of 11"). The running
- * segment fills over its expected time. The bar fades out shortly after the world is ready.
+ * segment fills over its expected time. The bar fades out shortly after the world is ready. Spherical
+ * worlds run only the stages that exist for them so far (SPHERE_STAGES); the others are hidden.
  */
 export class GenProgress {
   private readonly bar: HTMLElement;
@@ -29,6 +30,8 @@ export class GenProgress {
   private readonly state = new Map<StageId, StepState>();
   private readonly measured: Record<GenMode, Partial<Record<StageId, number>>> = { preview: {}, build: {} };
   private mode: GenMode = 'build';
+  private steps: readonly (readonly [StageId, string])[] = STEPS;
+  private shape: WorldShape = 'flat';
   private hideTimer = 0;
 
   constructor(statusHost: HTMLElement, barHost: HTMLElement) {
@@ -50,12 +53,16 @@ export class GenProgress {
     barHost.append(this.bar);
   }
 
-  start(mode: GenMode): void {
+  start(mode: GenMode, shape: WorldShape = 'flat'): void {
     this.mode = mode;
+    this.shape = shape;
+    this.steps = shape === 'sphere' ? STEPS.filter(([id]) => SPHERE_STAGES.includes(id)) : STEPS;
+    for (const [id, seg] of this.segs) seg.style.display = this.steps.some(([s]) => s === id) ? '' : 'none';
+    this.bar.setAttribute('aria-valuemax', String(this.steps.length));
     clearTimeout(this.hideTimer);
     this.bar.classList.remove('finished', 'failed');
     this.status.classList.remove('finished', 'failed');
-    for (const [id] of STEPS) this.state.set(id, 'pending');
+    for (const [id] of this.steps) this.state.set(id, 'pending');
     this.layout();
     this.render();
   }
@@ -77,7 +84,7 @@ export class GenProgress {
   }
 
   finish(): void {
-    for (const [id] of STEPS) if (this.state.get(id) !== 'cached') this.state.set(id, 'done');
+    for (const [id] of this.steps) if (this.state.get(id) !== 'cached') this.state.set(id, 'done');
     this.render();
     this.bar.classList.add('finished');
     this.status.classList.add('finished');
@@ -94,7 +101,7 @@ export class GenProgress {
   private layout(): void {
     const m = this.measured[this.mode];
     const scale = this.mode === 'preview' ? 0.25 : 1;
-    for (const [id] of STEPS) {
+    for (const [id] of this.steps) {
       const ms = m[id] ?? (DEFAULT_MS[id] ?? 100) * scale;
       const seg = this.segs.get(id)!;
       seg.style.flexGrow = String(Math.max(ms, 40));
@@ -106,7 +113,7 @@ export class GenProgress {
   private render(): void {
     let finished = 0;
     let running: StageId | null = null;
-    for (const [id] of STEPS) {
+    for (const [id] of this.steps) {
       const st = this.state.get(id) ?? 'pending';
       this.segs.get(id)!.className = `gen-seg ${st}`;
       if (st === 'done' || st === 'cached') finished++;
@@ -114,9 +121,11 @@ export class GenProgress {
     }
     this.bar.setAttribute('aria-valuenow', String(finished));
     this.status.classList.remove('faded');
-    const total = STEPS.length;
+    const total = this.steps.length;
     const what = this.mode === 'preview' ? 'Preview' : 'Building';
-    if (finished === total) this.status.textContent = this.mode === 'preview' ? 'Preview ready' : 'World ready';
+    // Spheres stop after climate for now; say so rather than implying the world is complete.
+    const later = this.shape === 'sphere' ? ' · later stages (rivers, biomes, landmarks) are not available on spheres yet' : '';
+    if (finished === total) this.status.textContent = (this.mode === 'preview' ? 'Preview ready' : 'World ready') + later;
     else if (running) this.status.textContent = `${what} · ${this.labels.get(running)} · ${finished + 1} of ${total}`;
     else this.status.textContent = `${what} · ${finished} of ${total}`;
   }

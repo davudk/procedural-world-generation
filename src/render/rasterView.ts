@@ -7,10 +7,11 @@ precision highp float;
 layout(location = 0) in vec2 a_pos;   // unit square
 uniform mat3 u_view;
 uniform float u_worldKm;
+uniform float u_aspect;              // height / width (1 for square maps, ½ for equirectangular globes)
 out vec2 v_uv;
 void main() {
   v_uv = a_pos;
-  vec3 c = u_view * vec3(a_pos * u_worldKm, 1.0);
+  vec3 c = u_view * vec3(a_pos * vec2(u_worldKm, u_worldKm * u_aspect), 1.0);
   gl_Position = vec4(c.xy, 0.0, 1.0);
 }`;
 
@@ -65,13 +66,21 @@ vec3 viridis(float t) {
   return c0 + t * (c1 + t * (c2 + t * (c3 + t * (c4 + t * (c5 + t * c6)))));
 }
 
+const vec4 BACKGROUND = vec4(0.035, 0.04, 0.05, 1.0);
+
 void main() {
   vec2 p = v_uv * vec2(u_size);
   if (u_mode == 1) {
-    o = vec4(categorical(floor(fetchC(ivec2(floor(p))) + 0.5)), 1.0);
+    float id = fetchC(ivec2(floor(p)));
+    // NaN marks cells outside the raster (the gaps of a cube-net projection).
+    o = isnan(id) ? BACKGROUND : vec4(categorical(floor(id + 0.5)), 1.0);
     return;
   }
   float h = heightAt(p);
+  if (isnan(h)) {
+    o = BACKGROUND;
+    return;
+  }
   if (u_mode == 2) {
     o = vec4(viridis((h - u_min) / max(1e-6, u_max - u_min)), 1.0);
     return;
@@ -82,7 +91,7 @@ void main() {
   float dy = (heightAt(p + vec2(0.0, e)) - heightAt(p - vec2(0.0, e))) / (2.0 * e * u_cellM);
   vec3 n = normalize(vec3(-dx * u_exag, -dy * u_exag, 1.0));
   vec3 L = normalize(vec3(-0.6, -0.6, 0.75));
-  float shade = clamp(dot(n, L) / L.z, 0.0, 1.6);
+  float shade = isnan(dx + dy) ? 1.0 : clamp(dot(n, L) / L.z, 0.0, 1.6);
   vec3 c = hypsometric(h);
   float k = h < 0.0 ? 0.25 : 0.85;
   c *= mix(1.0, 0.35 + 0.65 * shade, k);
@@ -94,7 +103,10 @@ void main() {
 
 const MODE: Record<LayerKind, number> = { elevation: 0, categorical: 1, scalar: 2 };
 
-/** WebGL2 debug view of one raster layer over the whole world (M0). */
+/**
+ * WebGL2 debug view of one raster layer over the whole world (M0). Layers may be non-square (the
+ * equirectangular projection of a planet is twice as wide as high); cells are square, worldKm / w.
+ */
 export class RasterView {
   private readonly gl: WebGL2RenderingContext;
   private readonly prog: WebGLProgram;
@@ -110,7 +122,7 @@ export class RasterView {
     if (!gl) throw new Error('WebGL2 is not available in this browser.');
     this.gl = gl;
     this.prog = compileProgram(gl, 'raster', VS, FS);
-    this.u = uniforms(gl, this.prog, ['u_view', 'u_worldKm', 'u_tex', 'u_size', 'u_mode', 'u_min', 'u_max', 'u_cellM', 'u_exag'] as const);
+    this.u = uniforms(gl, this.prog, ['u_view', 'u_worldKm', 'u_aspect', 'u_tex', 'u_size', 'u_mode', 'u_min', 'u_max', 'u_cellM', 'u_exag'] as const);
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
     const buf = gl.createBuffer();
@@ -162,6 +174,7 @@ export class RasterView {
     gl.useProgram(this.prog);
     gl.uniformMatrix3fv(this.u.u_view, false, cam.viewMatrix(this.view));
     gl.uniform1f(this.u.u_worldKm, l.worldKm);
+    gl.uniform1f(this.u.u_aspect, l.h / l.w);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
     gl.uniform1i(this.u.u_tex, 0);
@@ -177,10 +190,11 @@ export class RasterView {
   }
 }
 
-/** Value of `layer` at world position (km), or null outside the world. */
+/** Value of `layer` at world position (km), or null outside the world (or in a projection gap). */
 export function sampleLayer(layer: Layer, xKm: number, yKm: number): number | null {
   const x = Math.floor((xKm / layer.worldKm) * layer.w);
-  const y = Math.floor((yKm / layer.worldKm) * layer.h);
+  const y = Math.floor((yKm / layer.worldKm) * layer.w);
   if (x < 0 || y < 0 || x >= layer.w || y >= layer.h) return null;
-  return layer.data[y * layer.w + x];
+  const v = layer.data[y * layer.w + x];
+  return Number.isNaN(v) ? null : v;
 }

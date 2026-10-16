@@ -1,7 +1,7 @@
 import './panel.css';
 import { ARCHETYPES, archetypeById } from '../shared/config/archetypes';
 import { fmtNum, formatValue, pinAll, resolve, withPin } from '../shared/config/resolve';
-import { PARAMS, SECTION_LABELS } from '../shared/config/schema';
+import { appliesTo, PARAMS, SECTION_LABELS } from '../shared/config/schema';
 import {
   AUTO_PIN,
   isRangeParam,
@@ -16,6 +16,7 @@ import {
   type Source,
   type ToggleParam,
   type Value,
+  type WorldShape,
   type WorldSpec,
 } from '../shared/config/types';
 import { RangeSlider, type RangeSliderDetail, type SliderScale } from './rangeSlider';
@@ -242,6 +243,8 @@ class ParamRow {
   private readonly outcomeEl = h('span', 'pp-outcome');
   private readonly searchText: string;
   private lastKey: string | null = null;
+  /** False when the parameter does not apply to the current world shape (the row is hidden). */
+  shapeOk = true;
 
   constructor(def: ParamDef, host: RowHost) {
     this.def = def;
@@ -426,11 +429,11 @@ class SectionView {
     setText(this.countEl, n > 0 ? `${n} set` : '');
   }
 
-  /** Hides non-matching rows; returns whether any row matched. */
+  /** Hides non-matching rows and rows of the other world shape; returns whether any row matched. */
   filter(query: string): boolean {
     let any = false;
     for (const row of this.rows) {
-      const m = row.matches(query);
+      const m = row.shapeOk && row.matches(query);
       row.el.hidden = !m;
       any ||= m;
     }
@@ -449,6 +452,8 @@ export class ConfigPanel {
   private readonly cb: PanelCallbacks;
   private readonly rootEl = h('div', 'pp-root');
   private readonly archetypeEl = h('select', 'pp-select pp-archetype');
+  private readonly shapeEls = new Map<WorldShape, HTMLButtonElement>();
+  private shapeShown: WorldShape | null = null;
   private readonly resetAllEl = h('button', 'pp-btn', 'Reset all');
   private readonly pinAllEl = h('button', 'pp-btn', 'Pin all');
   private readonly searchEl = h('input', 'pp-search');
@@ -496,7 +501,11 @@ export class ConfigPanel {
 
     this.resetAllEl.type = 'button';
     this.resetAllEl.title = 'Clear all your pins (archetype presets stay).';
-    this.resetAllEl.addEventListener('click', () => this.edit({ ...this.specValue, pins: {} }, true, null));
+    // The world shape is chosen above the archetype and survives a reset.
+    this.resetAllEl.addEventListener('click', () => {
+      const shape = this.specValue.pins.worldShape;
+      this.edit({ ...this.specValue, pins: shape === undefined ? {} : { worldShape: shape } }, true, null);
+    });
     this.pinAllEl.type = 'button';
     this.pinAllEl.title = 'Pin every value as it is now, freezing the world against formula changes.';
     this.pinAllEl.addEventListener('click', () => this.edit(pinAll(this.specValue), true, null));
@@ -506,9 +515,27 @@ export class ConfigPanel {
     this.searchEl.setAttribute('aria-label', 'Search parameters');
     this.searchEl.addEventListener('input', () => this.applySearch());
 
+    // World shape (research 10 §3): the first choice, above the archetype. Flat is AUTO, so choosing
+    // it removes the pin and old URLs stay as they were.
+    const shape = h('div', 'pp-shape');
+    shape.setAttribute('role', 'radiogroup');
+    shape.setAttribute('aria-label', 'World shape');
+    for (const [value, label, tip] of [
+      ['flat', 'Flat', 'A square map with edges'],
+      ['sphere', 'Sphere', 'A whole planet: terrain and climate for now, shown as a 2D map'],
+    ] as const) {
+      const b = h('button', 'pp-shape-btn', label);
+      b.type = 'button';
+      b.title = tip;
+      b.setAttribute('role', 'radio');
+      b.addEventListener('click', () => this.host().setPin('worldShape', value === 'flat' ? undefined : value, true));
+      this.shapeEls.set(value, b);
+      shape.append(b);
+    }
+
     const line = h('div', 'pp-head-line');
     line.append(this.archetypeEl, this.resetAllEl, this.pinAllEl);
-    header.append(line, this.searchEl, this.warningsEl);
+    header.append(shape, line, this.searchEl, this.warningsEl);
     return header;
   }
 
@@ -524,7 +551,7 @@ export class ConfigPanel {
     for (const id of Object.keys(SECTION_LABELS) as Section[]) {
       const section = new SectionView(id, collapsed.has(id), onToggle);
       for (const def of PARAMS) {
-        if (def.section !== id) continue;
+        if (def.section !== id || def.id === 'worldShape') continue;
         const row = new ParamRow(def, host);
         this.rows.set(def.id, row);
         section.add(row);
@@ -569,6 +596,7 @@ export class ConfigPanel {
   private render(flashExcept: string | null): void {
     const r = this.resolvedValue;
     this.renderHeader();
+    this.renderShape(r.values.worldShape as WorldShape);
     const warnByRow = this.renderWarnings(r);
     for (const row of this.rows.values()) {
       const id = row.def.id;
@@ -586,7 +614,7 @@ export class ConfigPanel {
 
   private renderHeader(): void {
     const spec = this.specValue;
-    const custom = Object.keys(spec.pins).length > 0;
+    const custom = Object.keys(spec.pins).some((id) => id !== 'worldShape');
     const current = archetypeById(spec.archetype);
     if (this.archetypeEl.value !== current.id) this.archetypeEl.value = current.id;
     for (const opt of this.archetypeEl.options) {
@@ -595,6 +623,18 @@ export class ConfigPanel {
     }
     setTitle(this.archetypeEl, current.blurb);
     this.resetAllEl.disabled = !custom;
+  }
+
+  /** Marks the current shape and hides the parameters that do not apply to it. */
+  private renderShape(shape: WorldShape): void {
+    for (const [v, b] of this.shapeEls) {
+      b.classList.toggle('pp-on', v === shape);
+      b.setAttribute('aria-checked', String(v === shape));
+    }
+    if (shape === this.shapeShown) return;
+    this.shapeShown = shape;
+    for (const row of this.rows.values()) row.shapeOk = appliesTo(row.def, shape);
+    this.applySearch();
   }
 
   /** Rebuilds the top warning list only when its content changes; returns messages per row id. */
