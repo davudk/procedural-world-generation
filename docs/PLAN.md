@@ -590,3 +590,39 @@ Each research note lists its sources with URLs. The core references are:
 - Faint straight edges remain on continental shelves near some plate boundaries (trench profiles inside the unblurred shelf band).
 - Fresh volcanoes, calderas and fjords arrive in M6.
 - Rainfall-weighted erosion arrives with the climate pre-pass (P2).
+
+### M2 — 3D world (2026-10-16)
+
+**What landed:**
+- **`WorldView`:**
+  - CDLOD terrain: one shared 33×33 grid drawn instanced, up to 2048 nodes in one draw call, 8 levels down to 250 m vertex spacing.
+  - Heights are R32F with manual bilinear filtering, plus a CPU-built RG32F gradient texture for smooth normals.
+  - The water lid puts the sea surface at 0.
+  - Reversed-Z through `EXT_clip_control`, rendering into a 4× MSAA framebuffer with 32-bit float depth that is blitted to the canvas.
+  - Camera-relative positions.
+- **`HeightField`:** a CPU min/max pyramid and a ray march with bisection, used for picking and camera clamps.
+- **`OrbitCamera` and `OrbitController`:**
+  - Zoom-to-cursor as a homothety about the ground hit point, eased for the wheel and immediate for pinch.
+  - Grab pan, rotate and tilt, auto-tilt, a flight path for minimap jumps, and clamps.
+  - Trackpad, mouse, Safari gestures, touch and keys.
+- **Minimap** with the camera footprint, and a **compass**.
+- **Layer draping** in 3D.
+- A **2D/3D toggle** sharing one WebGL2 context.
+
+**Decisions and fixes made while building:**
+- **Diffusion stability bug** (found through the 3D view). Hillslope diffusion sub-stepped to the classic limit c = kd·Δt/cell² = 1/4. At 1 km cells, c was exactly 1/4, so the checkerboard mode never decayed and the refined terrain had ±300 m per-cell checkerboards. The cap is now c ≤ 1/8, and a regression test fails on the old rule.
+- **Default framebuffer format.** The context uses `alpha: true`, so the default framebuffer is RGBA8. A multisample resolve blit needs matching formats.
+- **Shader precision.** The terrain shaders declare `precision highp int`, because integer uniforms have different default precisions in the vertex and fragment shaders.
+- **Per-pixel water height.** The fragment shader recomputes height per pixel; colouring water by the vertex-interpolated height showed coarse LOD triangles.
+- **Closest zoom** is limited to 8 m/px (`OrbitCamera.minMetresPerPixel`) until M5 adds shader detail.
+- **Lighting.** The sun comes from the top-left of the screen (cartographic convention, azimuth = bearing − 45°). Lighting normals are exaggerated by 1.5–6.5× depending on altitude.
+
+**Performance (Apple Silicon, built-in browser pane, 1278×1540 drawing buffer):**
+- Frame time p50 8.3 ms and p95 9.3 ms, which is the 120 Hz vsync.
+- 4–60 CDLOD nodes selected per view.
+
+**Known gaps:**
+- Featureless plains and smooth blobs at band L (detail amplification, M5).
+- No shadows or AO yet (M5).
+- Haze only when tilted.
+- No labels (M7).

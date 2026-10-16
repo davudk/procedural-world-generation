@@ -1,17 +1,23 @@
 import './style.css';
 import { GenHost } from './app/genHost';
 import { CameraController, isTypingTarget } from './input/cameraController';
+import { OrbitController } from './input/orbitController';
+import { worldToMapKm } from './render/camera/ground';
 import { Camera } from './render/camera2d';
+import { Minimap } from './render/minimap';
 import { RasterView, sampleLayer } from './render/rasterView';
+import { WorldView } from './render/worldView';
 import { fmtNum, resolve } from './shared/config/resolve';
 import type { StageId, WorldSpec } from './shared/config/types';
 import { queryToSpec, specToQuery } from './shared/config/url';
 import type { FromWorker, GenMode, Layer } from './shared/protocol';
+import { Compass } from './ui/compass';
 import { ConfigPanel } from './ui/configPanel';
 
 /** Delay after the last settings change before a full-quality build starts. */
 const BUILD_IDLE_MS = 900;
 const LAYER_KEY = 'pwg.layer';
+const MODE_KEY = 'pwg.mode';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('view');
@@ -30,9 +36,19 @@ const stageEls = new Map<StageId, HTMLElement>();
 /** Realised 🎯 targets of the current run; later stages refine earlier values. */
 let outcomes: Record<string, number> = {};
 
+// The 3D world creates the WebGL2 context; the 2D raster view shares it.
+const world = new WorldView(canvas);
+const orbit = new OrbitController(canvas, world.cam);
+const minimap = new Minimap($('layers'), world.cam);
+const compass = new Compass($('compass-host'), world.cam);
 const cam = new Camera();
 const view = new RasterView(canvas);
 const camCtl = new CameraController(canvas, cam, () => ({ w: currentWorldKm(), h: currentWorldKm() }));
+/** Debug handle for the console / browser automation. */
+Object.assign(window, { __pwg: { world, orbit, layers: () => layers } });
+let mode: '3d' | '2d' = readStored(MODE_KEY) === '2d' ? '2d' : '3d';
+let elevationShown: Layer | null = null;
+let drapeShown: Layer | null | undefined;
 
 const panel = new ConfigPanel($('panel'), spec, {
   onSpecChange(next, final) {
@@ -56,6 +72,12 @@ seedInput.addEventListener('change', () => {
 $('dice').addEventListener('click', () => setSeed(randomSeed()));
 $('build').addEventListener('click', () => startGen('build'));
 $('panel-toggle').addEventListener('click', () => $('panel').classList.toggle('open'));
+$('mode').addEventListener('click', () => setMode(mode === '3d' ? '2d' : '3d'));
+const exagInput = $<HTMLInputElement>('exag');
+exagInput.addEventListener('input', () => {
+  world.setExaggeration(Number(exagInput.value));
+  $('exag-value').textContent = exagInput.value;
+});
 layerSelect.addEventListener('change', () => {
   selected = layerSelect.value;
   writeStored(LAYER_KEY, selected);
@@ -64,12 +86,14 @@ layerSelect.addEventListener('change', () => {
 window.addEventListener('keydown', (e) => {
   if (isTypingTarget(e.target) || e.metaKey || e.ctrlKey) return;
   if (e.code === 'KeyB') startGen('build');
-  if (e.code === 'Home') fitView();
+  if (e.code === 'KeyV') setMode(mode === '3d' ? '2d' : '3d');
+  if (e.code === 'Home' && mode === '2d') fitView();
 });
 canvas.addEventListener('pointermove', (e) => inspect(e.offsetX, e.offsetY));
 canvas.addEventListener('pointerleave', () => (inspectEl.textContent = ''));
-canvas.addEventListener('dblclick', fitView);
+canvas.addEventListener('dblclick', () => (mode === '2d' ? fitView() : undefined));
 
+setMode(mode);
 syncUrl();
 startGen('build');
 requestAnimationFrame(frame);
@@ -156,6 +180,17 @@ function showSelected(): void {
   const l = layers.get(shownLayerId());
   if (!l) return;
   view.setLayer(l);
+  const elev = layers.get('elevation');
+  if (elev && elev !== elevationShown) {
+    elevationShown = elev;
+    world.setElevation(elev);
+    minimap.setElevation(elev);
+  }
+  const drape = l.id === 'elevation' ? null : l;
+  if (drape !== drapeShown) {
+    drapeShown = drape;
+    world.setDrape(drape);
+  }
   if (fittedFor !== l.worldKm) {
     fittedFor = l.worldKm;
     fitView();
@@ -168,8 +203,16 @@ function showSelected(): void {
 }
 
 function inspect(sx: number, sy: number): void {
-  const x = cam.screenToWorldX(sx);
-  const y = cam.screenToWorldY(sy);
+  let x = cam.screenToWorldX(sx);
+  let y = cam.screenToWorldY(sy);
+  if (mode === '3d') {
+    const p = world.cam.pick(sx, sy);
+    if (!p || !world.hf) {
+      inspectEl.textContent = '';
+      return;
+    }
+    ({ xKm: x, yKm: y } = worldToMapKm(p.x, p.y, world.hf.size));
+  }
   const l = layers.get(shownLayerId());
   const elev = layers.get('elevation');
   if (!l) return;
@@ -202,10 +245,29 @@ let last = performance.now();
 function frame(now: number): void {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
-  view.resize(cam);
-  camCtl.update(dt);
-  view.draw(cam);
+  if (mode === '3d') {
+    world.resize();
+    orbit.update(dt);
+    world.cam.update(dt);
+    world.draw(now / 1000);
+    minimap.draw();
+    compass.update();
+  } else {
+    view.resize(cam);
+    camCtl.update(dt);
+    view.draw(cam);
+  }
   requestAnimationFrame(frame);
+}
+
+function setMode(m: '3d' | '2d'): void {
+  mode = m;
+  writeStored(MODE_KEY, m);
+  orbit.enabled = m === '3d';
+  camCtl.enabled = m === '2d';
+  document.body.classList.toggle('mode-2d', m === '2d');
+  $('mode').textContent = m === '3d' ? '2D' : '3D';
+  if (m === '2d') fitView();
 }
 
 // ── Seed & URL ────────────────────────────────────────────────────────────────────────────

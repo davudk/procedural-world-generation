@@ -151,6 +151,45 @@ body {
   width: 100%;
 }
 
+.minimap {
+  display: block;
+  margin-bottom: 8px;
+  border-radius: 4px;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.exag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--text-dim);
+}
+
+.exag input {
+  flex: 1;
+}
+
+#compass-host {
+  position: fixed;
+  right: calc(var(--panel-w) + 20px);
+  bottom: 10px;
+  width: 40px;
+  height: 40px;
+}
+
+#compass-host .compass {
+  left: 0;
+  bottom: 0;
+}
+
+body.mode-2d .minimap,
+body.mode-2d #compass-host,
+body.mode-2d .exag {
+  display: none;
+}
+
 #legend,
 #inspect {
   margin-top: 6px;
@@ -184,5 +223,9 @@ body {
 
   #panel.open {
     transform: none;
+  }
+
+  #compass-host {
+    right: 10px;
   }
 }

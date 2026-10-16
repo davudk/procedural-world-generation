@@ -233,3 +233,23 @@ describe('runLem', () => {
     expect(res.ms).toBeGreaterThan(0);
   }, 60_000);
 });
+
+describe('diffusion stability', () => {
+  it('leaves no cell-parity checkerboard at 1 km cells (c = kd·dt/cell² at the classic 1/4 limit)', async () => {
+    const inp = { ...island(96, 5), cellM: 1000 };
+    const res = await runLem(inp, params({ iterations: 40, stochasticIterations: 0, diffusionOffLast: 0, talus: 10 }), new Rng(5));
+    const { h, n } = { h: res.h, n: inp.n };
+    // A checkerboard makes the orthogonal-neighbour Laplacian dominate the diagonal one.
+    let orth = 0;
+    let diag = 0;
+    for (let y = 2; y < n - 2; y++) {
+      for (let x = 2; x < n - 2; x++) {
+        const i = y * n + x;
+        if (inp.fixed[i]) continue;
+        orth += Math.abs(h[i] - (h[i - 1] + h[i + 1] + h[i - n] + h[i + n]) / 4);
+        diag += Math.abs(h[i] - (h[i - 1 - n] + h[i + 1 - n] + h[i - 1 + n] + h[i + 1 + n]) / 4);
+      }
+    }
+    expect(orth).toBeLessThan(diag);
+  });
+});

@@ -382,10 +382,13 @@ function boundaryH(h: Float32Array, fixed: Uint8Array, j: number): number {
   return fixed[j] && h[j] < 0 ? 0 : h[j];
 }
 
-/** Explicit 5-point diffusion on land cells, sub-stepped to Δt ≤ cell²/(4·kd); map edges are zero-flux. */
+/**
+ * Explicit 5-point diffusion on land cells, sub-stepped so c = kd·Δt/cell² ≤ 1/8; map edges are zero-flux.
+ * (At the classic limit c = 1/4 the checkerboard mode has amplification −1 and never decays.)
+ */
 function diffuse(h: Float32Array, tmp: Float32Array, fixed: Uint8Array, n: number, cellM: number, kd: number, dt: number): void {
   const N = n * n;
-  const steps = Math.max(1, Math.ceil((dt * 4 * kd) / (cellM * cellM)));
+  const steps = Math.max(1, Math.ceil((dt * 8 * kd) / (cellM * cellM)));
   const c = (kd * (dt / steps)) / (cellM * cellM);
   for (let s = 0; s < steps; s++) {
     for (let y = 0; y < n; y++) {

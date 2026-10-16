@@ -26,6 +26,8 @@ export class CameraController {
   private lastWheelAt = -Infinity;
   private lastWheelKind: 'mouse' | 'trackpad' = 'mouse';
   edgePan = false;
+  /** Off while another view (the 3D world) owns the canvas. */
+  enabled = true;
   /** Set while touch pointers are down: iOS also reports the pinch as gesture events, which must not zoom twice. */
   touching = false;
 
@@ -77,6 +79,7 @@ export class CameraController {
   }
 
   update(dtSec: number): void {
+    if (!this.enabled) return;
     const cam = this.cam;
     // Smooth zoom toward target, keeping the anchor world point fixed under the cursor.
     if (Math.abs(this.zoomTarget - cam.zoom) > 1e-4 * cam.zoom) {
@@ -121,6 +124,7 @@ export class CameraController {
   };
 
   private readonly onDown = (e: PointerEvent): void => {
+    if (!this.enabled) return;
     if (e.button !== 0 && e.button !== 1) return;
     e.preventDefault();
     this.dragging = true;
@@ -140,6 +144,7 @@ export class CameraController {
    * pinch as ctrl+wheel (→ zoom); a physical mouse wheel zooms. See `classifyWheel`.
    */
   private readonly onWheel = (e: WheelEvent): void => {
+    if (!this.enabled) return;
     e.preventDefault();
     const now = performance.now();
     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.cam.viewH : 1;
@@ -177,7 +182,7 @@ export class CameraController {
     type GestureEv = Event & { scale: number; clientX: number; clientY: number };
     this.canvas.addEventListener('gesturestart', (ev) => {
       ev.preventDefault();
-      if (this.touching) return;
+      if (this.touching || !this.enabled) return;
       const g = ev as GestureEv;
       startZoom = this.cam.zoom;
       const r = this.canvas.getBoundingClientRect();
@@ -186,7 +191,7 @@ export class CameraController {
     });
     this.canvas.addEventListener('gesturechange', (ev) => {
       ev.preventDefault();
-      if (this.touching) return;
+      if (this.touching || !this.enabled) return;
       const z = this.clampZoom(startZoom * (ev as GestureEv).scale);
       this.cam.zoomAt(ax, ay, z);
       this.zoomTarget = z;

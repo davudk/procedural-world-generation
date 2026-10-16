@@ -10,16 +10,17 @@ A configurable procedural world generator in the browser. It builds a finite reg
 
 The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 
-**Status: milestone M1 (macro terrain).** It includes:
+**Status: milestone M2 (3D world).** It includes:
 - the hierarchical config system and the staged generation pipeline;
 - tectonic plates with motion and boundary classes;
 - continents grown to a target count;
 - uplift and erodibility maps;
 - volcanoes, hotspot chains and old craters;
 - a stream-power erosion model that carves dendritic mountain ranges;
+- a 3D world view: CDLOD terrain with a water lid, an orbit camera with zoom-to-cursor, tilt and rotate, a minimap and a compass;
 - a 2D raster debug viewer.
 
-The 3D renderer arrives in M2. See [docs/PLAN.md](docs/PLAN.md) for the full plan.
+Shader detail at close zoom, shadows and animated water arrive in M5. See [docs/PLAN.md](docs/PLAN.md) for the full plan.
 
 ## Run
 
@@ -33,15 +34,26 @@ npm run dev
 
 Open http://localhost:5174.
 
-## Controls (debug viewer)
+## Controls
 
-| Input | Action |
-|---|---|
-| Two-finger scroll / drag | Pan |
-| Pinch / mouse wheel | Zoom to cursor |
-| Arrow keys | Pan |
-| Double-click / Home | Fit the world |
-| B | Full-quality build |
+The world opens in **3D**. Press **V**, or the 2D/3D button, to switch to the 2D raster view.
+
+| Input | 3D world | 2D raster view |
+|---|---|---|
+| Two-finger scroll | Pan | Pan |
+| Pinch / mouse wheel | Zoom to cursor | Zoom to cursor |
+| Drag | Grab pan | Grab pan |
+| Right-drag, ⌃-drag or middle-drag | Rotate (x) and tilt (y) | — |
+| Safari trackpad rotate | Rotate | — |
+| Arrows · + / − | Pan · zoom | Pan |
+| Q / E · R / F | Rotate · tilt | — |
+| Home · N | Fit the world · north up | Fit the world (also double-click) |
+| Compass | Click: north up; drag: rotate | — |
+| Minimap | Click or drag to fly there | — |
+| Touch | 1 finger pan; 2 fingers pan, zoom and rotate; 2 fingers moving vertically tilt | Pan, pinch |
+| B | Full-quality build | Full-quality build |
+
+The layer picker drapes any generated layer (plates, boundaries, uplift, drainage…) over the 3D terrain. The relief slider sets vertical exaggeration.
 
 ## Configuration
 
