@@ -334,3 +334,15 @@ export function cellIndex(g: Grid, x: number, y: number, face = 0): number {
 export function onFace(g: Grid, x: number, y: number): boolean {
   return x >= 0 && y >= 0 && x < g.n && y < g.n;
 }
+
+// ── hydro helpers ──
+
+/**
+ * Cell at face-local column x, row y, or −1 when (x, y) lies off the map. For planar per-feature
+ * walks in cell coordinates (flat only: on the sphere such walks cross seams).
+ */
+export function cellIfOnMap(g: Grid, x: number, y: number): number {
+  if (g.shape !== 'flat') throw new Error('cellIfOnMap: only flat grids exist yet');
+  const n = g.n;
+  return x < 0 || y < 0 || x >= n || y >= n ? -1 : y * n + x;
+}

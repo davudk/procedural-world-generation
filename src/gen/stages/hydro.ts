@@ -1,5 +1,6 @@
 import { Noise2 } from '../../shared/noise';
 import { RIVER, type LakeInfo, type Layer } from '../../shared/protocol';
+import { cellIndex, cellX, cellY, forWindow, type Grid } from '../grid/grid';
 import { chamferDistance, smoothstep } from '../grid/ops';
 import { breachShallow } from '../hydro/breach';
 import { SECONDS_PER_YEAR, waterBudget } from '../hydro/budget';
@@ -113,7 +114,8 @@ export const hydroStage: StageDef = {
     const cl = ctx.input('climate').extra as ClimateExtra;
     const { n, cellKm, fixed } = t;
     if (cl.n !== n) throw new Error(`hydro: climate grid ${cl.n} ≠ terrain grid ${n}`);
-    const N = n * n;
+    const g = ctx.grid(n);
+    const N = g.cells;
     const cellM = cellKm * 1000;
     const cellKm2 = cellKm * cellKm;
     const cellM2 = cellM * cellM;
@@ -133,17 +135,17 @@ export const hydroStage: StageDef = {
     const h = t.h.slice();
     // A high lakeDensity no longer protects pits beyond the research defaults (it adds lake districts instead).
     const lf = Math.max(0.1, Math.min(1, lakeDensity));
-    const districts = lakeDistricts(n, cellKm, t.carve, fixed, lakeDensity, ctx.rng('lakeDistricts').nextU32());
-    const br = breachShallow(h, n, fixed, BREACH_DEPTH / lf, BREACH_AREA / lf / cellKm2, districts.depth, districts.area);
+    const districts = lakeDistricts(g, cellKm, t.carve, fixed, lakeDensity, ctx.rng('lakeDistricts').nextU32());
+    const br = breachShallow(h, g, fixed, BREACH_DEPTH / lf, BREACH_AREA / lf / cellKm2, districts.depth, districts.area);
     // Pits breached into a neighbouring pit leave a compound depression: a second pass sees it whole.
-    const br2 = breachShallow(h, n, fixed, BREACH_DEPTH / lf, BREACH_AREA / lf / cellKm2, districts.depth, districts.area);
+    const br2 = breachShallow(h, g, fixed, BREACH_DEPTH / lf, BREACH_AREA / lf / cellKm2, districts.depth, districts.area);
     br.breached += br2.breached;
     br.carved += br2.carved;
     stats.lakeDistrictShare = districts.share;
     Object.assign(stats, { pits: br.pits, breached: br.breached, breachCarvedCells: br.carved });
     lap('breach');
     stats.lakeBasinsPlaced = placeLakeBasins({
-      n, cellKm, h, fixed, area: t.area, rcv: t.rcv, temp: cl.temp, precip: cl.precip, pet: cl.pet, lakeDensity, rng: ctx.rng('lakes'),
+      grid: g, h, fixed, area: t.area, rcv: t.rcv, temp: cl.temp, precip: cl.precip, pet: cl.pet, lakeDensity, rng: ctx.rng('lakes'),
       weight: districts.place,
     });
     lap('placeLakes');
@@ -151,7 +153,7 @@ export const hydroStage: StageDef = {
     tLap = performance.now();
 
     // 2. Depression hierarchy and water balance → lakes.
-    const H = buildHierarchy(h, n, fixed);
+    const H = buildHierarchy(h, g, fixed);
     lap('hierarchy');
     const runoffY = new Float64Array(N);
     const lossY = new Float64Array(N);
@@ -189,8 +191,8 @@ export const hydroStage: StageDef = {
     tLap = performance.now();
 
     // 3. Routing and discharge.
-    const { jx, jy } = jitter(n, ctx.rng('jitter').nextU32());
-    const R = route(S, n, fixed, roots, jx, jy, t.area);
+    const { jx, jy } = jitter(g, ctx.rng('jitter').nextU32());
+    const R = route(S, g, fixed, roots, jx, jy, t.area);
     lap('route');
     const yieldM3s = new Float64Array(N);
     const aridRate = new Float32Array(N);
@@ -210,7 +212,7 @@ export const hydroStage: StageDef = {
     const net = extractNetwork(R, acc.area, acc.q, fixed, { lakeId, kind: lakeKind }, ath, MIN_Q);
     const spacing = Math.max(250, NODE_SPACING * cellM);
     const gIn = {
-      n, cellM, seed: ctx.rng('meander').nextU32(), S, h, fixed, lakeId, lakeLevel, lakeKind, rcv: R.rcv, donStart: R.donStart, donList: R.donList,
+      grid: g, seed: ctx.rng('meander').nextU32(), S, h, fixed, lakeId, lakeLevel, lakeKind, rcv: R.rcv, donStart: R.donStart, donList: R.donList,
       q: acc.q, area: acc.area, aridity: budget.aridity, temp: cl.temp, jx, jy, net,
       sigmaMax: 1 + 1.5 * ctx.num('meanderStrength'), spacing,
     };
@@ -226,7 +228,7 @@ export const hydroStage: StageDef = {
     let landCells = 0;
     for (let i = 0; i < N; i++) if (!fixed[i]) landCells++;
     const deltas = addDeltas(gb, {
-      n, cellM, h, fixed, lakeId, lakeLevel, waveEnergy: ctx.num('waveEnergy'), tideRange: ctx.num('tideRange'), spacing, rng: ctx.rng('deltas'),
+      grid: g, h, fixed, lakeId, lakeLevel, waveEnergy: ctx.num('waveEnergy'), tideRange: ctx.num('tideRange'), spacing, rng: ctx.rng('deltas'),
       maxSea: Math.max(1, Math.round(DELTAS_PER_KM2 * landCells * cellKm2)),
     }, plain);
     enforceMonotone(gb);
@@ -242,7 +244,7 @@ export const hydroStage: StageDef = {
     const lakes: LakeInfo[] = [];
     for (let l = 0; l < L; l++) {
       const b = bodies[l];
-      const info = lakeInfo(l, b, n, cellM, cellKm2, budget.aridity, built.outletNode[l]);
+      const info = lakeInfo(l, b, g, cellM, cellKm2, budget.aridity, built.outletNode[l]);
       lakes.push(info);
       const cls = b.kind === 'playa' ? WATER.PLAYA : info.type === 'salt' ? WATER.SALT_LAKE : WATER.LAKE;
       for (const c of b.cells) {
@@ -263,7 +265,7 @@ export const hydroStage: StageDef = {
     const { rcv, stack } = R;
     for (let i = 0; i < rivers.n; i++) {
       if (!(rivers.flags[i] & RIVER.DISTRIBUTARY)) continue;
-      const c = Math.min(n - 1, Math.floor(rivers.y[i] / cellM)) * n + Math.min(n - 1, Math.floor(rivers.x[i] / cellM));
+      const c = cellIndex(g, Math.min(n - 1, Math.floor(rivers.x[i] / cellM)), Math.min(n - 1, Math.floor(rivers.y[i] / cellM)));
       if (!fixed[c] && lakeId[c] < 0) elevation[c] = Math.min(elevation[c], rivers.zBed[i]);
     }
     const zb = new Float64Array(N);
@@ -287,7 +289,7 @@ export const hydroStage: StageDef = {
     tLap = performance.now();
 
     // 6. Wetness and wetlands (🎯 wetlandShare).
-    const { twi } = wetnessIndex(S, n, cellM, rcv, fixed);
+    const { twi } = wetnessIndex(S, g, rcv, fixed);
     lap('twi');
     let land = 0;
     let wet = 0;
@@ -309,11 +311,11 @@ export const hydroStage: StageDef = {
       const c = waterClass[i];
       if (c === WATER.LAKE || c === WATER.SALT_LAKE || c === WATER.PLAYA || (chan[i] && acc.q[i] >= ARID_WETLAND_Q)) exotic[i] = 1;
     }
-    const exoticDist = chamferDistance(exotic, ctx.grid(n));
+    const exoticDist = chamferDistance(exotic, g);
     const aridReach = Math.max(1, ARID_WETLAND_KM / cellKm);
     const aridOk = new Uint8Array(N);
     for (let i = 0; i < N; i++) if (exoticDist[i] <= aridReach) aridOk[i] = 1;
-    wet += selectWetlands(twi, reliefSlope(S, n, cellM), budget.aridity, eligible, wetMask, Math.round(ctx.num('wetlandShare') * land) - wet, {
+    wet += selectWetlands(twi, reliefSlope(S, g), budget.aridity, eligible, wetMask, Math.round(ctx.num('wetlandShare') * land) - wet, {
       maxSlope: WETLAND_MAX_SLOPE, humidSlope: WETLAND_HUMID_SLOPE, aridOk,
     });
     for (let i = 0; i < N; i++) if (wetMask[i]) waterClass[i] = WATER.WETLAND;
@@ -349,12 +351,12 @@ export const hydroStage: StageDef = {
     const lakeOfMouth = (i: number): number => {
       const cx = Math.min(n - 1, Math.max(0, Math.floor(rivers.x[i] / cellM)));
       const cy = Math.min(n - 1, Math.max(0, Math.floor(rivers.y[i] / cellM)));
-      for (let k = 0; k < 9; k++) {
-        const x = cx + (k % 3) - 1;
-        const y = cy + Math.floor(k / 3) - 1;
-        if (x >= 0 && y >= 0 && x < n && y < n && lakeId[y * n + x] >= 0) return lakeId[y * n + x];
-      }
-      return -1;
+      let l = -1;
+      forWindow(g, cellIndex(g, cx, cy), 1, (c) => {
+        l = lakeId[c];
+        return l < 0;
+      });
+      return l;
     };
     const ddRatio = lengthKm / Math.max(1, chLandKm2) / ddExpected;
     const great = longestRiversToSea(rivers, lakeOfMouth, built.outletNode, (GREAT_RIVER_KM * worldKm) / 1024);
@@ -422,14 +424,14 @@ export const hydroStage: StageDef = {
  * DISTRICT_BREACH_* on carved ground outside them; `place` scales sub-grid lake placement. `share` = district share of the carved land.
  */
 function lakeDistricts(
-  n: number,
+  g: Grid,
   cellKm: number,
   carve: Float32Array,
   fixed: Uint8Array,
   lakeDensity: number,
   seed: number,
 ): { depth: Float32Array; area: Float32Array; place: Float32Array; share: number } {
-  const N = n * n;
+  const N = g.cells;
   const depth = new Float32Array(N).fill(1);
   const area = new Float32Array(N).fill(1);
   const place = new Float32Array(N).fill(1);
@@ -440,9 +442,7 @@ function lakeDistricts(
   const f = cellKm / DISTRICT_KM;
   for (let i = 0; i < N; i++) {
     if (fixed[i] || carve[i] < DISTRICT_CARVE[0]) continue;
-    const x = i % n;
-    const y = (i - x) / n;
-    field[i] = noise.fbm(x * f, y * f, 3);
+    field[i] = noise.fbm(cellX(g, i) * f, cellY(g, i) * f, 3);
     vals.push(field[i]);
   }
   if (vals.length === 0) return { depth, area, place, share };
@@ -467,13 +467,13 @@ function maxMouthQ(g: { n: number; q: Float32Array; flags: Uint16Array }): numbe
   return m;
 }
 
-function lakeInfo(id: number, b: LakeBody, n: number, cellM: number, cellKm2: number, aridity: Float32Array, outletNode: number): LakeInfo {
+function lakeInfo(id: number, b: LakeBody, g: Grid, cellM: number, cellKm2: number, aridity: Float32Array, outletNode: number): LakeInfo {
   let sx = 0;
   let sy = 0;
   let arid = 0;
   for (const c of b.cells) {
-    sx += (c % n) + 0.5;
-    sy += Math.floor(c / n) + 0.5;
+    sx += cellX(g, c) + 0.5;
+    sy += cellY(g, c) + 0.5;
     arid += aridity[c];
   }
   const k = Math.max(1, b.cells.length);

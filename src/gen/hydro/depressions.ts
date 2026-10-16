@@ -1,4 +1,5 @@
-import { DX, DY, INV_DIST, offsets } from './grid8';
+import type { Grid } from '../grid/grid';
+import { INV_DIST } from './grid8';
 
 /**
  * Depression hierarchy (Barnes, Callaghan & Wickert 2020) and its leaves-first water balance
@@ -49,36 +50,32 @@ export interface Hierarchy {
 /** A playa covers at least the basin floor where evaporation reaches this share of the full-basin value. */
 const PLAYA_FLOOR = 0.25;
 
-export function buildHierarchy(h: Float32Array, n: number, fixed: Uint8Array): Hierarchy {
-  const N = n * n;
-  const off = offsets(n);
+/** Raster k of the forward neighbours E, SW, S, SE: each cell pair is visited once, from its earlier cell. */
+const FORWARD = [4, 5, 6, 7] as const;
+
+export function buildHierarchy(h: Float32Array, g: Grid, fixed: Uint8Array): Hierarchy {
+  const { cells: N, off8: off, border } = g;
   const label = new Int32Array(N).fill(-1);
   const down = new Int32Array(N).fill(-1);
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      const i = y * n + x;
-      if (fixed[i]) {
-        label[i] = 0;
-        continue;
-      }
-      const edge = x === 0 || y === 0 || x === n - 1 || y === n - 1;
-      let best = -1;
-      let bestS = 0;
-      for (let k = 0; k < 8; k++) {
-        if (edge) {
-          const nx = x + DX[k];
-          const ny = y + DY[k];
-          if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        }
-        const j = i + off[k];
-        const s = (h[i] - h[j]) * INV_DIST[k];
-        if (s > bestS) {
-          bestS = s;
-          best = j;
-        }
-      }
-      down[i] = best;
+  for (let i = 0; i < N; i++) {
+    if (fixed[i]) {
+      label[i] = 0;
+      continue;
     }
+    const b = border[i];
+    let best = -1;
+    let bestS = 0;
+    for (let k = 0; k < 8; k++) {
+      let j: number;
+      if (b === 0) j = i + off[k];
+      else if ((j = g.nbr(i, k)) < 0) continue;
+      const s = (h[i] - h[j]) * INV_DIST[k];
+      if (s > bestS) {
+        bestS = s;
+        best = j;
+      }
+    }
+    down[i] = best;
   }
 
   const nodes: DepNode[] = [leafNode(-1, -Infinity)];
@@ -93,13 +90,11 @@ export function buildHierarchy(h: Float32Array, n: number, fixed: Uint8Array): H
     label[i] = id;
     while (qh < qt) {
       const c = queue[qh++];
-      const cx = c % n;
-      const cy = (c - cx) / n;
+      const b = border[c];
       for (let k = 0; k < 8; k++) {
-        const nx = cx + DX[k];
-        const ny = cy + DY[k];
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        const j = c + off[k];
+        let j: number;
+        if (b === 0) j = c + off[k];
+        else if ((j = g.nbr(c, k)) < 0) continue;
         if (label[j] < 0 && down[j] < 0 && h[j] === h[i]) {
           label[j] = id;
           queue[qt++] = j;
@@ -150,15 +145,13 @@ export function buildHierarchy(h: Float32Array, n: number, fixed: Uint8Array): H
       ecb[e] = swap ? i : j;
     }
   };
-  for (let y = 0; y < n; y++) {
-    const row = y * n;
-    for (let x = 0; x < n; x++) {
-      const i = row + x;
-      if (x < n - 1) pair(i, i + 1);
-      if (y < n - 1) {
-        if (x > 0) pair(i, i + n - 1);
-        pair(i, i + n);
-        if (x < n - 1) pair(i, i + n + 1);
+  for (let i = 0; i < N; i++) {
+    if (border[i] === 0) {
+      for (const k of FORWARD) pair(i, i + off[k]);
+    } else {
+      for (const k of FORWARD) {
+        const j = g.nbr(i, k);
+        if (j >= 0) pair(i, j);
       }
     }
   }

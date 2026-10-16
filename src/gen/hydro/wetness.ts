@@ -1,4 +1,5 @@
-import { DIST, INV_DIST, offsets, outside } from './grid8';
+import type { Grid } from '../grid/grid';
+import { DIST, INV_DIST } from './grid8';
 
 /** Quinn et al. (1991) contour length weights (cells): ½ orthogonal, ≈0.354 diagonal. */
 const CONTOUR = Float64Array.from(DIST, (d) => (d > 1 ? 0.354 : 0.5));
@@ -10,33 +11,30 @@ const CONTOUR = Float64Array.from(DIST, (d) => (d > 1 ? 0.354 : 0.5));
  * without a lower neighbour (flats, lakes) pass everything to their single receiver; the order is
  * a topological sort of that flow graph (Kahn), so no sorting by height is needed.
  */
-export function wetnessIndex(S: Float32Array, n: number, cellM: number, rcv: Int32Array, fixed: Uint8Array): { twi: Float32Array; slope: Float32Array } {
-  const N = n * n;
-  const off = offsets(n);
+export function wetnessIndex(S: Float32Array, g: Grid, rcv: Int32Array, fixed: Uint8Array): { twi: Float32Array; slope: Float32Array } {
+  const { cells: N, cellM, off8: off, border } = g;
   const indeg = new Uint8Array(N);
   const slope = new Float32Array(N);
   const lowerMask = new Uint8Array(N);
   const inv = INV_DIST.map((d) => d / cellM);
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      const i = y * n + x;
-      if (fixed[i]) continue;
-      const edge = x === 0 || y === 0 || x === n - 1 || y === n - 1;
-      let mask = 0;
-      let best = 0;
-      for (let k = 0; k < 8; k++) {
-        if (edge && outside(x, y, k, n)) continue;
-        const j = i + off[k];
-        const s = (S[i] - S[j]) * inv[k];
-        if (s <= 0) continue;
-        mask |= 1 << k;
-        if (s > best) best = s;
-        indeg[j]++;
-      }
-      lowerMask[i] = mask;
-      slope[i] = best;
-      if (mask === 0 && rcv[i] !== i) indeg[rcv[i]]++;
+  for (let i = 0; i < N; i++) {
+    if (fixed[i]) continue;
+    const b = border[i];
+    let mask = 0;
+    let best = 0;
+    for (let k = 0; k < 8; k++) {
+      let j: number;
+      if (b === 0) j = i + off[k];
+      else if ((j = g.nbr(i, k)) < 0) continue;
+      const s = (S[i] - S[j]) * inv[k];
+      if (s <= 0) continue;
+      mask |= 1 << k;
+      if (s > best) best = s;
+      indeg[j]++;
     }
+    lowerMask[i] = mask;
+    slope[i] = best;
+    if (mask === 0 && rcv[i] !== i) indeg[rcv[i]]++;
   }
   const a = new Float64Array(N);
   const queue = new Int32Array(N);
@@ -57,18 +55,19 @@ export function wetnessIndex(S: Float32Array, n: number, cellM: number, rcv: Int
       }
       continue;
     }
+    const b = border[i];
     let sum = 0;
     for (let k = 0; k < 8; k++) {
       if (!(mask & (1 << k))) {
         w[k] = 0;
         continue;
       }
-      w[k] = (S[i] - S[i + off[k]]) * inv[k] * CONTOUR[k];
+      w[k] = (S[i] - S[b === 0 ? i + off[k] : g.nbr(i, k)]) * inv[k] * CONTOUR[k];
       sum += w[k];
     }
     for (let k = 0; k < 8; k++) {
       if (w[k] === 0) continue;
-      const j = i + off[k];
+      const j = b === 0 ? i + off[k] : g.nbr(i, k);
       a[j] += (a[i] * w[k]) / sum;
       if (--indeg[j] === 0) queue[qt++] = j;
     }
@@ -79,21 +78,23 @@ export function wetnessIndex(S: Float32Array, n: number, cellM: number, rcv: Int
 }
 
 /** Local relief gradient: (max − min of `S` over the 3×3 neighbourhood) / (2 cells), a smoothed slope. */
-export function reliefSlope(S: Float32Array, n: number, cellM: number): Float32Array {
-  const out = new Float32Array(n * n);
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      let lo = Infinity;
-      let hi = -Infinity;
-      for (let yy = Math.max(0, y - 1); yy <= Math.min(n - 1, y + 1); yy++) {
-        for (let xx = Math.max(0, x - 1); xx <= Math.min(n - 1, x + 1); xx++) {
-          const v = S[yy * n + xx];
-          if (v < lo) lo = v;
-          if (v > hi) hi = v;
-        }
-      }
-      out[y * n + x] = (hi - lo) / (2 * cellM);
+export function reliefSlope(S: Float32Array, g: Grid): Float32Array {
+  const { cells: N, cellM, off8: off, border } = g;
+  const out = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const b = border[i];
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let k = -1; k < 8; k++) {
+      let j: number;
+      if (k < 0) j = i;
+      else if (b === 0) j = i + off[k];
+      else if ((j = g.nbr(i, k)) < 0) continue;
+      const v = S[j];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
     }
+    out[i] = (hi - lo) / (2 * cellM);
   }
   return out;
 }

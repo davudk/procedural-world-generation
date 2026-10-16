@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { flatGrid } from '../src/gen/grid/grid';
 import { breachShallow } from '../src/gen/hydro/breach';
 import { bifurcationRatio, hackExponent } from '../src/gen/hydro/metrics';
 import { Pipeline, type StageOutput } from '../src/gen/pipeline';
@@ -152,7 +153,7 @@ describe('breachShallow', () => {
     const row = [1, 3, 2.5, 2, 1.5, 0.5, -10];
     for (let x = 0; x < n; x++) h[3 * n + x] = row[x];
     fixed[3 * n + 6] = 1;
-    const r = breachShallow(h, n, fixed, 15, 10);
+    const r = breachShallow(h, flatGrid(n, 1), fixed, 15, 10);
     expect(r.breached).toBe(1);
     for (let x = 1; x < 6; x++) expect(h[3 * n + x]).toBeLessThan(h[3 * n + x - 1]);
   });
