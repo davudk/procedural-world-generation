@@ -114,7 +114,7 @@ export function applyWBudget(
   }
   for (const list of byKind.values()) {
     if (list.length < SIGNATURE_MIN) continue;
-    list.sort((a, b) => imp.get(b)! - imp.get(a)! || (tieLess(a, b) ? -1 : 1));
+    list.sort((a, b) => imp.get(b)! - imp.get(a)! || (tieLess(a, b) ? -1 : tieLess(b, a) ? 1 : 0));
     for (const c of list.slice(0, SIGNATURE_KEEP)) {
       keep.add(c);
       place(c);

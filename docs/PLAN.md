@@ -963,9 +963,10 @@ Spherical worlds are being added as an option, with flat staying the default ([r
 - An interleaved A/B against the baseline puts the refactor at +0.9 % on a build and −0.1 % on a preview.
 - 230 tests pass.
 
-**Known issue: landmarks are nondeterministic under V8 Maglev.** On Node 24, Maglev sometimes rewrites a gulf candidate in `registry/water.ts` `embayments()`. The gulf keeps its name but moves and shrinks.
-- The pre-refactor code shows the same flake in 5 of 12 runs, so the golden test runs with `--no-maglev`.
-- Chrome also uses Maglev, so the app may give different landmarks for the same seed. This needs a real fix.
+**Fixed: landmarks were nondeterministic under V8 Maglev.** A V8 bug let a gulf candidate share its number boxes with a later bay, so the gulf moved and shrank in some isolates. Chrome uses Maglev too.
+- Write-up: `docs/notes/v8-maglev-shared-number-boxes.md`.
+- Registry records are now copied with `own()` / `candidate()` as soon as they are built.
+- The golden test runs with Maglev again. `tests/jitDeterminism.test.ts` and `npm run jit-stress` re-run the registry in fresh isolates.
 
 **Phase 2 must revisit `border`:** on a sphere it means seam cells, not the map edge. These places use it:
 - biome river mouths and the majority filter;

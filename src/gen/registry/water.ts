@@ -1,5 +1,6 @@
 import { cellIndex, coarser, cellX as colOf, cellY as rowOf, onFace } from '../grid/grid';
 import { chamferDistance } from '../grid/ops';
+import { candidate, own } from './candidate';
 import { blockMean, cellAtM, cellX, cellY, insideDistance, label, labelAngle, mergeTree, nearestWhere, resolveOwners, type GridSpec } from './grid';
 import { gradAt } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
@@ -56,11 +57,11 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
     const areaKm2 = bArea[k] * rKm2;
     const isOcean = idx === 0 && edge[k] === 1 && areaKm2 >= 0.2 * worldKm2;
     const [x, y] = snapSea(I, S, cellX(R, t.peak[k]), cellY(R, t.peak[k]));
-    seaCands.push({
+    seaCands.push(candidate({
       kind: isOcean ? 'ocean' : 'sea', x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000,
       mag: Math.min(1, areaKm2 / (0.3 * worldKm2)),
       data: { areaKm2: Math.round(areaKm2), maxShoreDistKm: Math.round(t.peakV[k] * rKm) }, idX: cellX(R, t.peak[k]), idY: cellY(R, t.peak[k]),
-    });
+    }));
   });
   for (const c of seaCands.slice(0, 7)) out.push(c);
 
@@ -74,11 +75,11 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
     const c = t.col[k];
     const [vx, vy] = gradAt(S.dLand, R, c);
     const [x, y] = snapSea(I, S, cellX(R, c), cellY(R, c));
-    straits.push({
+    straits.push(candidate({
       kind: 'strait', x, y, angle: labelAngle(-vy, vx), extentM: Math.max(3 * widthKm, 15) * 1000,
       mag: Math.min(1, Math.min(t.area[k], t.area[p]) * rKm2 / 50000),
       data: { widthKm: Math.max(1, Math.round(widthKm)) }, idX: cellX(R, c), idY: cellY(R, c),
-    });
+    }));
   }
   straits.sort((a, b) => b.mag - a.mag);
   const keptStraits: Candidate[] = [];
@@ -190,10 +191,10 @@ function embayments(
     }
     const [x, y] = snapSea(I, S, px, py);
     const isGulf = fac > 1 && areaKm2 >= 6000;
-    list.push({
+    list.push(candidate({
       kind: isGulf ? 'gulf' : 'bay', x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000,
       mag: Math.min(1, Math.log10(areaKm2) / 5), data: { areaKm2: Math.round(areaKm2) }, idX: px, idY: py,
-    });
+    }));
   }
   return { list, lab: comps.label, g, area: comps.size };
 }
@@ -260,15 +261,15 @@ function detectFjords(I: RegistryInput, out: Candidate[]): void {
       path[2 * i + 1] = ys[i];
     }
     const last = xs.length - 1;
-    found.push({
+    found.push(candidate({
       kind: 'fjord', x: xs[mid], y: ys[mid], angle: labelAngle(xs[last] - xs[0], ys[last] - ys[0]), extentM: lenKm * 1000,
       mag: Math.min(1, lenKm / 150), data: { lengthKm: Math.round(lenKm) }, idX: xs[last], idY: ys[last], path,
-    });
+    }));
   }
   found.sort((a, b) => b.extentM - a.extentM);
   const kept = found.slice(0, 25);
   if (kept.length > 0) {
-    kept[0].hero = { cat: 'fjord-coast', score: totalKm / 150 };
+    kept[0].hero = own({ cat: 'fjord-coast', score: totalKm / 150 });
     kept[0].data.fjordCount = found.length;
     kept[0].data.fjordTotalKm = Math.round(totalKm);
   }
@@ -280,25 +281,25 @@ function coastalFeatures(I: RegistryInput, out: Candidate[]): void {
   const fs = I.landforms.features;
   const lagoons = fs.filter((f) => f.type === 'lagoon' && !f.data?.atoll && f.size >= 4000).sort((a, b) => b.size - a.size).slice(0, 8);
   for (const f of lagoons) {
-    out.push({
+    out.push(candidate({
       kind: 'lagoon', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 40000),
       data: { areaKm2: Math.round(f.data?.areaKm2 ?? (f.size / 1000) ** 2) }, idX: f.x, idY: f.y,
-    });
+    }));
   }
   const reefs = fs.filter((f) => f.type === 'reef' && f.size >= 10000).sort((a, b) => b.size - a.size).slice(0, 6);
   for (const f of reefs) {
-    out.push({
+    out.push(candidate({
       kind: 'reef', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 150000),
       data: { lengthKm: Math.round(f.size / 1000), barrier: f.data?.barrier ? 1 : 0 }, idX: f.x, idY: f.y,
       // A great barrier reef (≥ ~150 km) is a hero option of reef and island worlds (M8 baseline rec. 12).
       hero: { cat: 'reef', score: f.size / 150000 },
-    });
+    }));
   }
   const atolls = fs.filter((f) => f.type === 'atoll').sort((a, b) => b.size - a.size).slice(0, 10);
   for (const f of atolls) {
-    out.push({
+    out.push(candidate({
       kind: 'atoll', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 30000),
       data: { diameterKm: Math.round(f.size / 100) / 10, islets: f.data?.motu ?? 0 }, idX: f.x, idY: f.y, tier: 'rare',
-    });
+    }));
   }
 }

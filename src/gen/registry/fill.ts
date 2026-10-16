@@ -3,6 +3,7 @@ import { chamferDistance } from '../grid/ops';
 import { RIVER } from '../../shared/protocol';
 import type { LandmarkKind } from '../../shared/landmarks';
 import { BIOME } from '../../shared/biomes';
+import { candidate } from './candidate';
 import { cellAtM, cellX, cellY, label, nearestWhere } from './grid';
 import { G, groupOf } from './shared';
 import type { ReliefResult } from './relief';
@@ -106,12 +107,12 @@ function fillBand(I: RegistryInput, S: Shared, out: Candidate[], relief: ReliefR
         const y = cellY(fine, c);
         const ext = Math.min(B.maxExtentM, Math.sqrt(t.area[k] * cellKm2) * 1000);
         const isPeak = p >= (area ? A_PEAK_PROM : R_PEAK_PROM);
-        return {
+        return candidate({
           kind: isPeak ? 'peak' : 'hill', x, y, angle: NaN, extentM: ext, visM: isPeak ? 1000 * (p / 300) ** 0.9 : ext,
           mag: isPeak ? 0.4 * Math.min(1, p / 3000) : Math.min(1, p / 600),
           data: { heightM: Math.round(t.peakV[k]), prominenceM: Math.round(p) }, idX: x, idY: y,
           ...(!isPeak && p < RISE_PROM ? { variant: 'rise' } : {}), tier: 'common', landmass: S.masses.label[c],
-        };
+        });
       },
     });
   });
@@ -191,10 +192,10 @@ function patches(I: RegistryInput, S: Shared, B: Band, far: (c: number) => boole
           const y = cellY(I.fine, c);
           const b = I.biome.biome[c];
           const variant = kind === 'forest' ? 'wood' : b === BIOME.BOG || b === BIOME.FEN ? 'moss' : 'fen';
-          return {
+          return candidate({
             kind, x, y, angle: NaN, extentM: Math.sqrt(a) * 1000, mag: Math.min(1, a / 2000), data: { areaKm2: Math.round(a) },
             idX: x, idY: y, variant, tier: 'common', landmass: S.masses.label[c],
-          };
+          });
         },
       });
     });
@@ -288,11 +289,11 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number
       const t = I.climate.temp[fc >= 0 ? fc : cellAtM(I.fine, x, y)];
       variant = t < -5 ? 'polar' : t < 12 ? 'cold' : 'hot';
     }
-    out.push({
+    out.push(candidate({
       kind: kind as LandmarkKind, x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000, mag: Math.min(1, areaKm2 / 200000),
       data: { areaKm2: Math.round(areaKm2), wFill: 1 }, idX: x, idY: y, variant, tier: 'common',
       landmass: fc >= 0 ? S.masses.label[fc] : -1,
-    });
+    }));
     mark(x, y);
     added++;
   }

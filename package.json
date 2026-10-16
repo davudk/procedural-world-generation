@@ -12,7 +12,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "metrics": "node --experimental-transform-types --no-warnings --import ./metrics/register.mjs metrics/cli.ts",
-    "bench": "node --experimental-transform-types --no-warnings --import ./metrics/register.mjs metrics/bench.ts"
+    "bench": "node --experimental-transform-types --no-warnings --import ./metrics/register.mjs metrics/bench.ts",
+    "jit-stress": "node --experimental-transform-types --no-warnings --import ./metrics/register.mjs metrics/jitStress.ts"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

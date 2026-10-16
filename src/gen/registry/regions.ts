@@ -1,4 +1,5 @@
 import { BIOME } from '../../shared/biomes';
+import { candidate } from './candidate';
 import { cellAtM, cellX, cellY, insideDistance, label, nearestWhere, pca } from './grid';
 import { G, groupOf } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
@@ -53,12 +54,12 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
     for (const c of r.cells) t += tempAt(c);
     t /= r.cells.length;
     const ax = pca(r.cells, R);
-    out.push({
+    out.push(candidate({
       kind: 'desert', x, y, angle: NaN, extentM: Math.max(Math.sqrt(r.areaKm2), ax.length * R.cellM / 1000 * 0.7) * 1000,
       mag: Math.min(1, r.areaKm2 / 150000), data: { areaKm2: Math.round(r.areaKm2), meanTempC: Math.round(t * 10) / 10 },
       idX: cellX(R, r.pole), idY: cellY(R, r.pole), variant: t < -5 ? 'polar' : t < 12 ? 'cold' : 'hot',
       landmass: S.masses.label[cellAtM(I.fine, x, y)],
-    });
+    }));
   }
 
   // Great forests: one region per forest group.
@@ -66,11 +67,11 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
   for (const [gr, variant] of [[G.BOREAL, 'taiga'], [G.TEMPERATE, 'forest'], [G.TROPICAL, 'jungle']] as const) {
     for (const r of regions([gr], 0.55, 6000).slice(0, 3)) {
       const [x, y] = anchor(r.pole);
-      forests.push({
+      forests.push(candidate({
         kind: 'forest', x, y, angle: NaN, extentM: Math.sqrt(r.areaKm2) * 1000, mag: Math.min(1, r.areaKm2 / 200000),
         data: { areaKm2: Math.round(r.areaKm2) }, idX: cellX(R, r.pole), idY: cellY(R, r.pole), variant,
         landmass: S.masses.label[cellAtM(I.fine, x, y)],
-      });
+      }));
     }
   }
   forests.sort((a, b) => b.extentM - a.extentM);
@@ -92,11 +93,11 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
       for (const [b, k] of counts) if (k > dc || (k === dc && b < dom)) (dc = k), (dom = b);
       const variant = dom === BIOME.SAVANNA ? 'savanna' : dom === BIOME.STEPPE ? 'steppe' : dom === BIOME.TUNDRA ? 'tundra' : 'scrub';
       const [x, y] = anchor(r.pole);
-      open.push({
+      open.push(candidate({
         kind: 'grassland', x, y, angle: NaN, extentM: Math.sqrt(r.areaKm2) * 1000, mag: Math.min(1, r.areaKm2 / 200000),
         data: { areaKm2: Math.round(r.areaKm2) }, idX: cellX(R, r.pole), idY: cellY(R, r.pole), variant,
         landmass: S.masses.label[cellAtM(I.fine, x, y)],
-      });
+      }));
     }
   }
   open.sort((a, b) => b.extentM - a.extentM);
@@ -115,11 +116,11 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
     const variant = dom === BIOME.SWAMP ? 'swamp' : dom === BIOME.FEN ? 'fen' : dom === BIOME.BOG ? 'bog' : dom === BIOME.MANGROVE ? 'mangrove'
       : dom === BIOME.SALT_MARSH ? 'saltmarsh' : 'marsh';
     const [x, y] = anchor(r.pole);
-    out.push({
+    out.push(candidate({
       kind: 'wetland', x, y, angle: NaN, extentM: Math.sqrt(r.areaKm2) * 1000, mag: Math.min(1, r.areaKm2 / 30000),
       data: { areaKm2: Math.round(r.areaKm2) }, idX: cellX(R, r.pole), idY: cellY(R, r.pole), variant,
       landmass: S.masses.label[cellAtM(I.fine, x, y)],
-    });
+    }));
   }
 
   // Ergs (sand seas).
@@ -127,11 +128,11 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
     .sort((a, b) => (b.data?.areaKm2 ?? 0) - (a.data?.areaKm2 ?? 0)).slice(0, 3);
   for (const e of ergs) {
     const a = e.data?.areaKm2 ?? 0;
-    out.push({
+    out.push(candidate({
       kind: 'erg', x: e.x, y: e.y, angle: NaN, extentM: e.size, mag: Math.min(1, a / 40000), data: { areaKm2: Math.round(a) },
       idX: e.x, idY: e.y, hero: { cat: 'sand-sea', score: a / 20000 }, tier: a >= 20000 ? 'rare' : 'uncommon',
       landmass: S.masses.label[cellAtM(I.fine, e.x, e.y)],
-    });
+    }));
   }
 
   // Ice caps and glaciers (macro grid).
@@ -154,11 +155,11 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
     const fc = nearestWhere(fine, cx, cy, Math.max(4, Math.sqrt(comps.size[k])), (c) => comps.label[c] === k);
     const x = fc >= 0 ? cellX(I.fine, fc) : cx * I.fine.cellM;
     const y = fc >= 0 ? cellY(I.fine, fc) : cy * I.fine.cellM;
-    (cap ? caps : glaciers).push({
+    (cap ? caps : glaciers).push(candidate({
       kind: cap ? 'icecap' : 'glacier', x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000 * (cap ? 1 : 1.5),
       mag: Math.min(1, Math.log10(areaKm2) / 5), data: { areaKm2: Math.round(areaKm2) }, idX: x, idY: y,
       variant: areaKm2 >= 50000 ? 'sheet' : cap ? 'cap' : 'glacier', landmass: fc >= 0 ? S.masses.label[fc] : -1,
-    });
+    }));
   }
   out.push(...caps, ...glaciers);
 }
