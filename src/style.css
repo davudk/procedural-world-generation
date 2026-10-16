@@ -91,39 +91,6 @@ body {
   color: var(--text-dim);
 }
 
-#progress {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  flex: 1 1 auto;
-  justify-content: flex-end;
-}
-
-.stage {
-  padding: 1px 6px;
-  border-radius: 3px;
-  color: var(--text-dim);
-  background: rgba(255, 255, 255, 0.04);
-  white-space: nowrap;
-}
-
-.stage.running {
-  color: var(--accent);
-  background: rgba(224, 178, 90, 0.12);
-}
-
-.stage.done {
-  color: var(--ok);
-}
-
-.stage.cached {
-  color: var(--text-dim);
-}
-
-.stage.error {
-  color: var(--err);
-}
-
 #panel {
   position: fixed;
   top: 10px;

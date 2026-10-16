@@ -8,13 +8,14 @@ import { Minimap } from './render/minimap';
 import { RasterView, sampleLayer } from './render/rasterView';
 import { WorldView } from './render/worldView';
 import { fmtNum, resolve } from './shared/config/resolve';
-import type { StageId, WorldSpec } from './shared/config/types';
+import type { WorldSpec } from './shared/config/types';
 import { queryToSpec, specToQuery } from './shared/config/url';
 import type { Landmark } from './shared/landmarks';
 import type { FromWorker, GenMode, Layer, RiverGraph } from './shared/protocol';
 import { AtlasPanel, KIND_LABEL } from './ui/atlas';
 import { Compass } from './ui/compass';
 import { ConfigPanel } from './ui/configPanel';
+import { GenProgress } from './ui/genProgress';
 
 /** Delay after the last settings change before a full-quality build starts. */
 const BUILD_IDLE_MS = 900;
@@ -25,7 +26,7 @@ const PALETTE_KEY = 'pwg.palette';
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('view');
 const seedInput = $<HTMLInputElement>('seed');
-const progressEl = $('progress');
+const progress = new GenProgress($('progress'), $('topbar'));
 const layerSelect = $<HTMLSelectElement>('layer-select');
 const legendEl = $('legend');
 const inspectEl = $('inspect');
@@ -35,7 +36,6 @@ const layers = new Map<string, Layer>();
 let selected = readStored(LAYER_KEY) ?? 'elevation';
 let fittedFor = -1;
 let buildTimer = 0;
-const stageEls = new Map<StageId, HTMLElement>();
 let rivers: RiverGraph | null = null;
 let landmarks: Landmark[] = [];
 /** Realised 🎯 targets of the current run; later stages refine earlier values. */
@@ -154,7 +154,7 @@ function regenerate(): void {
 
 function startGen(mode: GenMode): void {
   if (mode === 'build') clearTimeout(buildTimer);
-  for (const el of stageEls.values()) el.className = 'stage';
+  progress.start(mode);
   outcomes = {};
   gen.generate(resolve(spec), mode);
 }
@@ -162,15 +162,13 @@ function startGen(mode: GenMode): void {
 function onGenEvent(msg: FromWorker): void {
   switch (msg.type) {
     case 'stage-start':
-      stageEl(msg.stage, msg.label).className = 'stage running';
+      progress.stageStart(msg.stage, msg.label);
       break;
     case 'stage-done': {
-      const el = stageEl(msg.stage, msg.label);
-      el.className = `stage ${msg.cached ? 'cached' : 'done'}`;
-      el.textContent = `${msg.label} ${msg.cached ? 'cached' : `${Math.round(msg.ms)} ms`}`;
-      el.title = Object.entries(msg.stats)
+      const stats = Object.entries(msg.stats)
         .map(([k, v]) => `${k}: ${fmtNum(v)}`)
         .join('\n');
+      progress.stageDone(msg.stage, msg.label, msg.ms, msg.cached, `${msg.cached ? 'cached' : `${Math.round(msg.ms)} ms`}\n${stats}`);
       for (const l of msg.layers) layers.set(l.id, l);
       if (msg.vectors?.rivers) {
         rivers = msg.vectors.rivers;
@@ -189,23 +187,14 @@ function onGenEvent(msg: FromWorker): void {
     }
     case 'error':
       console.error(msg.message);
-      progressEl.insertAdjacentHTML('beforeend', '<span class="stage error">error (see console)</span>');
+      progress.fail();
       break;
     case 'done':
+      progress.finish();
+      break;
     case 'cancelled':
       break;
   }
-}
-
-function stageEl(id: StageId, label: string): HTMLElement {
-  let el = stageEls.get(id);
-  if (!el) {
-    el = document.createElement('span');
-    progressEl.append(el);
-    stageEls.set(id, el);
-  }
-  el.textContent = label;
-  return el;
 }
 
 // ── Layers, legend, inspector ─────────────────────────────────────────────────────────────
@@ -213,14 +202,18 @@ function stageEl(id: StageId, label: string): HTMLElement {
 function refreshLayerList(): void {
   const ids = [...layers.keys()];
   if (layerSelect.options.length === ids.length) return;
-  layerSelect.replaceChildren(
-    ...ids.map((id) => {
-      const o = document.createElement('option');
-      o.value = id;
-      o.textContent = `${layers.get(id)!.label}  (${layers.get(id)!.stage})`;
-      return o;
-    }),
-  );
+  const option = (id: string, text: string): HTMLOptionElement => {
+    const o = document.createElement('option');
+    o.value = id;
+    o.textContent = text;
+    return o;
+  };
+  // The elevation layer is the finished world (realistic colouring, water, rivers, labels); every
+  // other layer drapes one generation raster over the terrain for inspection.
+  const data = document.createElement('optgroup');
+  data.label = 'Data layers';
+  data.append(...ids.filter((id) => id !== 'elevation').map((id) => option(id, `${layers.get(id)!.label}  (${layers.get(id)!.stage})`)));
+  layerSelect.replaceChildren(...(layers.has('elevation') ? [option('elevation', 'World (final, realistic)')] : []), data);
   layerSelect.value = shownLayerId();
 }
 
