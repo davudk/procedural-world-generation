@@ -1,0 +1,530 @@
+/* World configuration panel (CONFIG.md §7). All tokens are local to .pp-root. */
+
+.pp-root {
+  --bg: #090a0d;
+  --panel: rgba(10, 12, 16, 0.82);
+  --panel-border: rgba(255, 255, 255, 0.08);
+  --text: #d8dde6;
+  --text-dim: #8a93a3;
+  --accent: #e0b25a;
+  --preset: #6f9fe0;
+  --warn: #e0805a;
+  --ok: #7cc48a;
+  --auto: #5d6574;
+  --hover: rgba(255, 255, 255, 0.05);
+  --field: rgba(255, 255, 255, 0.06);
+
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--panel-border);
+  color: var(--text);
+  font: 12px/1.35 ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+  -webkit-font-smoothing: antialiased;
+}
+
+.pp-root *,
+.pp-root *::before,
+.pp-root *::after {
+  box-sizing: inherit;
+}
+
+.pp-root [hidden] {
+  display: none !important;
+}
+
+.pp-root button,
+.pp-root select,
+.pp-root input {
+  font: inherit;
+  color: inherit;
+}
+
+.pp-root :focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ── header ───────────────────────────────────────────────────────────────── */
+
+.pp-header {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.pp-head-line {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pp-archetype {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pp-select,
+.pp-search {
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  background: var(--field);
+}
+
+.pp-select option {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.pp-search {
+  width: 100%;
+}
+
+.pp-search::placeholder {
+  color: var(--text-dim);
+}
+
+.pp-btn {
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  background: var(--field);
+  cursor: pointer;
+}
+
+.pp-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.pp-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pp-warnings {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pp-warning-btn {
+  width: 100%;
+  padding: 3px 6px;
+  border: 1px solid rgba(224, 128, 90, 0.35);
+  border-radius: 4px;
+  background: rgba(224, 128, 90, 0.08);
+  color: var(--warn);
+  text-align: left;
+  cursor: pointer;
+}
+
+/* ── body & sections ─────────────────────────────────────────────────────── */
+
+.pp-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 16px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+.pp-section {
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.pp-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  background: none;
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.pp-section-head:hover {
+  color: var(--text);
+}
+
+.pp-caret {
+  display: inline-block;
+  transition: transform 0.12s;
+  transform: rotate(90deg);
+}
+
+.pp-section-title {
+  flex: 1 1 auto;
+}
+
+.pp-section-count {
+  color: var(--accent);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.pp-section-body {
+  padding: 0 0 4px;
+}
+
+.pp-collapsed .pp-caret {
+  transform: none;
+}
+
+.pp-collapsed .pp-section-body {
+  display: none;
+}
+
+/* While searching, every section with a match is shown expanded. */
+.pp-searching .pp-collapsed .pp-section-body {
+  display: block;
+}
+
+/* ── rows ────────────────────────────────────────────────────────────────── */
+
+.pp-row {
+  padding: 3px 10px 4px;
+  border-left: 2px solid transparent;
+}
+
+.pp-row:hover {
+  background: var(--hover);
+}
+
+.pp-row[data-state='set'] {
+  border-left-color: var(--accent);
+}
+
+.pp-row[data-state='preset'] {
+  border-left-color: var(--preset);
+}
+
+.pp-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 20px;
+  min-width: 0;
+}
+
+.pp-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: help;
+}
+
+.pp-target {
+  font-size: 10px;
+}
+
+.pp-value {
+  flex: none;
+  max-width: 50%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  cursor: help;
+}
+
+.pp-row[data-state='auto'] .pp-value {
+  color: var(--text-dim);
+}
+
+.pp-row[data-readonly] .pp-value {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.pp-row-head .pp-select {
+  flex: none;
+  max-width: 50%;
+  height: 20px;
+  padding: 0 4px;
+}
+
+.pp-check {
+  flex: none;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.pp-select[data-state='auto'],
+.pp-check[data-state='auto'] {
+  opacity: 0.7;
+}
+
+.pp-warn {
+  flex: none;
+  color: var(--warn);
+  cursor: help;
+}
+
+.pp-chip {
+  flex: none;
+  min-width: 46px;
+  height: 16px;
+  padding: 0 4px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  background: none;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  line-height: 14px;
+  cursor: pointer;
+}
+
+.pp-chip[data-state='auto'] {
+  color: var(--auto);
+}
+
+.pp-chip[data-state='preset'] {
+  color: var(--preset);
+  cursor: default;
+}
+
+.pp-chip[data-state='set'] {
+  color: var(--accent);
+  background: rgba(224, 178, 90, 0.12);
+}
+
+.pp-chip.pp-partial {
+  border-style: dashed;
+}
+
+.pp-chip:hover:not([data-state='preset']) {
+  filter: brightness(1.3);
+}
+
+.pp-reset {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.pp-reset:hover {
+  color: var(--accent);
+  background: var(--hover);
+}
+
+/* Keep the chip column aligned whether or not ↺ is shown. */
+.pp-reset[hidden] {
+  display: block !important;
+  visibility: hidden;
+}
+
+.pp-row-ctrl {
+  padding: 2px 0 0;
+}
+
+.pp-row-note {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.pp-row-note:empty,
+.pp-row-note:has(> span:empty + span:empty) {
+  display: none;
+}
+
+.pp-outcome[data-ok='true'] {
+  color: var(--ok);
+}
+
+.pp-outcome[data-ok='false'] {
+  color: var(--warn);
+}
+
+.pp-outcome.pp-stale {
+  opacity: 0.5;
+}
+
+.pp-flash {
+  animation: pp-flash 0.6s ease-out;
+}
+
+@keyframes pp-flash {
+  from {
+    background: rgba(224, 178, 90, 0.18);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pp-flash {
+    animation-duration: 0.01s;
+  }
+  .pp-caret {
+    transition: none;
+  }
+}
+
+/* ── range slider (.rs, from rangeSlider.ts) ─────────────────────────────── */
+
+.rs {
+  --rs-thumb: 14px;
+  --a: 0;
+  --b: 0;
+  --rs-usable: calc(100% - var(--rs-thumb));
+  --rs-fill-color: var(--auto, #5d6574);
+  position: relative;
+  height: 20px;
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: pointer;
+}
+
+.rs[data-fill='preset'] {
+  --rs-fill-color: var(--preset, #6f9fe0);
+}
+
+.rs[data-fill='set'] {
+  --rs-fill-color: var(--accent, #e0b25a);
+}
+
+.rs-track {
+  position: absolute;
+  left: calc(var(--rs-thumb) / 2);
+  right: calc(var(--rs-thumb) / 2);
+  top: 50%;
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.rs-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--a) * 100%);
+  width: calc((var(--b) - var(--a)) * 100%);
+  border-radius: inherit;
+  background: var(--rs-fill-color);
+  opacity: 0.85;
+}
+
+/* Span mode: the fill fades in toward the "to" end to show direction. */
+.rs[data-span] .rs-fill {
+  background: linear-gradient(to right, transparent, var(--rs-fill-color));
+}
+
+.rs[data-span][data-dir='rev'] .rs-fill {
+  background: linear-gradient(to left, transparent, var(--rs-fill-color));
+}
+
+.rs-arrow {
+  position: absolute;
+  top: -3px;
+  left: calc(var(--rs-thumb) / 2 + (var(--a) + var(--b)) / 2 * var(--rs-usable));
+  transform: translateX(-50%);
+  font-size: 10px;
+  line-height: 10px;
+  color: var(--rs-fill-color);
+  pointer-events: none;
+}
+
+.rs-thumb {
+  --p: 0;
+  position: absolute;
+  top: 50%;
+  left: calc(var(--p) * var(--rs-usable));
+  width: var(--rs-thumb);
+  height: var(--rs-thumb);
+  margin-top: calc(var(--rs-thumb) / -2);
+  border-radius: 50%;
+  border: 2px solid var(--auto, #5d6574);
+  background: var(--bg, #090a0d);
+  touch-action: none;
+  cursor: grab;
+  z-index: 1;
+  transition: border-color 0.12s, background-color 0.12s;
+}
+
+.rs-thumb:active {
+  cursor: grabbing;
+}
+
+.rs-thumb.rs-top,
+.rs-thumb:focus-visible {
+  z-index: 2;
+}
+
+.rs-thumb[data-state='preset'] {
+  border-color: var(--preset, #6f9fe0);
+  background: var(--preset, #6f9fe0);
+}
+
+.rs-thumb[data-state='set'] {
+  border-color: var(--accent, #e0b25a);
+  background: var(--accent, #e0b25a);
+}
+
+.rs-thumb:hover {
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.06);
+}
+
+.rs-thumb:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(224, 178, 90, 0.45);
+}
+
+/* Span "from" thumb is square so the two ends stay distinguishable when they cross. */
+.rs[data-span] .rs-thumb[data-thumb='0'] {
+  border-radius: 3px;
+}
+
+/* ── narrow containers (drawer on phones) ────────────────────────────────── */
+
+@media (max-width: 480px) {
+  .pp-root {
+    border-left: 0;
+    font-size: 13px;
+  }
+  .rs {
+    height: 28px;
+  }
+  .pp-row {
+    padding: 4px 12px 6px;
+  }
+}

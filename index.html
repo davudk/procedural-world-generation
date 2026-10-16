@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#090a0d" />
+    <title>Procedural World</title>
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+    <header id="topbar">
+      <span class="brand">Procedural World</span>
+      <label class="seed">seed <input id="seed" type="text" inputmode="numeric" spellcheck="false" /></label>
+      <button id="dice" title="Random seed">🎲</button>
+      <button id="build" title="Full-quality build (B)">Build</button>
+      <button id="panel-toggle" class="drawer-only" title="Settings">☰</button>
+      <div id="progress"></div>
+    </header>
+    <aside id="panel"></aside>
+    <section id="layers">
+      <select id="layer-select" title="Layer"></select>
+      <div id="legend"></div>
+      <div id="inspect"></div>
+    </section>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
