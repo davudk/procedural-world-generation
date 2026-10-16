@@ -66,7 +66,7 @@ function checkFixed(w: World): void {
         const yy = y + DY[k];
         if (xx < 0 || yy < 0 || xx >= n || yy >= n) continue;
         const j = yy * n + xx;
-        expect(fixed[j] && water(j), `unfixed water ${i} touches fixed water ${j}`).toBe(false);
+        expect(fixed[j] === 1 && water(j), `unfixed water ${i} touches fixed water ${j}`).toBe(false);
       }
     }
   }

@@ -33,12 +33,12 @@ const SWELL_SHARE = 0.32;
 const SWELL_KM = 500;
 const SWELL_PEAK = 4500;
 /** Cap on uplift, relative to the steady-state uplift for the top of the peakHeight spread. */
-const U_CAP_REL = 0.68;
+const U_CAP_REL = 0.6;
 /** King massif: summit target relative to the top of the peakHeight spread, and cone radius (km). */
 const KING_REL = 1.7;
 const KING_RADIUS_KM = 40;
-/** Ceiling of the king's uplift target (m); erosion-model summits land ~1.25× above the target. */
-const KING_MAX_M = 8000;
+/** Ceiling of the king's uplift target (m). Erosion-model summits land ~1.5× above it; the refine stage's summit ceiling keeps them below 9 km. */
+const KING_MAX_M = 7000;
 /** Dome profile exponent (1 − (r/R)²)^p: higher = a sharper summit, but a lower one. */
 const KING_SHAPE = 1;
 

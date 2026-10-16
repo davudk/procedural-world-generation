@@ -109,6 +109,15 @@ function outside(x: number, y: number, k: number, n: number): boolean {
  * `halfWidthM`: integrates S = U/(K·A^m) with A = HACK_COEF·s² from the first resolved cell to the
  * range half-width (research 01 §3.1, any m).
  */
+/**
+ * Factor that keeps the steady-state relief of an uplift field when the grid is refined from
+ * `coarseM` to `fineM` cells (the relief integral grows as cells shrink). Evaluated at a typical
+ * mountain half-width; it varies by only a few per cent across range sizes.
+ */
+export function upliftRefineFactor(coarseM: number, fineM: number, m: number, halfWidthM = 50e3): number {
+  return upliftForPeak(1, 1, m, halfWidthM, fineM) / upliftForPeak(1, 1, m, halfWidthM, coarseM);
+}
+
 export function upliftForPeak(targetPeakM: number, K: number, m: number, halfWidthM: number, cellM: number): number {
   const s0 = cellM;
   const W = Math.max(halfWidthM, 2 * cellM);

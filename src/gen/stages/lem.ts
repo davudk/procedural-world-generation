@@ -1,7 +1,7 @@
 import type { Layer } from '../../shared/protocol';
 import { components } from '../grid/ops';
 import { upsampleBicubic } from '../grid/upsample';
-import { runLem, type LemParams } from '../lem/streamPower';
+import { runLem, upliftRefineFactor, type LemParams } from '../lem/streamPower';
 import type { StageCtx, StageDef } from '../pipeline';
 import { LEM_M } from './base';
 import type { TerrainExtra } from './stamps';
@@ -11,6 +11,13 @@ export interface ErodedExtra extends TerrainExtra {
   area: Float32Array;
   rcv: Int32Array;
 }
+
+/** Most a refine level may raise a cell above the upsampled coarse surface (m). */
+const REFINE_RISE_M = 60;
+
+/** Summit ceiling: heights above KNEE ease towards KNEE + SPAN (tanh), keeping order and smooth slopes. */
+const SUMMIT_KNEE_M = 7600;
+const SUMMIT_SPAN_M = 1400;
 
 /** Land components at least this share of all land count as continents; smaller ones are islands. */
 const CONTINENT_MIN_SHARE = 0.1;
@@ -62,6 +69,10 @@ export const refineStage: StageDef = {
       const n = cur.n * 2;
       const h = upsampleBicubic(cur.h, cur.n, 2);
       const U = upsampleBicubic(cur.U, cur.n, 2);
+      // Halving the cell size raises the steady-state relief of the same uplift; rescale so the
+      // refined summits keep the heights the erosion grid reached.
+      const uScale = upliftRefineFactor(cur.cellKm * 1000, cur.cellKm * 500, LEM_M);
+      for (let i = 0; i < U.length; i++) U[i] *= uScale;
       const K = upsampleBicubic(cur.K, cur.n, 2);
       const strata = upsampleBicubic(cur.strata, cur.n, 2);
       // Sub-cell jitter so flow on flat ground doesn't lock onto the new grid's axes.
@@ -75,8 +86,11 @@ export const refineStage: StageDef = {
         if (U[i] < 0) U[i] = 0;
       }
       const iterations = Math.max(10, Math.round(ctx.num('lemIterations') * 0.3));
+      const up = h.slice();
       const r = await erode(ctx, { n, cellKm: cur.cellKm / 2, h, U, K, strata, fixed }, h, iterations);
       ms += r.ms;
+      // Refinement carves finer valleys; it must not raise summits above the coarse surface.
+      for (let i = 0; i < n * n; i++) r.extra.h[i] = Math.min(r.extra.h[i], up[i] + REFINE_RISE_M);
       cur = r.extra;
     }
 
@@ -88,6 +102,9 @@ export const refineStage: StageDef = {
         h[i] -= rise;
         if (h[i] <= 0) fixed[i] = 1;
       }
+    }
+    for (let i = 0; i < h.length; i++) {
+      if (h[i] > SUMMIT_KNEE_M) h[i] = SUMMIT_KNEE_M + SUMMIT_SPAN_M * Math.tanh((h[i] - SUMMIT_KNEE_M) / SUMMIT_SPAN_M);
     }
     const final: ErodedExtra = { ...cur, h, fixed };
     const n = final.n;
