@@ -270,6 +270,39 @@ export function finer(g: Grid, factor: number): Grid {
   return derive(g, 1 / factor, () => flatGrid(g.n * factor, g.cellKm / factor, g.mapEdge));
 }
 
+/**
+ * Distance from cell i to the nearest map edge, in map widths (flat: min(x, y, n−1−x, n−1−y) / n,
+ * the rule continents and coasts used before the Grid); Infinity on a closed surface.
+ */
+export function mapEdgeDistance(g: Grid, i: number): number {
+  if (g.shape !== 'flat') return Infinity;
+  const n = g.n;
+  const x = i % n;
+  const y = (i - x) / n;
+  return Math.min(x, y, n - 1 - x, n - 1 - y) / n;
+}
+
+/**
+ * Visits the (2r + 1)² window of cells around c with their offsets in cells (dx east, dy south),
+ * rows north to south, west to east; cells off the map are skipped. For per-feature smoothing and
+ * small-window statistics, not for per-cell hot loops.
+ */
+export function forWindow(g: Grid, c: number, r: number, visit: (j: number, dx: number, dy: number) => void): void {
+  if (g.shape !== 'flat') throw new Error('forWindow: only flat grids exist yet');
+  const n = g.n;
+  const x = c % n;
+  const y = (c - x) / n;
+  for (let dy = -r; dy <= r; dy++) {
+    const ny = y + dy;
+    if (ny < 0 || ny >= n) continue;
+    for (let dx = -r; dx <= r; dx++) {
+      const nx = x + dx;
+      if (nx < 0 || nx >= n) continue;
+      visit(ny * n + nx, dx, dy);
+    }
+  }
+}
+
 /** Face-local column of cell i. */
 export function cellX(g: Grid, i: number): number {
   return (i % (g.n * g.n)) % g.n;

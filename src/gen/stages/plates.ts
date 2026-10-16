@@ -2,7 +2,9 @@ import type { Rng } from '../../shared/rng';
 import { Noise2 } from '../../shared/noise';
 import type { Layer } from '../../shared/protocol';
 import { distanceField } from '../grid/distance';
+import { cellX, cellY, forWindow, mapEdgeDistance, type Grid } from '../grid/grid';
 import { MinHeap } from '../grid/heap';
+import { cellAt } from '../grid/sample';
 import type { StageCtx, StageDef } from '../pipeline';
 
 /** Boundary classes (research 01 §1.3). */
@@ -55,9 +57,11 @@ export interface PlatesExtra {
   vy: Float64Array;
 }
 
+/** Step length per axial-order neighbour (E W S N, then the diagonals), in cells. */
+const DL = [1, 1, 1, 1, Math.SQRT2, Math.SQRT2, Math.SQRT2, Math.SQRT2];
+/** Axial-order direction per neighbour (for the continent anisotropy). */
 const DX = [1, -1, 0, 0, 1, 1, -1, -1];
 const DY = [0, 0, 1, -1, 1, -1, 1, -1];
-const DL = [1, 1, 1, 1, Math.SQRT2, Math.SQRT2, Math.SQRT2, Math.SQRT2];
 
 /** Minimum length of a boundary segment that counts as a mountain range or rift. */
 const RANGE_MIN_KM = 100;
@@ -83,22 +87,23 @@ export const platesStage: StageDef = {
   ],
   async run(ctx) {
     const n = ctx.mode === 'preview' ? 128 : 256;
+    const g = ctx.grid(n);
     const worldKm = ctx.num('worldSize');
-    const cellKm = worldKm / n;
+    const cellKm = g.cellKm;
 
-    const { plate, count, major } = growPlates(ctx, n, worldKm);
+    const { plate, count, major } = growPlates(ctx, g);
     await ctx.checkpoint();
-    const continent = growContinents(ctx, n, worldKm);
+    const continent = growContinents(ctx, g);
     await ctx.checkpoint();
 
     // Plate centroids and radii (km) for rigid motion.
     const cx = new Float64Array(count);
     const cy = new Float64Array(count);
     const area = new Float64Array(count);
-    for (let c = 0; c < n * n; c++) {
+    for (let c = 0; c < g.cells; c++) {
       const p = plate[c];
-      cx[p] += ((c % n) + 0.5) * cellKm;
-      cy[p] += (Math.floor(c / n) + 0.5) * cellKm;
+      cx[p] += (cellX(g, c) + 0.5) * cellKm;
+      cy[p] += (cellY(g, c) + 0.5) * cellKm;
       area[p]++;
     }
     for (let p = 0; p < count; p++) {
@@ -106,7 +111,7 @@ export const platesStage: StageDef = {
       cy[p] /= Math.max(1, area[p]);
     }
 
-    const frame = boundaryFrame(plate, continent, n);
+    const frame = boundaryFrame(plate, continent, g);
     const targetRanges = ctx.drawn('mountainRangeCount');
     const targetRifts = ctx.drawn('riftCount');
     const activity = ctx.num('tectonicActivity');
@@ -118,7 +123,7 @@ export const platesStage: StageDef = {
       Math.max(0, r[0] - v, v - r[1]) + 0.1 * Math.abs(v - drawn);
     for (let k = 0; k < CANDIDATES; k++) {
       const motion = randomMotion(ctx.rng('motion', k), count, major, area, cellKm, activity);
-      const cand = classify(frame, plate, continent, n, cellKm, cx, cy, motion, ctx.rng('override', k));
+      const cand = classify(frame, plate, continent, g, cx, cy, motion, ctx.rng('override', k));
       const score = miss(cand.ranges, rangeR, targetRanges) + miss(cand.rifts, riftR, targetRifts);
       if (!best || score < best.score) best = { ...cand, score, motion };
       if (score === 0) break;
@@ -126,14 +131,15 @@ export const platesStage: StageDef = {
     const chosen = best!;
     await ctx.checkpoint();
 
-    const isBoundary = new Uint8Array(n * n);
-    for (let c = 0; c < n * n; c++) isBoundary[c] = chosen.bClass[c] !== B.NONE ? 1 : 0;
-    const { dist, nearest } = distanceField(isBoundary, ctx.grid(n));
-    const dBKm = new Float32Array(n * n);
-    for (let c = 0; c < n * n; c++) dBKm[c] = dist[c] * cellKm;
+    const N = g.cells;
+    const isBoundary = new Uint8Array(N);
+    for (let c = 0; c < N; c++) isBoundary[c] = chosen.bClass[c] !== B.NONE ? 1 : 0;
+    const { dist, nearest } = distanceField(isBoundary, g);
+    const dBKm = new Float32Array(N);
+    for (let c = 0; c < N; c++) dBKm[c] = dist[c] * cellKm;
 
-    const crustLayer = new Int32Array(n * n);
-    for (let c = 0; c < n * n; c++) crustLayer[c] = continent[c] + 1;
+    const crustLayer = new Int32Array(N);
+    for (let c = 0; c < N; c++) crustLayer[c] = continent[c] + 1;
     const layers: Layer[] = [
       { id: 'plates', label: 'Plates', stage: 'plates', kind: 'categorical', w: n, h: n, worldKm, unit: '', min: 0, max: count - 1, data: plate },
       { id: 'continents', label: 'Continents (0 = ocean)', stage: 'plates', kind: 'categorical', w: n, h: n, worldKm, unit: '', min: 0, max: ctx.drawn('continentCount'), data: crustLayer },
@@ -162,7 +168,8 @@ export const platesStage: StageDef = {
 
 // ── Plates ──────────────────────────────────────────────────────────────────────────────────
 
-function growPlates(ctx: StageCtx, n: number, worldKm: number): { plate: Int32Array; count: number; major: number } {
+function growPlates(ctx: StageCtx, g: Grid): { plate: Int32Array; count: number; major: number } {
+  const { n, cells: N, cellKm, off8Axial: off, axialToRaster, border } = g;
   const major = ctx.drawn('plateCount');
   const micro = ctx.drawn('microplateCount');
   const count = major + micro;
@@ -174,16 +181,15 @@ function growPlates(ctx: StageCtx, n: number, worldKm: number): { plate: Int32Ar
 
   const noise = new Noise2(ctx.rng('noise').nextU32());
   const warp = ctx.num('boundaryWarp');
-  const cellKm = worldKm / n;
-  const cost = new Float32Array(n * n);
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) cost[y * n + x] = 1 + warp * 4 * (0.5 + 0.5 * noise.fbm((x * cellKm) / 180, (y * cellKm) / 180, 4));
+  const cost = new Float32Array(N);
+  for (let c = 0; c < N; c++) {
+    cost[c] = 1 + warp * 4 * (0.5 + 0.5 * noise.fbm((cellX(g, c) * cellKm) / 180, (cellY(g, c) * cellKm) / 180, 4));
   }
-  const plate = new Int32Array(n * n).fill(-1);
-  const dist = new Float64Array(n * n).fill(Infinity);
+  const plate = new Int32Array(N).fill(-1);
+  const dist = new Float64Array(N).fill(Infinity);
   const heap = new MinHeap(n * 4);
   for (let i = 0; i < count; i++) {
-    const c = Math.floor(ys[i] * n) * n + Math.floor(xs[i] * n);
+    const c = cellAt(g, xs[i], ys[i]);
     if (dist[c] === 0) continue;
     dist[c] = 0;
     plate[c] = i;
@@ -194,13 +200,11 @@ function growPlates(ctx: StageCtx, n: number, worldKm: number): { plate: Int32Ar
     const c = heap.pop();
     if (d > dist[c]) continue;
     const p = plate[c];
-    const x = c % n;
-    const y = (c - x) / n;
+    const b = border[c];
     for (let k = 0; k < 8; k++) {
-      const nx = x + DX[k];
-      const ny = y + DY[k];
-      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-      const nc = ny * n + nx;
+      let nc: number;
+      if (b === 0) nc = c + off[k];
+      else if ((nc = g.nbr(c, axialToRaster[k])) < 0) continue;
       const nd = d + (DL[k] * 0.5 * (cost[c] + cost[nc])) / weight[p];
       if (nd < dist[nc]) {
         dist[nc] = nd;
@@ -219,7 +223,8 @@ function growPlates(ctx: StageCtx, n: number, worldKm: number): { plate: Int32Ar
  * anisotropic Dijkstra (elongated, irregular shapes). Continents never touch: a cell next to another
  * continent stays oceanic, so the realised count matches the target before erosion.
  */
-function growContinents(ctx: StageCtx, n: number, worldKm: number): Int32Array {
+function growContinents(ctx: StageCtx, g: Grid): Int32Array {
+  const { n, cells: N, cellKm, off8Axial: off, axialToRaster, border } = g;
   const count = ctx.drawn('continentCount');
   const rng = ctx.rng('continents');
   const margin = ctx.str('mapEdge') === 'ocean' ? 0.2 : 0.08;
@@ -227,7 +232,7 @@ function growContinents(ctx: StageCtx, n: number, worldKm: number): Int32Array {
   const skew = ctx.num('continentSizeSkew');
   const w = Array.from({ length: count }, (_, i) => (i === 0 ? 1 + 4 * skew : 1 - 0.5 * skew) * rng.range(0.8, 1.2));
   const wSum = w.reduce((a, b) => a + b, 0);
-  const total = ctx.num('continentalShare') * n * n;
+  const total = ctx.num('continentalShare') * N;
   const target = w.map((v) => (total * v) / wSum);
   // Elongation: each continent has an axis; steps across it cost more.
   const ax = new Float64Array(count);
@@ -240,43 +245,41 @@ function growContinents(ctx: StageCtx, n: number, worldKm: number): Int32Array {
     stretch[i] = rng.range(0.3, 1.6);
   }
   const noise = new Noise2(ctx.rng('continent-noise').nextU32());
-  const cellKm = worldKm / n;
-  const cost = new Float32Array(n * n);
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      const e = Math.min(x, y, n - 1 - x, n - 1 - y) / n;
-      // Growing toward an ocean map edge gets expensive, so continents stay off the border.
-      const edge = margin > 0.1 ? 1 + 8 * Math.max(0, 0.12 - e) / 0.12 : 1;
-      cost[y * n + x] = (1 + 2.5 * (0.5 + 0.5 * noise.fbm((x * cellKm) / 260, (y * cellKm) / 260, 5))) * edge;
-    }
+  const cost = new Float32Array(N);
+  for (let c = 0; c < N; c++) {
+    const x = cellX(g, c);
+    const y = cellY(g, c);
+    // Growing toward an ocean map edge gets expensive, so continents stay off the border.
+    const edge = margin > 0.1 ? 1 + 8 * Math.max(0, 0.12 - mapEdgeDistance(g, c)) / 0.12 : 1;
+    cost[c] = (1 + 2.5 * (0.5 + 0.5 * noise.fbm((x * cellKm) / 260, (y * cellKm) / 260, 5))) * edge;
   }
 
-  const label = new Int32Array(n * n).fill(-1);
+  const label = new Int32Array(N).fill(-1);
   // Coarse ownership blocks keep continents ~CONTINENT_GAP_KM apart, so coast noise can't merge them.
   const bs = Math.max(2, Math.round(CONTINENT_GAP_KM / 3 / cellKm));
   const nbk = Math.ceil(n / bs);
   const blockOwner = new Int32Array(nbk * nbk).fill(-1);
   const area = new Float64Array(count);
   const heap = new MinHeap(n * 4);
-  for (let i = 0; i < count; i++) heap.push(0, (Math.floor(ys[i] * n) * n + Math.floor(xs[i] * n)) * 16 + i);
+  for (let i = 0; i < count; i++) heap.push(0, cellAt(g, xs[i], ys[i]) * 16 + i);
   while (heap.size > 0) {
     const d = heap.peekKey();
     const v = heap.pop();
     const c = v >> 4;
     const L = v & 15;
     if (label[c] !== -1 || area[L] >= target[L]) continue;
-    const x = c % n;
-    const y = (c - x) / n;
+    const x = cellX(g, c);
+    const y = cellY(g, c);
     if (nearOtherContinent(blockOwner, nbk, Math.floor(x / bs), Math.floor(y / bs), L)) continue;
     label[c] = L;
     const blk = Math.floor(y / bs) * nbk + Math.floor(x / bs);
     if (blockOwner[blk] === -1) blockOwner[blk] = L;
     area[L]++;
+    const b = border[c];
     for (let k = 0; k < 8; k++) {
-      const nx = x + DX[k];
-      const ny = y + DY[k];
-      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-      const nc = ny * n + nx;
+      let nc: number;
+      if (b === 0) nc = c + off[k];
+      else if ((nc = g.nbr(c, axialToRaster[k])) < 0) continue;
       if (label[nc] !== -1) continue;
       const across = Math.abs(DX[k] * -ay[L] + DY[k] * ax[L]) / DL[k];
       heap.push(d + DL[k] * 0.5 * (cost[c] + cost[nc]) * (1 + stretch[L] * across), nc * 16 + L);
@@ -310,21 +313,20 @@ interface Frame {
   otherCont: Uint8Array;
 }
 
-function boundaryFrame(plate: Int32Array, continent: Int32Array, n: number): Frame {
+function boundaryFrame(plate: Int32Array, continent: Int32Array, g: Grid): Frame {
+  const { cells: N, off4, axialToRaster, border } = g;
   const cells: number[] = [];
   const other: number[] = [];
   const nxs: number[] = [];
   const nys: number[] = [];
   const oc: number[] = [];
-  for (let c = 0; c < n * n; c++) {
-    const x = c % n;
-    const y = (c - x) / n;
+  for (let c = 0; c < N; c++) {
     const p = plate[c];
+    const b = border[c];
     let q = -1;
     for (let k = 0; k < 4 && q === -1; k++) {
-      const nx = x + DX[k];
-      const ny = y + DY[k];
-      if (nx >= 0 && ny >= 0 && nx < n && ny < n && plate[ny * n + nx] !== p) q = plate[ny * n + nx];
+      const j = b === 0 ? c + off4[k] : g.nbr(c, axialToRaster[k]);
+      if (j >= 0 && plate[j] !== p) q = plate[j];
     }
     if (q === -1) continue;
     // Normal from this plate toward q: mean offset of q's cells in a 5×5 window.
@@ -332,19 +334,13 @@ function boundaryFrame(plate: Int32Array, continent: Int32Array, n: number): Fra
     let sy = 0;
     let cont = 0;
     let cnt = 0;
-    for (let dy = -2; dy <= 2; dy++) {
-      for (let dx = -2; dx <= 2; dx++) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        const j = ny * n + nx;
-        if (plate[j] !== q) continue;
-        sx += dx;
-        sy += dy;
-        cnt++;
-        if (continent[j] !== -1) cont++;
-      }
-    }
+    forWindow(g, c, 2, (j, dx, dy) => {
+      if (plate[j] !== q) return;
+      sx += dx;
+      sy += dy;
+      cnt++;
+      if (continent[j] !== -1) cont++;
+    });
     const len = Math.hypot(sx, sy) || 1;
     cells.push(c);
     other.push(q);
@@ -394,16 +390,17 @@ interface Classified {
 }
 
 function classify(
-  f: Frame, plate: Int32Array, continent: Int32Array, n: number, cellKm: number,
+  f: Frame, plate: Int32Array, continent: Int32Array, g: Grid,
   cx: Float64Array, cy: Float64Array, m: Motion, rng: Rng,
 ): Omit<Classified, 'score' | 'motion'> {
+  const { cells: N, cellKm, off8Axial: off, axialToRaster, border } = g;
   const nb = f.cells.length;
   const conv = new Float64Array(nb);
   const shear = new Float64Array(nb);
   for (let i = 0; i < nb; i++) {
     const c = f.cells[i];
-    const px = ((c % n) + 0.5) * cellKm;
-    const py = (Math.floor(c / n) + 0.5) * cellKm;
+    const px = (cellX(g, c) + 0.5) * cellKm;
+    const py = (cellY(g, c) + 0.5) * cellKm;
     const p = plate[c];
     const q = f.other[i];
     const vpx = m.tx[p] - m.omega[p] * (py - cy[p]);
@@ -415,40 +412,33 @@ function classify(
     conv[i] = -(rx * f.nx[i] + ry * f.ny[i]);
     shear[i] = Math.abs(rx * f.ny[i] - ry * f.nx[i]);
   }
-  const index = new Int32Array(n * n).fill(-1);
+  const index = new Int32Array(N).fill(-1);
   for (let i = 0; i < nb; i++) index[f.cells[i]] = i;
   // Smooth along the boundary so classes don't flicker between neighbouring cells.
   const sConv = new Float64Array(nb);
   const sShear = new Float64Array(nb);
   for (let i = 0; i < nb; i++) {
     const c = f.cells[i];
-    const x = c % n;
-    const y = (c - x) / n;
     const lo = Math.min(plate[c], f.other[i]);
     const hi = Math.max(plate[c], f.other[i]);
     let sc = 0;
     let ss = 0;
     let k = 0;
-    for (let dy = -3; dy <= 3; dy++) {
-      for (let dx = -3; dx <= 3; dx++) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        const j = index[ny * n + nx];
-        if (j < 0) continue;
-        const a = plate[f.cells[j]];
-        const b = f.other[j];
-        if (Math.min(a, b) !== lo || Math.max(a, b) !== hi) continue;
-        sc += conv[j];
-        ss += shear[j];
-        k++;
-      }
-    }
+    forWindow(g, c, 3, (cj) => {
+      const j = index[cj];
+      if (j < 0) return;
+      const a = plate[f.cells[j]];
+      const b = f.other[j];
+      if (Math.min(a, b) !== lo || Math.max(a, b) !== hi) return;
+      sc += conv[j];
+      ss += shear[j];
+      k++;
+    });
     sConv[i] = sc / k;
     sShear[i] = ss / k;
   }
 
-  const bClass = new Uint8Array(n * n);
+  const bClass = new Uint8Array(N);
   for (let i = 0; i < nb; i++) {
     const c = f.cells[i];
     const own = continent[c] !== -1;
@@ -462,7 +452,7 @@ function classify(
   }
 
   // Segments: 8-connected boundary cells with the same plate pair and class.
-  const bSeg = new Int32Array(n * n).fill(-1);
+  const bSeg = new Int32Array(N).fill(-1);
   const segments: Segment[] = [];
   const overridePair = new Map<number, number>();
   const stack: number[] = [];
@@ -481,13 +471,11 @@ function classify(
       const c = stack.pop()!;
       cells++;
       convSum += sConv[index[c]];
-      const x = c % n;
-      const y = (c - x) / n;
+      const b = border[c];
       for (let k = 0; k < 8; k++) {
-        const nx = x + DX[k];
-        const ny = y + DY[k];
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        const nc = ny * n + nx;
+        let nc: number;
+        if (b === 0) nc = c + off[k];
+        else if ((nc = g.nbr(c, axialToRaster[k])) < 0) continue;
         const j = index[nc];
         if (j < 0 || bSeg[nc] !== -1 || bClass[nc] !== cls) continue;
         if (Math.min(plate[nc], f.other[j]) !== a0 || Math.max(plate[nc], f.other[j]) !== b0) continue;
