@@ -6,7 +6,11 @@ export type LayerKind = 'elevation' | 'categorical' | 'scalar';
 
 export type LayerData = Float32Array | Int32Array | Uint8Array | Uint16Array;
 
-/** A row-major raster covering the whole world (PLAN.md §3 data contracts). */
+/**
+ * A row-major raster covering the whole world (PLAN.md §3 data contracts). Spherical worlds set
+ * `faces: 6`: the data is six w×w cube faces, face-major (research 10 §5.12), and `worldKm` is the
+ * width of one face (a quarter of the circumference).
+ */
 export interface Layer {
   id: string;
   label: string;
@@ -20,6 +24,10 @@ export interface Layer {
   min: number;
   max: number;
   data: LayerData;
+  /** 6 on a cube-sphere world (absent on flat maps). */
+  faces?: 6;
+  /** Planet radius in km (spheres only). */
+  radiusKm?: number;
 }
 
 /** River node flags (research 02 §9). */

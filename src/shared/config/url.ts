@@ -1,18 +1,24 @@
 import { DEFAULT_ARCHETYPE, archetypeById } from './archetypes';
-import { PARAM_BY_ID } from './schema';
+import { appliesTo, PARAM_BY_ID } from './schema';
 import { AUTO_PIN, type Pin, type WorldSpec } from './types';
 
 /**
  * URL form of a world: `?seed=42&a=fjordland&worldSize=2048&plateCount=4~6&continentCount=~3&fjords=1`.
  * Only the seed, archetype and user pins are stored; AUTO values are re-derived (CONFIG.md §6), so links
- * stay short and keep working when AUTO formulas change. Unknown keys are ignored.
+ * stay short and keep working when AUTO formulas change. Unknown keys are ignored. Flat is the default
+ * world shape and never written, so old links stay as they were; a sphere URL drops pins on parameters
+ * that only apply to flat maps.
  */
 export function specToQuery(spec: WorldSpec): string {
   const q = new URLSearchParams();
   q.set('seed', String(spec.seed >>> 0));
   if (spec.archetype !== DEFAULT_ARCHETYPE) q.set('a', spec.archetype);
+  const sphere = spec.pins.worldShape === 'sphere';
   for (const id of Object.keys(spec.pins).sort()) {
     const p = spec.pins[id];
+    if (id === 'worldShape' && p === 'flat') continue;
+    const d = PARAM_BY_ID.get(id);
+    if (sphere && d && !appliesTo(d, 'sphere')) continue;
     q.set(id, encodePin(p));
   }
   return q.toString();

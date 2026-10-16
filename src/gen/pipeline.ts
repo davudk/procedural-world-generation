@@ -1,7 +1,8 @@
-import type { Range, Resolved, StageId, Value } from '../shared/config/types';
+import { SPHERE_STAGES, type Range, type Resolved, type StageId, type Value } from '../shared/config/types';
 import { hashValue, rngFor } from '../shared/hash';
 import { copyVectors, type FromWorker, type GenMode, type Layer, type Vectors } from '../shared/protocol';
 import type { Rng } from '../shared/rng';
+import { cubeGrid } from './grid/cube';
 import { flatGrid, type Grid, type MapEdge } from './grid/grid';
 
 export interface StageOutput {
@@ -29,8 +30,10 @@ export interface StageCtx {
   input(id: StageId): StageOutput;
   /**
    * The world grid with n cells per face edge (research 10 §2), built once per resolution and shared
-   * by every stage. The stage must read `worldSize`; its boundary (`outlets`, `hasOutside`) follows
-   * `mapEdge`, which a stage must also declare before it relies on the boundary.
+   * by every stage. On flat maps the stage must read `worldSize`; its boundary (`outlets`,
+   * `hasOutside`) follows `mapEdge`, which a stage must also declare before it relies on the boundary.
+   * On spheres (`worldShape`) the grid is the cube-sphere of `planetSize`; both are read by plates,
+   * so every stage's cache key covers them.
    */
   grid(n: number): Grid;
   /** Yields to the event loop (so newer requests can cancel this one) and reports progress. */
@@ -101,7 +104,10 @@ export class Pipeline {
     const t0 = performance.now();
     const keys = this.keys(resolved, mode);
     try {
+      // Spherical worlds run the stages that exist for them so far and stop cleanly (research 10 §8).
+      const sphere = resolved.values.worldShape === 'sphere';
       for (const s of this.stages) {
+        if (sphere && !SPHERE_STAGES.includes(s.id)) continue;
         const key = keys.get(s.id)!;
         const hit = this.cache.get(s.id);
         if (hit && hit.key === key) {
@@ -153,6 +159,17 @@ export class Pipeline {
         return c.out;
       },
       grid: (n) => {
+        if (resolved.values.worldShape === 'sphere') {
+          const circumKm = resolved.values.planetSize as number;
+          const key = `sphere:${n}:${circumKm}`;
+          let g = this.grids.get(key);
+          if (!g) {
+            if (this.grids.size >= 8) this.grids.clear();
+            g = cubeGrid(n, (circumKm * 1000) / (2 * Math.PI));
+            this.grids.set(key, g);
+          }
+          return g;
+        }
         const worldKm = get('worldSize') as number;
         const edge = resolved.values.mapEdge as MapEdge;
         const key = `${n}:${worldKm}:${edge}`;

@@ -14,6 +14,8 @@ export interface Archetype {
 
 const EARTH_LIKE: Readonly<Record<string, number>> = {
   worldSize: 1024,
+  planetSize: 4096,
+  axialTilt: 23.4,
   landFraction: 0.4,
   tectonicActivity: 0.5,
   geologicAge: 0.5,
@@ -55,7 +57,7 @@ export const ARCHETYPES: readonly Archetype[] = [
   }, { riftCount: [2, 3] }),
   arch('fjordland', 'Fjordland', 'Cold, high-latitude coast with glaciated mountains and drowned valleys.', {
     latNorth: 72, latSouth: 55, temperatureOffset: -1, humidity: 1.3, seaLevelRise: 120, coastRoughness: 1.4,
-    tectonicActivity: 0.55,
+    tectonicActivity: 0.55, axialTilt: 28,
   }, { fjords: true }),
   arch('desert', 'Desert world', 'Hot and dry: ergs, mesas, salt flats and wadis.', {
     latNorth: 40, latSouth: 10, temperatureOffset: 3, humidity: 0.35, landFraction: 0.55, strataShare: 0.45,

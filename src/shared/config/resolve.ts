@@ -1,6 +1,6 @@
 import { rngFor } from '../hash';
 import { archetypeById } from './archetypes';
-import { PARAMS, PARAM_BY_ID } from './schema';
+import { appliesTo, PARAMS, PARAM_BY_ID } from './schema';
 import {
   AUTO_PIN,
   isRangeParam,
@@ -12,6 +12,7 @@ import {
   type Source,
   type Value,
   type Warning,
+  type WorldShape,
   type WorldSpec,
 } from './types';
 
@@ -167,8 +168,11 @@ export function resolve(spec: WorldSpec): Resolved {
       values[d.id] = value;
       sources[d.id] = source;
     }
-    provenance[d.id] = d.deps.length
-      ? `← ${d.deps.map((p) => `${PARAM_BY_ID.get(p)!.label.toLowerCase()} ${fmt(PARAM_BY_ID.get(p)!, values[p])}`).join(', ')}`
+    // Parents that do not apply to this world shape (and the shape itself on flat maps) are not shown.
+    const shape = values.worldShape as WorldShape;
+    const shown = d.deps.filter((p) => appliesTo(PARAM_BY_ID.get(p)!, shape) && !(p === 'worldShape' && shape === 'flat'));
+    provenance[d.id] = shown.length
+      ? `← ${shown.map((p) => `${PARAM_BY_ID.get(p)!.label.toLowerCase()} ${fmt(PARAM_BY_ID.get(p)!, values[p])}`).join(', ')}`
       : `← archetype ${arch.label}`;
     if (d.kind === 'draw') {
       const [lo, hi] = values[d.id] as Range;
@@ -183,13 +187,14 @@ export function resolve(spec: WorldSpec): Resolved {
 /** Plausibility checks: pins always win, but the panel explains tensions (CONFIG.md §6). */
 function checkWarnings(v: Record<string, Value>, drawn: Record<string, number>): Warning[] {
   const out: Warning[] = [];
-  const size = v.worldSize as number;
+  // Equal-area size (schema `sizeEff`): the map width, or √(4πR²) on a planet.
+  const size = v.worldShape === 'sphere' ? (v.planetSize as number) / Math.sqrt(Math.PI) : (v.worldSize as number);
   const land = size * size * (v.landFraction as number);
   const continents = drawn.continentCount;
   const perContinent = land / continents;
   if (perContinent < 5000) {
     out.push({
-      ids: ['continentCount', 'landFraction', 'worldSize'],
+      ids: ['continentCount', 'landFraction', v.worldShape === 'sphere' ? 'planetSize' : 'worldSize'],
       message: `Continents will be very small (≈ ${Math.round(perContinent).toLocaleString('en-US')} km² each).`,
     });
   }

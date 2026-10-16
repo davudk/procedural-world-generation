@@ -1,4 +1,4 @@
-import type { AutoCtx, EnumParam, NumberParam, ParamDef, Range, RangeParam, ToggleParam } from './types';
+import type { AutoCtx, EnumParam, NumberParam, ParamDef, Range, RangeParam, ToggleParam, WorldShape } from './types';
 
 /**
  * The parameter tree (docs/CONFIG.md §2–3). Order here is display order within a section; resolution
@@ -7,9 +7,17 @@ import type { AutoCtx, EnumParam, NumberParam, ParamDef, Range, RangeParam, Togg
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 const r = (a: number, b: number): Range => [a, b];
+const sphere = (c: AutoCtx): boolean => c.str('worldShape') === 'sphere';
+/**
+ * Equal-area size S_eff = √(surface area) in km (research 10 §3.1): the world width on flat maps, so
+ * flat formulas are unchanged, and √(4πR²) = C/√π on a planet of circumference C. AUTO formulas that
+ * scale with the world read it; their deps list worldShape, worldSize and planetSize.
+ */
+export const sizeEff = (c: AutoCtx): number => (sphere(c) ? c.num('planetSize') / Math.sqrt(Math.PI) : c.num('worldSize'));
+const SIZE: readonly string[] = ['worldShape', 'worldSize', 'planetSize'];
 /** Doublings from the default 1024 km world. */
-const s2 = (c: AutoCtx): number => Math.log2(c.num('worldSize') / 1024);
-const landAreaKm2 = (c: AutoCtx): number => c.num('worldSize') ** 2 * c.num('landFraction');
+const s2 = (c: AutoCtx): number => Math.log2(sizeEff(c) / 1024);
+const landAreaKm2 = (c: AutoCtx): number => sizeEff(c) ** 2 * c.num('landFraction');
 
 type NoKind<T> = Omit<T, 'kind'>;
 const num = (p: NoKind<NumberParam>): NumberParam => ({ kind: 'number', ...p });
@@ -21,16 +29,52 @@ const toggle = (p: NoKind<ToggleParam>): ToggleParam => ({ kind: 'toggle', ...p 
 
 /** Plate-count centre before rounding (CONFIG.md §3). */
 export function plateCentre(c: AutoCtx): number {
-  return 5 * (c.num('worldSize') / 1024) ** 0.8 * (0.7 + 0.6 * c.num('tectonicActivity')) * c.bias('plateMul');
+  const a = 0.7 + 0.6 * c.num('tectonicActivity');
+  const flat = 5 * (sizeEff(c) / 1024) ** 0.8 * a;
+  // A closed planet saturates: Earth has ~15 major and minor plates, not the ~90 the flat rule gives.
+  const k = sphere(c) ? Math.min(flat, (8 + 4 * Math.log2(sizeEff(c) / 2048)) * a) : flat;
+  return k * c.bias('plateMul');
+}
+
+/** Whether a parameter applies to a world shape (`shapes` absent = both). */
+export function appliesTo(d: ParamDef, shape: WorldShape): boolean {
+  return !d.shapes || d.shapes.includes(shape);
 }
 
 export const PARAMS: readonly ParamDef[] = [
   // ── L0 World ────────────────────────────────────────────────────────────────────────────
+  choice({
+    id: 'worldShape', label: 'World shape', level: 0, section: 'world', stage: 'plates',
+    help: 'A flat square map, or a whole planet (spherical worlds generate terrain and climate so far).',
+    options: [
+      { value: 'flat', label: 'Flat' },
+      { value: 'sphere', label: 'Sphere' },
+    ],
+    deps: [], auto: () => 'flat',
+  }),
   num({
-    id: 'worldSize', label: 'World size', level: 0, section: 'world', stage: 'plates',
+    id: 'worldSize', label: 'World size', level: 0, section: 'world', stage: 'plates', shapes: ['flat'],
     help: 'Width of the square world. Bigger worlds get more of everything, not sparser features.',
     min: 256, max: 4096, step: 1, unit: 'km', log: true, integer: true,
     deps: [], auto: (c) => c.bias('worldSize'),
+  }),
+  num({
+    id: 'planetSize', label: 'Planet size', level: 0, section: 'world', stage: 'plates', shapes: ['sphere'],
+    help: 'Circumference of the planet; one cube face spans a quarter of it. 4,096 km is a small planet, 40,030 km Earth.',
+    min: 2048, max: 40030, step: 1, unit: 'km', log: true, integer: true,
+    deps: [], auto: (c) => c.bias('planetSize'),
+  }),
+  num({
+    id: 'planetRadius', label: 'Radius', level: 0, section: 'world', stage: 'plates', shapes: ['sphere'], readonly: true,
+    help: 'Planet radius, from the circumference.',
+    min: 0, max: 10000, step: 1, unit: 'km', integer: true,
+    deps: ['planetSize'], auto: (c) => Math.round(c.num('planetSize') / (2 * Math.PI)),
+  }),
+  num({
+    id: 'planetArea', label: 'Surface area', level: 0, section: 'world', stage: 'plates', shapes: ['sphere'], readonly: true,
+    help: 'Total surface area, land and sea.',
+    min: 0, max: 600, step: 0.1, unit: 'M km²',
+    deps: ['planetSize'], auto: (c) => c.num('planetSize') ** 2 / Math.PI / 1e6,
   }),
   num({
     id: 'landFraction', label: 'Land fraction', level: 0, section: 'world', stage: 'base',
@@ -51,10 +95,16 @@ export const PARAMS: readonly ParamDef[] = [
     deps: [], auto: (c) => c.bias('geologicAge'),
   }),
   span({
-    id: 'latitudeSpan', label: 'Latitude span', level: 0, section: 'world', stage: 'climate',
+    id: 'latitudeSpan', label: 'Latitude span', level: 0, section: 'world', stage: 'climate', shapes: ['flat'],
     help: 'Virtual latitude from the north edge to the south edge. Drives the climate belts.',
     min: -90, max: 90, step: 1, unit: '°',
     deps: [], auto: (c) => r(c.bias('latNorth'), c.bias('latSouth')),
+  }),
+  num({
+    id: 'axialTilt', label: 'Axial tilt', level: 0, section: 'world', stage: 'climate', shapes: ['sphere'],
+    help: 'Tilt of the spin axis: sets the strength of the seasons and how far the climate belts swing.',
+    min: 0, max: 45, step: 0.1, unit: '°',
+    deps: [], auto: (c) => c.bias('axialTilt'),
   }),
   num({
     id: 'temperatureOffset', label: 'Temperature offset', level: 0, section: 'world', stage: 'climate',
@@ -84,7 +134,7 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'plateCount', label: 'Tectonic plates', level: 1, section: 'structure', stage: 'plates',
     help: 'Number of major plates. Collisions between them raise mountain ranges.',
     min: 2, max: 40, step: 1, integer: true,
-    deps: ['worldSize', 'tectonicActivity'],
+    deps: [...SIZE, 'tectonicActivity'],
     auto: (c) => {
       const n = plateCentre(c);
       return r(Math.max(2, Math.round(0.8 * n)), Math.max(2, Math.round(1.2 * n)));
@@ -94,8 +144,8 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'meanPlateDiameter', label: 'Mean plate size', level: 1, section: 'structure', stage: 'plates',
     help: 'Typical plate diameter, from world size and plate count. Change it via the plate count.',
     min: 0, max: 5000, step: 1, unit: 'km', integer: true, readonly: true,
-    deps: ['worldSize', 'plateCount'],
-    auto: (c) => Math.round(Math.sqrt(c.num('worldSize') ** 2 / c.mid('plateCount'))),
+    deps: [...SIZE, 'plateCount'],
+    auto: (c) => Math.round(Math.sqrt(sizeEff(c) ** 2 / c.mid('plateCount'))),
   }),
   num({
     id: 'plateSizeSkew', label: 'Plate size skew', level: 1, section: 'structure', stage: 'plates',
@@ -120,7 +170,7 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'continentCount', label: 'Continents', level: 1, section: 'structure', stage: 'plates', target: true,
     help: 'Number of large landmasses (islands not counted).',
     min: 1, max: 12, step: 1, integer: true,
-    deps: ['worldSize', 'landFraction'],
+    deps: [...SIZE, 'landFraction'],
     auto: (c) => {
       const k = clamp((1.6 + 1.0 * s2(c) + 3 * (c.num('landFraction') - 0.4)) * c.bias('continentMul'), 1, 12);
       return r(clamp(Math.round(k - 0.8), 1, 12), clamp(Math.round(k + 1.0), 1, 12));
@@ -150,8 +200,11 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'hotspotCount', label: 'Hotspots', level: 1, section: 'structure', stage: 'stamps',
     help: 'Mantle plumes that build volcanic island chains and shield volcanoes.',
     min: 0, max: 30, step: 1, integer: true,
-    deps: ['worldSize', 'tectonicActivity'],
-    auto: (c) => r(0, Math.round(1 + 2 * c.num('tectonicActivity') * (c.num('worldSize') / 1024) ** 1.5)),
+    deps: [...SIZE, 'tectonicActivity'],
+    auto: (c) => {
+      const k = (sizeEff(c) / 1024) ** 1.5;
+      return r(0, Math.round(1 + 2 * c.num('tectonicActivity') * (sphere(c) ? Math.min(k, 25) : k)));
+    },
   }),
   num({
     id: 'seaLevelRise', label: 'Sea-level rise', level: 1, section: 'structure', stage: 'refine',
@@ -160,7 +213,7 @@ export const PARAMS: readonly ParamDef[] = [
     deps: [], auto: (c) => c.bias('seaLevelRise'),
   }),
   choice({
-    id: 'mapEdge', label: 'Beyond the map', level: 1, section: 'structure', stage: 'plates',
+    id: 'mapEdge', label: 'Beyond the map', level: 1, section: 'structure', stage: 'plates', shapes: ['flat'],
     help: 'Ocean keeps everything inside the map; continent lets rivers drain off-map and dry air arrive.',
     options: [
       { value: 'ocean', label: 'Ocean' },
@@ -207,7 +260,7 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'peakHeight', label: 'Peak height', level: 2, section: 'mountains', stage: 'base',
     help: 'Spread of the highest summits of each range. Drives uplift in the erosion model.',
     min: 200, max: 9000, step: 50, unit: 'm', integer: true,
-    deps: ['tectonicActivity', 'geologicAge', 'worldSize'],
+    deps: ['tectonicActivity', 'geologicAge', ...SIZE],
     auto: (c) => {
       const a = c.num('tectonicActivity');
       const age = 1 - 0.45 * (c.num('geologicAge') - 0.5);
@@ -220,7 +273,7 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'plateauChance', label: 'Plateau chance', level: 2, section: 'mountains', stage: 'base',
     help: 'Chance that a continental collision builds a high plateau behind it.',
     min: 0, max: 1, step: 0.01,
-    deps: ['tectonicActivity', 'worldSize', 'peakHeight'],
+    deps: ['tectonicActivity', ...SIZE, 'peakHeight'],
     auto: (c) => clamp((0.1 + 0.3 * c.num('tectonicActivity') + 0.1 * s2(c)) * (c.range('peakHeight')[1] / 5000), 0, 1),
   }),
   draw({
@@ -253,7 +306,7 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'craterCount', label: 'Impact craters', level: 2, section: 'mountains', stage: 'stamps',
     help: 'Visible impact craters. Rare on Earth-like worlds; old worlds keep more, mostly degraded.',
     min: 0, max: 30, step: 1, integer: true,
-    deps: ['worldSize', 'landFraction', 'geologicAge', 'impactHistory'],
+    deps: [...SIZE, 'landFraction', 'geologicAge', 'impactHistory'],
     auto: (c) => {
       const lambda = (landAreaKm2(c) / 1e5) * 0.2 * (0.5 + c.num('geologicAge')) * c.num('impactHistory');
       return lambda <= 2 ? r(0, clamp(Math.ceil(2 * lambda), 0, 30)) : r(Math.floor(0.5 * lambda), clamp(Math.ceil(1.5 * lambda), 1, 30));
@@ -263,7 +316,7 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'craterDiameter', label: 'Crater diameter', level: 2, section: 'mountains', stage: 'stamps',
     help: 'Size spread of impact craters.',
     min: 0.5, max: 300, step: 0.5, unit: 'km', log: true,
-    deps: ['worldSize'], auto: (c) => r(3, Math.round(40 * Math.sqrt(c.num('worldSize') / 1024))),
+    deps: SIZE, auto: (c) => r(3, Math.min(300, Math.round(40 * Math.sqrt(sizeEff(c) / 1024)))),
   }),
   num({
     id: 'strataShare', label: 'Layered rock', level: 2, section: 'mountains', stage: 'base',
@@ -300,20 +353,25 @@ export const PARAMS: readonly ParamDef[] = [
   toggle({
     id: 'oceanCurrents', label: 'Ocean currents', level: 2, section: 'climate', stage: 'climate',
     help: 'Warm and cold coastal currents (fog deserts, mild west coasts).',
-    deps: ['mapEdge'], auto: (c) => c.str('mapEdge') === 'ocean',
+    deps: ['worldShape', 'mapEdge'], auto: (c) => sphere(c) || c.str('mapEdge') === 'ocean',
   }),
   num({
     id: 'moistureLength', label: 'Moisture reach', level: 2, section: 'climate', stage: 'climate',
     help: 'How far inland ocean moisture travels before raining out.',
     min: 300, max: 4000, step: 50, unit: 'km', integer: true,
-    deps: ['worldSize'], auto: (c) => Math.round((1500 * (c.num('worldSize') / 1024) ** 0.4) / 50) * 50,
+    deps: SIZE,
+    auto: (c) => {
+      const L = 1500 * (sizeEff(c) / 1024) ** 0.4;
+      return Math.round((sphere(c) ? Math.min(L, 3000) : L) / 50) * 50;
+    },
   }),
   num({
     id: 'seasonality', label: 'Seasonality', level: 2, section: 'climate', stage: 'climate',
     help: 'Strength of summer/winter contrast.',
     min: 0, max: 2, step: 0.05,
-    deps: ['latitudeSpan'],
+    deps: ['worldShape', 'latitudeSpan', 'axialTilt'],
     auto: (c) => {
+      if (sphere(c)) return clamp(c.num('axialTilt') / 23.4, 0, 2);
       const [a, b] = c.range('latitudeSpan');
       return clamp(0.6 + (0.4 * Math.abs((a + b) / 2)) / 45, 0, 2);
     },
@@ -322,10 +380,11 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'glaciation', label: 'Glaciation', level: 2, section: 'climate', stage: 'glacial',
     help: 'Ice extent and how low glaciers reach. Drives fjords, cirques and lake districts.',
     min: 0, max: 2, step: 0.05,
-    deps: ['temperatureOffset', 'latitudeSpan', 'peakHeight'],
+    deps: ['temperatureOffset', 'worldShape', 'latitudeSpan', 'peakHeight'],
     auto: (c) => {
       const [a, b] = c.range('latitudeSpan');
-      const maxLat = Math.max(Math.abs(a), Math.abs(b));
+      // A planet always has poles.
+      const maxLat = sphere(c) ? 90 : Math.max(Math.abs(a), Math.abs(b));
       return clamp(
         0.25 + (0.5 * (maxLat - 45)) / 20 + (0.25 * (c.range('peakHeight')[1] - 3000)) / 2000 - c.num('temperatureOffset') / 12,
         0,
@@ -391,13 +450,17 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'heroCount', label: 'Hero landmarks', level: 2, section: 'features', stage: 'stamps',
     help: 'Guaranteed spectacular landmarks: a great canyon, massif, crater, fjord coast…',
     min: 0, max: 12, step: 1, integer: true,
-    deps: ['worldSize'],
-    auto: (c) => (c.num('worldSize') < 768 ? r(2, 4) : c.num('worldSize') <= 1024 ? r(3, 5) : r(5, 8)),
+    deps: SIZE,
+    auto: (c) => {
+      const S = sizeEff(c);
+      if (sphere(c)) return S > 8000 ? r(8, 12) : r(5, 8);
+      return S < 768 ? r(2, 4) : S <= 1024 ? r(3, 5) : r(5, 8);
+    },
   }),
 
   // ── L3 Advanced ─────────────────────────────────────────────────────────────────────────
   choice({
-    id: 'lemGrid', label: 'Erosion grid', level: 3, section: 'advanced', stage: 'base',
+    id: 'lemGrid', label: 'Erosion grid', level: 3, section: 'advanced', stage: 'base', shapes: ['flat'],
     help: 'Resolution of the landscape-evolution model.',
     options: [
       { value: '256', label: '256²' },
@@ -408,7 +471,7 @@ export const PARAMS: readonly ParamDef[] = [
     auto: (c) => (c.str('quality') === 'fast' ? '256' : c.str('quality') === 'high' && c.num('worldSize') > 2048 ? '1024' : '512'),
   }),
   choice({
-    id: 'macroGrid', label: 'Macro grid', level: 3, section: 'advanced', stage: 'refine',
+    id: 'macroGrid', label: 'Macro grid', level: 3, section: 'advanced', stage: 'refine', shapes: ['flat'],
     help: 'Resolution of hydrology, climate and biomes.',
     options: [
       { value: '512', label: '512²' },
@@ -419,13 +482,23 @@ export const PARAMS: readonly ParamDef[] = [
     auto: (c) => (c.str('quality') === 'fast' ? '512' : c.str('quality') === 'high' && c.num('worldSize') > 2048 ? '2048' : '1024'),
   }),
   choice({
-    id: 'detailGrid', label: 'Detail grid', level: 3, section: 'advanced', stage: 'gpu',
+    id: 'detailGrid', label: 'Detail grid', level: 3, section: 'advanced', stage: 'gpu', shapes: ['flat'],
     help: 'Resolution of the GPU detail heightmap.',
     options: [
       { value: '2048', label: '2048²' },
       { value: '4096', label: '4096²' },
     ],
     deps: ['quality'], auto: (c) => (c.str('quality') === 'fast' ? '2048' : '4096'),
+  }),
+  choice({
+    id: 'faceGrid', label: 'Face grid', level: 3, section: 'advanced', stage: 'base', shapes: ['sphere'],
+    help: 'Cells per cube-face edge of the macro grid (six faces); the erosion grid has half as many.',
+    options: [
+      { value: '256', label: '6 × 256²' },
+      { value: '512', label: '6 × 512²' },
+      { value: '1024', label: '6 × 1024²' },
+    ],
+    deps: ['quality'], auto: (c) => (c.str('quality') === 'fast' ? '256' : c.str('quality') === 'high' ? '1024' : '512'),
   }),
   num({
     id: 'lemIterations', label: 'Erosion iterations', level: 3, section: 'advanced', stage: 'lem',
