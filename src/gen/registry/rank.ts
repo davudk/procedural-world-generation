@@ -102,7 +102,8 @@ export function rankAndName(
     for (const c of cands) if (!imp.has(c)) score(c);
   }
 
-  const order = cands.slice().sort((a, b) => imp.get(b)! - imp.get(a)! || a.kind.localeCompare(b.kind) || a.idX - b.idX || a.idY - b.idY);
+  // Kinds tie-break in code-unit order: localeCompare would follow the worker's locale.
+  const order = cands.slice().sort((a, b) => imp.get(b)! - imp.get(a)! || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0) || a.idX - b.idX || a.idY - b.idY);
   // Sources of shared names first (rivers before their deltas and canyons).
   const named = new Map<Candidate, [string, string]>();
   const langOf = (c: Candidate): number => {
