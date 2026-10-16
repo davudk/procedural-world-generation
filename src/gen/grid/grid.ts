@@ -270,24 +270,26 @@ export function finer(g: Grid, factor: number): Grid {
   return derive(g, 1 / factor, () => flatGrid(g.n * factor, g.cellKm / factor, g.mapEdge));
 }
 
-/**
- * Distance from cell i to the nearest map edge, in map widths (flat: min(x, y, n−1−x, n−1−y) / n,
- * the rule continents and coasts used before the Grid); Infinity on a closed surface.
- */
-export function mapEdgeDistance(g: Grid, i: number): number {
+/** Cells between cell i and the nearest map edge (0 on the edge row); Infinity on a closed surface. */
+export function edgeCells(g: Grid, i: number): number {
   if (g.shape !== 'flat') return Infinity;
   const n = g.n;
   const x = i % n;
   const y = (i - x) / n;
-  return Math.min(x, y, n - 1 - x, n - 1 - y) / n;
+  return Math.min(x, y, n - 1 - x, n - 1 - y);
+}
+
+/** Distance from cell i to the nearest map edge in map widths (edgeCells / n); Infinity on a closed surface. */
+export function mapEdgeDistance(g: Grid, i: number): number {
+  return edgeCells(g, i) / g.n;
 }
 
 /**
  * Visits the (2r + 1)² window of cells around c with their offsets in cells (dx east, dy south),
- * rows north to south, west to east; cells off the map are skipped. For per-feature smoothing and
- * small-window statistics, not for per-cell hot loops.
+ * rows north to south, west to east; cells off the map are skipped. `visit` may return false to
+ * stop early. For per-feature stamps and small-window statistics, not for per-cell hot loops.
  */
-export function forWindow(g: Grid, c: number, r: number, visit: (j: number, dx: number, dy: number) => void): void {
+export function forWindow(g: Grid, c: number, r: number, visit: (j: number, dx: number, dy: number) => boolean | void): void {
   if (g.shape !== 'flat') throw new Error('forWindow: only flat grids exist yet');
   const n = g.n;
   const x = c % n;
@@ -298,7 +300,7 @@ export function forWindow(g: Grid, c: number, r: number, visit: (j: number, dx: 
     for (let dx = -r; dx <= r; dx++) {
       const nx = x + dx;
       if (nx < 0 || nx >= n) continue;
-      visit(ny * n + nx, dx, dy);
+      if (visit(ny * n + nx, dx, dy) === false) return;
     }
   }
 }

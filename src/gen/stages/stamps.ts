@@ -1,5 +1,6 @@
 import type { Layer } from '../../shared/protocol';
 import type { Rng } from '../../shared/rng';
+import { cellIndex, cellX, cellY, type Grid } from '../grid/grid';
 import { quantile } from '../grid/ops';
 import { upliftForPeak } from '../lem/streamPower';
 import type { StageDef } from '../pipeline';
@@ -37,21 +38,23 @@ export const stampsStage: StageDef = {
     const P = ctx.input('plates').extra as PlatesExtra;
     const base = ctx.input('base').extra as BaseExtra;
     const { n, cellKm } = base;
-    const cellM = cellKm * 1000;
-    const N = n * n;
+    const g = ctx.grid(n);
+    const pg = ctx.grid(P.n);
+    const cellM = g.cellM;
+    const N = g.cells;
     const h = base.h0.slice();
     const U = base.U.slice();
     const K = base.K;
     const volcanism = ctx.num('volcanism') * ctx.num('density_volcanic');
 
     const cone = (p: Point, radiusKm: number, summitM: number, upliftShare: number): boolean => {
-      const c = Math.floor(p.y / cellKm) * n + Math.floor(p.x / cellKm);
+      const c = cellIndex(g, Math.floor(p.x / cellKm), Math.floor(p.y / cellKm));
       if (p.x < 0 || p.y < 0 || p.x >= n * cellKm || p.y >= n * cellKm) return false;
       const floor = h[c];
       const rise = summitM - floor;
       if (rise <= 0) return false;
       const uPeak = upliftShare > 0 ? upliftShare * upliftForPeak(Math.max(300, summitM), K0, LEM_M, radiusKm * 1000, cellM) : 0;
-      stamp(n, cellKm, p, radiusKm * 1.6, (r) => {
+      stamp(g, p, radiusKm * 1.6, (r) => {
         const t = r / radiusKm;
         return t >= 1 ? [0, 0] : [rise * (1 - t) ** 1.6, uPeak * (1 - t * t)];
       }, h, U);
@@ -63,9 +66,9 @@ export const stampsStage: StageDef = {
     const hrng = ctx.rng('hotspots');
     const hotspots = ctx.drawn('hotspotCount');
     for (let k = 0; k < hotspots; k++) {
-      const p0 = pickPoint(hrng, n, cellKm, (c) => (hrng.float() < 0.75 ? h[c] < -1500 : h[c] > 0));
+      const p0 = pickPoint(hrng, g, (c) => (hrng.float() < 0.75 ? h[c] < -1500 : h[c] > 0));
       if (!p0) continue;
-      const pl = P.plate[Math.floor((p0.y / (n * cellKm)) * P.n) * P.n + Math.floor((p0.x / (n * cellKm)) * P.n)];
+      const pl = P.plate[cellIndex(pg, Math.floor((p0.x / (n * cellKm)) * P.n), Math.floor((p0.y / (n * cellKm)) * P.n))];
       const vx = P.vx[pl];
       const vy = P.vy[pl];
       const speed = Math.hypot(vx, vy) || 1;
@@ -85,14 +88,14 @@ export const stampsStage: StageDef = {
     const spacingKm = 55 / Math.max(0.2, volcanism);
     const placed: Point[] = [];
     const candidates: { p: Point; island: boolean }[] = [];
-    for (let c = 0; c < P.n * P.n; c++) {
+    for (let c = 0; c < pg.cells; c++) {
       const nb = P.nearest[c];
       const seg = P.bSeg[nb] >= 0 ? P.segments[P.bSeg[nb]] : null;
       if (!seg) continue;
       const d = P.dBKm[c];
       const onArc = seg.cls === B.ARC && seg.overriding === P.plate[c] && Math.abs(d - 130) < P.cellKm;
       const onCordillera = seg.cls === B.SUBDUCTION && P.continent[c] !== -1 && Math.abs(d - 170) < P.cellKm;
-      if (onArc || onCordillera) candidates.push({ p: { x: ((c % P.n) + 0.5) * P.cellKm, y: (Math.floor(c / P.n) + 0.5) * P.cellKm }, island: onArc });
+      if (onArc || onCordillera) candidates.push({ p: { x: (cellX(pg, c) + 0.5) * P.cellKm, y: (cellY(pg, c) + 0.5) * P.cellKm }, island: onArc });
     }
     shuffle(arng, candidates);
     for (const { p, island } of candidates) {
@@ -114,14 +117,14 @@ export const stampsStage: StageDef = {
     for (let k = 0; k < ctx.drawn('craterCount'); k++) {
       if (minD > d1) break;
       const D = Math.exp(crng.range(Math.log(minD), Math.log(d1)));
-      const p = pickPoint(crng, n, cellKm, (c) => h[c] > 150, (q) => crPlaced.every((o) => Math.hypot(o.x - q.x, o.y - q.y) > 150));
+      const p = pickPoint(crng, g, (c) => h[c] > 150, (q) => crPlaced.every((o) => Math.hypot(o.x - q.x, o.y - q.y) > 150));
       if (!p) continue;
       crPlaced.push(p);
       craters++;
       const R = D / 2;
       const depth = D < 4 ? 0.2 * D * 1000 : 900 * (D / 4) ** 0.3;
       const rim = 0.036 * D * 1000;
-      stamp(n, cellKm, p, R * 3, (r) => {
+      stamp(g, p, R * 3, (r) => {
         const t = r / R;
         if (t < 1) {
           const bowl = -depth + (depth + rim) * t ** (D < 4 ? 2 : 4);
@@ -135,15 +138,13 @@ export const stampsStage: StageDef = {
     // Sea level again: stamps created and removed land.
     const sea = quantile(h, 1 - ctx.num('landFraction'));
     const fixed = new Uint8Array(N);
-    const openEdge = ctx.str('mapEdge') === 'continent';
+    // An open map edge (mapEdge = continent) is base level: water leaves the map there.
+    const outlets = ctx.str('mapEdge') === 'continent' ? g.outlets : null;
     let lo = Infinity;
     let hi = -Infinity;
     for (let i = 0; i < N; i++) {
       h[i] -= sea;
-      const x = i % n;
-      const y = (i - x) / n;
-      const edge = x === 0 || y === 0 || x === n - 1 || y === n - 1;
-      fixed[i] = h[i] <= 0 || (openEdge && edge) ? 1 : 0;
+      fixed[i] = h[i] <= 0 || (outlets !== null && outlets[i] === 1) ? 1 : 0;
       lo = Math.min(lo, h[i]);
       hi = Math.max(hi, h[i]);
     }
@@ -162,9 +163,10 @@ export const stampsStage: StageDef = {
 
 /** Adds a radial profile `f(rKm) → [Δh, ΔU]` around `p` (km) within `reachKm`. */
 function stamp(
-  n: number, cellKm: number, p: Point, reachKm: number,
+  g: Grid, p: Point, reachKm: number,
   f: (rKm: number) => readonly [number, number], h: Float32Array, U: Float32Array,
 ): void {
+  const { n, cellKm } = g;
   const x0 = Math.max(0, Math.floor((p.x - reachKm) / cellKm));
   const x1 = Math.min(n - 1, Math.ceil((p.x + reachKm) / cellKm));
   const y0 = Math.max(0, Math.floor((p.y - reachKm) / cellKm));
@@ -174,18 +176,20 @@ function stamp(
       const r = Math.hypot((x + 0.5) * cellKm - p.x, (y + 0.5) * cellKm - p.y);
       if (r > reachKm) continue;
       const [dh, du] = f(r);
-      h[y * n + x] += dh;
-      U[y * n + x] += du;
+      const i = cellIndex(g, x, y);
+      h[i] += dh;
+      U[i] += du;
     }
   }
 }
 
 /** Random point (km) whose cell satisfies `ok`, away from the map border; null after 200 tries. */
-function pickPoint(rng: Rng, n: number, cellKm: number, ok: (cell: number) => boolean, accept?: (p: Point) => boolean): Point | null {
+function pickPoint(rng: Rng, g: Grid, ok: (cell: number) => boolean, accept?: (p: Point) => boolean): Point | null {
+  const { n, cellKm } = g;
   for (let t = 0; t < 200; t++) {
     const x = rng.range(0.06, 0.94) * n * cellKm;
     const y = rng.range(0.06, 0.94) * n * cellKm;
-    const c = Math.floor(y / cellKm) * n + Math.floor(x / cellKm);
+    const c = cellIndex(g, Math.floor(x / cellKm), Math.floor(y / cellKm));
     if (ok(c) && (!accept || accept({ x, y }))) return { x, y };
   }
   return null;

@@ -1,4 +1,5 @@
 import type { Layer } from '../../shared/protocol';
+import { cellIndex, cellX, cellY } from '../grid/grid';
 import { components } from '../grid/ops';
 import { upsampleBicubic } from '../grid/upsample';
 import { runLem, upliftRefineFactor, type LemParams } from '../lem/streamPower';
@@ -79,9 +80,10 @@ export const refineStage: StageDef = {
       // Sub-cell jitter so flow on flat ground doesn't lock onto the new grid's axes.
       const jit = ctx.rng('refine-jitter', n);
       for (let i = 0; i < n * n; i++) if (h[i] > 0) h[i] += 4 * (jit.float() - 0.5);
+      const fg = ctx.grid(n);
       const fixed = new Uint8Array(n * n);
       for (let i = 0; i < n * n; i++) {
-        const parent = cur.fixed[(Math.floor(Math.floor(i / n) / 2) * cur.n) + Math.floor((i % n) / 2)];
+        const parent = cur.fixed[cellIndex(cg, Math.floor(cellX(fg, i) / 2), Math.floor(cellY(fg, i) / 2))];
         fixed[i] = parent || h[i] <= 0 ? 1 : 0;
         if (fixed[i] && h[i] > 0 && parent) h[i] = Math.min(h[i], 0);
         if (U[i] < 0) U[i] = 0;
