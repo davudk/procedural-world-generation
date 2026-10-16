@@ -1,5 +1,5 @@
 import { B } from '../stages/plates';
-import { cellAtM, cellX, cellY, insideDistance, label, labelAngle, mergeTree, nearestWhere, pca, resolveOwners, type GridSpec } from './grid';
+import { cellAtM, cellX, cellY, insideDistance, label, labelAngle, mergeTree, nearestWhere, pca, resolveOwners, type GridSpec, type MergeTree } from './grid';
 import { G } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
 
@@ -7,12 +7,29 @@ import type { Candidate, RegistryInput, Shared } from './types';
 const PEAK_MIN_PROM = 300;
 /** Minimum spacing of labelled peaks (km, research 05 §3.3). */
 const PEAK_SPACING_KM = 6;
+/**
+ * A single summit's footprint (m) is at most this: bigger massifs read as ranges at the world band, so
+ * a summit never competes with them there (M8 baseline rec. 4).
+ */
+const PEAK_MAX_EXTENT_M = 12000;
+/**
+ * Region-band crowding (research 05 §3.2: 10–25 features per 250 km view): at most PEAK_R_MAX peaks
+ * that read at the region band (footprint ≥ 250 km / 80) within PEAK_R_RADIUS_KM of each other; the
+ * most prominent win. Orogen views otherwise hold 15–20 summits next to their lakes and rivers.
+ */
+const PEAK_R_LO_M = 250000 / 80;
+const PEAK_R_RADIUS_KM = 80;
+const PEAK_R_MAX = 6;
 
 export interface ReliefResult {
   /** Range id per regional cell (−1 outside ranges), for canyons. */
   rangeOf: Int32Array;
   /** Highest peak of the world (map metres, m). */
   king: { x: number; y: number; h: number } | null;
+  /** Elevation merge tree over land (macro grid), prominence per component, components already used (volcano or peak). */
+  tree: MergeTree;
+  prom: Float32Array;
+  used: Uint8Array;
 }
 
 /**
@@ -94,11 +111,15 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
       kind: 'volcano', x, y, angle: NaN, extentM: f.size, mag: 0.7 * Math.min(1, hgt / Math.max(kingH, 1)) + 0.3 * Math.min(1, f.size / 40000),
       data: { heightM: Math.round(hgt), ...(k >= 0 ? { prominenceM: Math.round(prom[k]) } : {}), diameterKm: Math.round(f.size / 100) / 10, shield: f.type === 'shield-volcano' ? 1 : 0 },
       idX: f.x, idY: f.y, variant: f.type === 'shield-volcano' ? 'shield' : 'strato', visM: Math.max(f.size, 3000),
+      ...(k >= 0 ? { summit: k } : {}),
     });
   }
   const nVol = volcanoes.filter((v) => v.kind === 'volcano').length;
   let tallest: Candidate | null = null;
   for (const v of volcanoes) if (v.kind === 'volcano' && (!tallest || v.data.heightM > tallest.data.heightM)) tallest = v;
+  // Every tall cone is a hero candidate (research 05 §3.4: stratovolcano > 4 km); the tallest also
+  // stands for the whole chain (> 6 cones), so volcanic island worlds have more than one candidate.
+  for (const v of volcanoes) if (v.kind === 'volcano') v.hero = { cat: 'volcano', score: v.data.heightM / 4000 };
   if (tallest) tallest.hero = { cat: 'volcano', score: Math.max(tallest.data.heightM / 4000, nVol / 6) };
   out.push(...volcanoes);
 
@@ -111,24 +132,39 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
     if (i > 0) cand.splice(i, 1);
     if (i !== 0) cand.unshift(kingK);
   }
-  const cap = Math.round(Math.min(60, Math.max(8, S.landKm2 / 7000)));
+  // Caps scale with land area only (research 05 §3.1: size changes quantity, not density; M8 rec. 9).
+  const cap = Math.round(Math.max(8, S.landKm2 / 7000));
   const sp = (PEAK_SPACING_KM * 1000) / cellM;
   const taken: number[] = [];
   const peaks: Candidate[] = [];
+  const peakComps: number[] = [];
+  const rVis: number[] = [];
+  const rr2 = (PEAK_R_RADIUS_KM * 1000) ** 2;
   for (const k of cand) {
     if (peaks.length >= cap) break;
     const c = t.peak[k];
     const x = c % n;
     const y = (c - x) / n;
     if (taken.some((o) => ((o % n) - x) ** 2 + (Math.floor(o / n) - y) ** 2 < sp * sp)) continue;
+    const ext = Math.max(cellM, Math.min(prom[k] * 6, PEAK_MAX_EXTENT_M));
+    if (ext >= PEAK_R_LO_M && k !== kingK) {
+      const px = cellX(I.fine, c);
+      const py = cellY(I.fine, c);
+      let near = 0;
+      for (let i = 0; i < rVis.length; i += 2) if ((rVis[i] - px) ** 2 + (rVis[i + 1] - py) ** 2 < rr2) near++;
+      if (near >= PEAK_R_MAX) continue;
+    }
+    if (ext >= PEAK_R_LO_M) rVis.push(cellX(I.fine, c), cellY(I.fine, c));
     taken.push(c);
+    used[k] = 1;
+    peakComps.push(k);
     const p = prom[k];
     const hgt = t.peakV[k];
     const isKing = k === kingK;
     const px = cellX(I.fine, c);
     const py = cellY(I.fine, c);
     peaks.push({
-      kind: 'peak', x: px, y: py, angle: NaN, extentM: Math.max(cellM, Math.min(p * 6, 30000)),
+      kind: 'peak', x: px, y: py, angle: NaN, extentM: ext,
       visM: isKing ? 16000 : 1000 * (p / PEAK_MIN_PROM) ** 0.9, mag: 0.6 * Math.min(1, hgt / Math.max(kingH, 1)) + 0.4 * Math.min(1, p / 3000),
       data: { heightM: Math.round(hgt), prominenceM: Math.round(p), ...(isKing ? { worldKing: 1 } : {}) }, idX: px, idY: py,
       tier: hgt >= 7500 ? 'legendary' : hgt >= 5000 ? 'rare' : isKing ? 'uncommon' : 'common',
@@ -136,13 +172,14 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
     });
   }
   out.push(...peaks);
+  detectPasses(I, S, out, t, prom, peakComps, peaks);
 
   const rangeOf = detectRanges(I, S, out, peaks);
   detectFlats(I, S, out, rangeOf);
   detectRifts(I, S, out);
   landformAreas(I, out);
   const king = kingK >= 0 ? { x: cellX(I.fine, t.peak[kingK]), y: cellY(I.fine, t.peak[kingK]), h: kingH } : null;
-  return { rangeOf, king };
+  return { rangeOf, king, tree: t, prom, used };
 }
 
 /**
@@ -258,6 +295,46 @@ function detectRanges(I: RegistryInput, S: Shared, out: Candidate[], peaks: Cand
   return rangeOf;
 }
 
+/**
+ * Passes: the key col of a labelled peak (the lowest point on the highest route to higher ground) is
+ * a saddle on the crest, the classic mountain pass. Kept when the col stands ≥ PASS_MIN_RELIEF_M
+ * below the peak and ≥ PASS_MIN_H_M above the sea, spaced ≥ PASS_SPACING_KM, at most one per
+ * PASS_PER_KM2 of land (research 05 §3.2 lists passes among the area-band features).
+ */
+const PASS_MIN_RELIEF_M = 300;
+const PASS_MIN_H_M = 500;
+const PASS_SPACING_KM = 10;
+const PASS_PER_KM2 = 5000;
+/** A pass reads as a notch about this wide (m). */
+const PASS_EXTENT_M = 2000;
+
+function detectPasses(I: RegistryInput, S: Shared, out: Candidate[], t: MergeTree, prom: Float32Array, comps: number[], peaks: Candidate[]): void {
+  const fine = I.fine;
+  const list: { c: number; k: number; i: number }[] = [];
+  comps.forEach((k, i) => {
+    const c = t.col[k];
+    if (c < 0 || I.sea[c] || t.colV[k] < PASS_MIN_H_M || prom[k] < PASS_MIN_RELIEF_M) return;
+    list.push({ c, k, i });
+  });
+  // Highest crossings of the most prominent peaks first.
+  list.sort((a, b) => prom[b.k] - prom[a.k] || a.c - b.c);
+  const cap = Math.max(2, Math.round(S.landKm2 / PASS_PER_KM2));
+  const sp2 = (PASS_SPACING_KM * 1000) ** 2;
+  const kept: { x: number; y: number }[] = [];
+  for (const { c, k, i } of list) {
+    if (kept.length >= cap) break;
+    const x = cellX(fine, c);
+    const y = cellY(fine, c);
+    if (kept.some((o) => (o.x - x) ** 2 + (o.y - y) ** 2 < sp2)) continue;
+    kept.push({ x, y });
+    out.push({
+      kind: 'pass', x, y, angle: NaN, extentM: PASS_EXTENT_M, visM: PASS_EXTENT_M, mag: Math.min(1, t.colV[k] / 4000),
+      data: { heightM: Math.round(t.colV[k]), belowPeakM: Math.round(prom[k]) }, idX: x, idY: y, nameFrom: peaks[i],
+      tier: 'common', landmass: S.masses.label[c],
+    });
+  }
+}
+
 /** Plateaus (high and flat) and plains (low and flat): large regional components. */
 function detectFlats(I: RegistryInput, S: Shared, out: Candidate[], rangeOf: Int32Array): void {
   const R = S.reg;
@@ -301,8 +378,9 @@ function detectFlats(I: RegistryInput, S: Shared, out: Candidate[], rangeOf: Int
     list.sort((a, b) => b.extentM - a.extentM);
     out.push(...list.slice(0, cap));
   };
-  emit(plateau, 'plateau', 2500, 4);
-  emit(plain, 'plain', 15000, 3);
+  // Caps scale with land area (M8 baseline rec. 9); the world-band budget picks among them.
+  emit(plateau, 'plateau', 2500, Math.max(4, Math.round(S.landKm2 / 60000)));
+  emit(plain, 'plain', 6000, Math.max(3, Math.round(S.landKm2 / 50000)));
 }
 
 /** Continental rift segments (plates) of ≥ 100 km, mostly on land. */

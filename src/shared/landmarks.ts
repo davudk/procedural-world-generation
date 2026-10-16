@@ -7,7 +7,8 @@ export type LandmarkKind =
   | 'ocean' | 'sea' | 'gulf' | 'bay' | 'strait' | 'lagoon'
   | 'range' | 'peak' | 'volcano' | 'caldera' | 'crater' | 'plateau' | 'rift' | 'mesa-field' | 'canyon'
   | 'river' | 'lake' | 'waterfall' | 'delta' | 'fjord'
-  | 'glacier' | 'icecap' | 'desert' | 'erg' | 'forest' | 'wetland' | 'karst' | 'reef' | 'atoll' | 'plain';
+  | 'glacier' | 'icecap' | 'desert' | 'erg' | 'forest' | 'wetland' | 'karst' | 'reef' | 'atoll' | 'plain'
+  | 'hill' | 'grassland' | 'pass' | 'gorge';
 
 export type Tier = 'common' | 'uncommon' | 'rare' | 'legendary';
 

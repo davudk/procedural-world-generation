@@ -4,7 +4,9 @@ import { DEPTH_COEF, WIDTH_COEF } from './geometry';
 import type { GraphBuilder } from './graph';
 
 /** Rivers below this discharge (m³/s) get a plain mouth (research 02 §5.2). */
-export const DELTA_MIN_Q = 300;
+export const DELTA_MIN_Q = 150;
+/** The largest sea mouth gets a delta when no other has one, if it carries at least this (m³/s). */
+const GUARANTEE_MIN_Q = 50;
 /** Inland deltas into terminal lakes / dry sinks (research 02 §5.3–5.4). */
 const INLAND_LAKE_MIN_Q = 100;
 const INLAND_DRY_MIN_Q = 30;
@@ -23,6 +25,8 @@ export interface DeltaInput {
   tideRange: number;
   spacing: number;
   rng: Rng;
+  /** At most this many sea deltas (largest discharge first); the rest get plain mouths. */
+  maxSea: number;
 }
 
 export interface DeltaStats {
@@ -51,12 +55,32 @@ export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array):
     return cy * n + cx;
   };
   const reaches = gb.reaches;
+  // Sea mouths largest first, so the cap keeps the big deltas; then everything else in reach order.
+  const order: number[] = [];
+  let bestSea = -1;
   for (let r = 0; r < reaches; r++) {
+    const m = gb.last(r);
+    if (!(gb.flags[m] & RIVER.MOUTH_SEA) || gb.flags[m] & RIVER.DISTRIBUTARY) continue;
+    if (gb.q[m] >= DELTA_MIN_Q) order.push(r);
+    if (gb.q[m] >= GUARANTEE_MIN_Q && (bestSea < 0 || gb.q[m] > gb.q[gb.last(bestSea)])) bestSea = r;
+  }
+  order.sort((a, b) => gb.q[gb.last(b)] - gb.q[gb.last(a)] || a - b);
+  const seaCount = order.length;
+  for (let r = 0; r < reaches; r++) if (!(gb.flags[gb.last(r)] & RIVER.MOUTH_SEA)) order.push(r);
+  // Research 05 §4 row 33: guarantee one delta at the largest mouth, even on a steep shelf (cuspate).
+  if (bestSea >= 0) order.push(bestSea);
+  let seaDeltas = 0;
+  let estuaryAt = -1;
+  for (let o = 0; o < order.length; o++) {
+    const r = order[o];
+    const forced = o === order.length - 1 && bestSea >= 0;
+    if (forced && seaDeltas > 0) break;
+    if (o < seaCount && seaDeltas >= inp.maxSea) continue;
     const m = gb.last(r);
     const f = gb.flags[m];
     const Q = gb.q[m];
     let mode: 'sea' | 'lake' | 'dry' | null = null;
-    if (f & RIVER.MOUTH_SEA && Q >= DELTA_MIN_Q) mode = 'sea';
+    if (f & RIVER.MOUTH_SEA && (Q >= DELTA_MIN_Q || forced)) mode = 'sea';
     else if (f & RIVER.MOUTH_LAKE && f & RIVER.LAKE_TERMINAL && Q >= INLAND_LAKE_MIN_Q) mode = 'lake';
     else if (f & RIVER.SINK_DRY && !(f & RIVER.LAKE_TERMINAL)) {
       let peak = 0;
@@ -89,17 +113,27 @@ export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array):
       const sR = 0.6 + 0.6 * Math.log10(Q / DELTA_MIN_Q);
       const sW = 3 * inp.waveEnergy * exposure;
       const sT = 2.5 * inp.tideRange * shelf;
-      if (shelf < 0.5) {
-        if (sT > 0.6 * sR) stats.estuaries++;
-        continue;
+      if (forced && shelf < 0.5) {
+        style = 'wave';
+      } else {
+        if (shelf < 0.5) {
+          if (sT > 0.6 * sR) {
+            stats.estuaries++;
+            if (r === bestSea) estuaryAt = r;
+          }
+          continue;
+        }
+        const e = [Math.exp(sR / 0.35), Math.exp(sW / 0.35), Math.exp(forced ? -Infinity : sT / 0.35)];
+        const u = rng.float() * (e[0] + e[1] + e[2]);
+        style = u < e[0] ? 'river' : u < e[0] + e[1] ? 'wave' : 'tide';
       }
-      const e = [Math.exp(sR / 0.35), Math.exp(sW / 0.35), Math.exp(sT / 0.35)];
-      const u = rng.float() * (e[0] + e[1] + e[2]);
-      style = u < e[0] ? 'river' : u < e[0] + e[1] ? 'wave' : 'tide';
       if (style === 'tide') {
         stats.estuaries++;
+        if (r === bestSea) estuaryAt = r;
         continue;
       }
+      if (forced && estuaryAt === r) stats.estuaries--;
+      seaDeltas++;
       if (style === 'river') {
         extra = 2 + rng.int(4);
         stats.birdsFoot++;

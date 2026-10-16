@@ -13,7 +13,7 @@ export interface ErodedExtra extends TerrainExtra {
 }
 
 /** Land components at least this share of all land count as continents; smaller ones are islands. */
-const CONTINENT_MIN_SHARE = 0.05;
+const CONTINENT_MIN_SHARE = 0.1;
 
 const lemParams = (iterations: number): LemParams => ({
   m: LEM_M,

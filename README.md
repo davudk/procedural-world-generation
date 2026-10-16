@@ -10,7 +10,7 @@ A configurable procedural world generator in the browser. It builds a finite reg
 
 The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 
-**Status: milestone M7 (atlas).** It includes:
+**Status: milestone M8 (density tuning).** It includes:
 - the hierarchical config system and the staged generation pipeline;
 - tectonic plates with motion and boundary classes;
 - continents grown to a target count;
@@ -23,7 +23,8 @@ The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 - a 3D world view: CDLOD terrain with a water lid for sea and lakes, river ribbons that fade in by drainage area as you zoom, an orbit camera with zoom-to-cursor, tilt and rotate, a minimap and a compass;
 - a landmark registry: about 250 named places per world (peaks ranked by prominence, ranges, rivers, lakes, seas, gulfs, bays, straits, peninsulas, capes, islands, archipelagos, fjords, canyons, deserts, forests, volcanoes, craters…), named in procedural regional languages, with 3–5 hero landmarks and a World-traits summary;
 - SDF map labels with cartographic styles, priority placement and labels along rivers and ranges; an Atlas panel (A) that flies to any place;
-- a 2D raster debug viewer.
+- a 2D raster debug viewer;
+- a metrics harness (`npm run metrics`) that scores density, targets and boring/cluttered worlds over many seeds, archetypes and sizes.
 
 Close zoom (down to 8 m/px) shows a GPU-built 4096² detail heightmap (carved river valleys, thermal and hydraulic erosion) plus footprint-faded shader octaves, deterministic creeks generated for the visible area, soft horizon shadows and ambient occlusion, a gradient sky with aerial haze, and animated water with shoreline foam. See [docs/PLAN.md](docs/PLAN.md) for the full plan.
 

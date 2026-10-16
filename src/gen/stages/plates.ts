@@ -62,7 +62,7 @@ const DL = [1, 1, 1, 1, Math.SQRT2, Math.SQRT2, Math.SQRT2, Math.SQRT2];
 /** Minimum length of a boundary segment that counts as a mountain range or rift. */
 const RANGE_MIN_KM = 100;
 /** Motion candidates tried per world to steer the 🎯 range and rift targets (CONFIG.md §4). */
-const CANDIDATES = 8;
+const CANDIDATES = 16;
 /** Minimum ocean gap between continents before coast noise (km). */
 const CONTINENT_GAP_KM = 100;
 
@@ -111,11 +111,17 @@ export const platesStage: StageDef = {
     const targetRifts = ctx.drawn('riftCount');
     const activity = ctx.num('tectonicActivity');
     let best: Classified | null = null;
-    for (let k = 0; k < (ctx.mode === 'preview' ? 3 : CANDIDATES); k++) {
+    const rangeR = ctx.range('mountainRangeCount');
+    const riftR = ctx.range('riftCount');
+    // Outside the resolved range costs the distance to it; inside, a small pull toward the drawn value.
+    const miss = (v: number, r: readonly [number, number], drawn: number): number =>
+      Math.max(0, r[0] - v, v - r[1]) + 0.1 * Math.abs(v - drawn);
+    for (let k = 0; k < CANDIDATES; k++) {
       const motion = randomMotion(ctx.rng('motion', k), count, major, area, cellKm, activity);
       const cand = classify(frame, plate, continent, n, cellKm, cx, cy, motion, ctx.rng('override', k));
-      const score = Math.abs(cand.ranges - targetRanges) + 0.6 * Math.abs(cand.rifts - targetRifts);
+      const score = miss(cand.ranges, rangeR, targetRanges) + miss(cand.rifts, riftR, targetRifts);
       if (!best || score < best.score) best = { ...cand, score, motion };
+      if (score === 0) break;
     }
     const chosen = best!;
     await ctx.checkpoint();

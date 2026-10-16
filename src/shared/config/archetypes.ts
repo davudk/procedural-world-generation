@@ -51,7 +51,7 @@ export const ARCHETYPES: readonly Archetype[] = [
     landFraction: 0.55, continentSizeSkew: 0.9, islandAbundance: 0.5,
   }, { continentCount: [1, 1] }),
   arch('rift', 'Rift & great lakes', 'A continent pulling apart: rift valleys, long deep lakes, volcanoes.', {
-    tectonicActivity: 0.7, landFraction: 0.5, humidity: 1.2, latNorth: 15, latSouth: -15,
+    tectonicActivity: 0.7, landFraction: 0.5, humidity: 0.95, latNorth: 22, latSouth: -8,
   }, { riftCount: [2, 3] }),
   arch('fjordland', 'Fjordland', 'Cold, high-latitude coast with glaciated mountains and drowned valleys.', {
     latNorth: 72, latSouth: 55, temperatureOffset: -1, humidity: 1.3, seaLevelRise: 120, coastRoughness: 1.4,

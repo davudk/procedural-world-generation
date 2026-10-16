@@ -19,6 +19,16 @@ interface Centre {
   cone: (dx: number, dy: number) => number;
 }
 
+/** No volcanic centre within this distance (km) of the world's highest cell (the king massif). */
+const CROWN_KEEP_KM = 50;
+/** Arc stratovolcano spacing: STRATO_SPACING_KM / √volcanism, at least STRATO_MIN_SPACING_KM. */
+const STRATO_SPACING_KM = 45;
+const STRATO_MIN_SPACING_KM = 20;
+/** Volcano clusters per 1024² km world, their minimum spacing and radius (km). */
+const STRATO_PARENTS = 3;
+const PARENT_SPACING_KM = 200;
+const CLUSTER_RADIUS_KM = 70;
+
 const CONVERGENT: readonly number[] = [B.COLLISION, B.SUBDUCTION, B.ARC];
 
 /**
@@ -46,6 +56,12 @@ export function applyVolcanic(c: LandformCtx): void {
   const noise = new Noise2(c.rng('volcanic-noise').nextU32());
   const occupied = new DiskSet(64);
   let rejuvenated = 0;
+  // The world's highest summit is the crystalline king massif (base stage): no volcano or caldera
+  // may sit on it, or the king would be replaced by a lower cone or cut by a caldera.
+  let crownCell = 0;
+  for (let i = 1; i < n * n; i++) if (c.h[i] > c.h[crownCell]) crownCell = i;
+  const crown = centreOf(c, crownCell);
+  const onCrown = (x: number, y: number): boolean => Math.hypot(x - crown.x, y - crown.y) < CROWN_KEEP_KM;
 
   if (vol > 0.05) {
     // ── Stratovolcanoes on active arcs ───────────────────────────────────────────────────────
@@ -69,12 +85,24 @@ export function applyVolcanic(c: LandformCtx): void {
       });
     }
     shuffle(srng, cands);
-    const spacing = Math.max(25, 80 / Math.sqrt(Math.min(4, vol)));
+    // Clustered, not regular (research 05 §3.3, Clark–Evans 0.4–0.8): a Neyman–Scott process. A few
+    // parent centres are drawn from the arc candidates themselves (well apart); only candidates near a
+    // parent become volcanoes, at tight spacing, so volcanoes come in groups along the arcs.
+    const spacing = Math.max(STRATO_MIN_SPACING_KM, STRATO_SPACING_KM / Math.sqrt(Math.min(4, vol)));
+    const nParents = Math.max(1, Math.round(STRATO_PARENTS * af));
+    const parents: { x: number; y: number }[] = [];
+    for (const cd of cands) {
+      if (parents.length >= nParents) break;
+      if (onCrown(cd.x, cd.y)) continue;
+      if (parents.every((q) => Math.hypot(q.x - cd.x, q.y - cd.y) > PARENT_SPACING_KM)) parents.push(cd);
+    }
+    const nearParent = (x: number, y: number): boolean => parents.some((q) => Math.hypot(q.x - x, q.y - y) < CLUSTER_RADIUS_KM);
     const cap = Math.ceil(80 * af);
     const disk = new DiskSet(spacing * 1.3);
     let strato = 0;
     for (const cd of cands) {
       if (strato >= cap) break;
+      if (!nearParent(cd.x, cd.y)) continue;
       if (cd.x < 0.02 * W || cd.y < 0.02 * W || cd.x > 0.98 * W || cd.y > 0.98 * W) continue;
       if (!disk.free(cd.x, cd.y, spacing * srng.range(0.85, 1.25))) continue;
       let { x, y } = cd;
@@ -86,6 +114,7 @@ export function applyVolcanic(c: LandformCtx): void {
         ({ x, y } = centreOf(c, top));
         onOld = true;
       }
+      if (onCrown(x, y)) continue;
       const R = cd.island ? srng.range(8, 14) : srng.range(10, 20);
       // Island-arc cones stand on a shallow arc platform (≥ −400 m) with a skirt down to the sea
       // floor at 2R, so the emergent island is wider than a single grid cell.
@@ -129,6 +158,7 @@ export function applyVolcanic(c: LandformCtx): void {
       const hdisk = new DiskSet(150);
       for (const t of tracks) {
         if (shields >= hotspots) break;
+        if (onCrown(t.x, t.y)) continue;
         if (!hdisk.free(t.x, t.y, 150)) continue;
         hdisk.add(t.x, t.y);
         const R = hrng.range(30, 60);

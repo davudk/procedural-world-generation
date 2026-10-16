@@ -6,7 +6,7 @@ import { DX, DY, offsets } from './grid8';
 /** Lakes of at least 1 km² per km² of land in an average climate (HydroLAKES / Downing 2006, research 02 §6). */
 const LAKES_PER_KM2 = 1e-3;
 /** Mean acceptance of the climate/terrain weight over an average world (normalises the attempt count). */
-const MEAN_WEIGHT = 0.2;
+const MEAN_WEIGHT = 0.07;
 const MAX_AREA_KM2 = 3000;
 
 export interface PlaceInput {
@@ -22,6 +22,8 @@ export interface PlaceInput {
   pet: Float32Array;
   lakeDensity: number;
   rng: Rng;
+  /** Optional per-cell acceptance multiplier (lake districts). */
+  weight?: Float32Array;
 }
 
 /**
@@ -72,7 +74,7 @@ export function placeLakeBasins(p: PlaceInput): number {
     const cold = 1 + 2 * smoothstep(6, -4, temp[sill]);
     // Humid and cold land holds lakes; arid land keeps closed basins that end up as playas and salt lakes.
     const climate = Math.max((0.1 + 0.9 * smoothstep(0.4, 1.2, wet)) * cold, 0.6 * smoothstep(0.6, 0.25, wet));
-    const weight = (climate * 0.5) / (1 + steep(sill) / 0.08);
+    const weight = ((climate * 0.5) / (1 + steep(sill) / 0.08)) * (p.weight ? p.weight[sill] : 1);
     if (u > weight) continue;
     const level = h[sill];
 

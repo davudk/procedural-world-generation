@@ -134,3 +134,52 @@ export function countCrossings(g: RiverGraph, bin: number): number {
   }
   return count;
 }
+
+/**
+ * Longest river to the sea (research 05 §4 row 12, restated for M8): for every sea mouth, the length
+ * (km) of the longest path up the graph to a source, crossing through-flow lakes from inlet to outlet
+ * (as rivers like the St. Lawrence or the Nile are measured). `lakeOfMouth` gives the lake a
+ * MOUTH_LAKE node ends in (−1 if none) and `outletNode` the outlet node per lake (−1 for terminal
+ * lakes). Returns the longest length and how many sea mouths reach `minKm`.
+ */
+export function longestRiversToSea(
+  g: RiverGraph,
+  lakeOfMouth: (node: number) => number,
+  outletNode: Int32Array,
+  minKm: number,
+): { longestKm: number; count: number } {
+  const N = g.n;
+  const tgt = new Int32Array(N).fill(-1);
+  const indeg = new Int32Array(N);
+  const skip = (i: number): boolean => (g.flags[i] & RIVER.DISTRIBUTARY) !== 0;
+  for (let i = 0; i < N; i++) {
+    if (skip(i)) continue;
+    let t = g.down[i];
+    if (t < 0 && g.flags[i] & RIVER.MOUTH_LAKE && !(g.flags[i] & RIVER.LAKE_TERMINAL)) {
+      const l = lakeOfMouth(i);
+      if (l >= 0 && l < outletNode.length) t = outletNode[l];
+    }
+    if (t < 0 || t === i || skip(t)) continue;
+    tgt[i] = t;
+    indeg[t]++;
+  }
+  const len = new Float64Array(N);
+  const queue = new Int32Array(N);
+  let qt = 0;
+  for (let i = 0; i < N; i++) if (indeg[i] === 0 && !skip(i)) queue[qt++] = i;
+  let longest = 0;
+  let count = 0;
+  for (let qh = 0; qh < qt; qh++) {
+    const i = queue[qh];
+    const t = tgt[i];
+    if (t >= 0) {
+      len[t] = Math.max(len[t], len[i] + Math.hypot(g.x[t] - g.x[i], g.y[t] - g.y[i]));
+      if (--indeg[t] === 0) queue[qt++] = t;
+    } else if (g.flags[i] & RIVER.MOUTH_SEA) {
+      const km = len[i] / 1000;
+      longest = Math.max(longest, km);
+      if (km >= minKm) count++;
+    }
+  }
+  return { longestKm: longest, count };
+}

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { breachShallow } from '../src/gen/hydro/breach';
 import { bifurcationRatio, hackExponent } from '../src/gen/hydro/metrics';
 import { Pipeline, type StageOutput } from '../src/gen/pipeline';
 import { STAGES } from '../src/gen/stages';
@@ -117,10 +118,20 @@ describe('hydrology invariants (research 02 §10.3)', () => {
     it(`holds on preview seed ${seed}`, async () => {
       const w = await world(seed);
       checkInvariants(w);
-      expect(w.hydro.outcomes.riverDensity).toBeGreaterThan(0.5);
-      expect(w.hydro.outcomes.riverDensity).toBeLessThan(1.5);
+      expect(w.hydro.stats.riverDensityRatio).toBeGreaterThan(0.8);
+      expect(w.hydro.stats.riverDensityRatio).toBeLessThan(1.2);
+      // The outcome is in slider units, so the config panel compares it with riverDensity itself.
+      expect(w.hydro.outcomes.riverDensity).toBeCloseTo(w.hydro.stats.riverDensityRatio * (resolve({ seed, archetype: 'earth', pins: {} }).values.riverDensity as number), 6);
     }, 20_000);
   }
+
+  it('meets wetlandShare on a desert world via arid wetlands', async () => {
+    const p = new Pipeline(STAGES);
+    const r = resolve({ seed: 2, archetype: 'desert', pins: {} });
+    await p.run(r, 'preview', 1, () => {}, () => false);
+    const got = p.output('hydro')!.outcomes.wetlandShare;
+    expect(Math.abs(got - (r.values.wetlandShare as number))).toBeLessThanOrEqual(0.1 * (r.values.wetlandShare as number));
+  }, 20_000);
 
   it('is deterministic per seed', async () => {
     const hashes = async (seed: number): Promise<number[]> => {
@@ -129,6 +140,22 @@ describe('hydrology invariants (research 02 §10.3)', () => {
     };
     expect(await hashes(5)).toEqual(await hashes(5));
   }, 20_000);
+});
+
+describe('breachShallow', () => {
+  it('drains a pit whose outlet lies below the spill but above the pit floor', () => {
+    // A trough at 1 m between 50 m walls; the rim at 3 m, then terrain falling from 2.5 m to the sea.
+    const n = 7;
+    const h = new Float32Array(n * n);
+    const fixed = new Uint8Array(n * n);
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) h[y * n + x] = 50 + x + 10 * Math.abs(y - 3);
+    const row = [1, 3, 2.5, 2, 1.5, 0.5, -10];
+    for (let x = 0; x < n; x++) h[3 * n + x] = row[x];
+    fixed[3 * n + 6] = 1;
+    const r = breachShallow(h, n, fixed, 15, 10);
+    expect(r.breached).toBe(1);
+    for (let x = 1; x < 6; x++) expect(h[3 * n + x]).toBeLessThan(h[3 * n + x - 1]);
+  });
 });
 
 describe('network scaling (research 02 §3.3)', () => {

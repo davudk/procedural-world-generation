@@ -1,5 +1,7 @@
 import type { Landmark, WorldTraits } from '../../shared/landmarks';
 import type { Rng } from '../../shared/rng';
+import { externalWScale } from './budget';
+import { fillSummits, fillWorld } from './fill';
 import { detectLand } from './land';
 import { Namer } from './names';
 import { rankAndName } from './rank';
@@ -48,8 +50,21 @@ export async function buildRegistry(I: RegistryInput, heroCount: number, rng: Rn
   lap('regions');
   const worldM = I.worldKm * 1000;
   const namer = new Namer(I.seed, rng, worldM);
-  const ranked = rankAndName(cands, S, namer, worldM, heroCount);
+  // The fills run after the world-band budget, on what it kept: the world fill names the cover of land
+  // the budget left far from every world-scale feature, and a summit whose volcano the budget dropped
+  // is free again for the region fill.
+  const ranked = rankAndName(cands, S, namer, worldM, heroCount, externalWScale(I), (kept, dropped) => {
+    for (const c of dropped) if (c.summit !== undefined) relief.used[c.summit] = 0;
+    const t0 = performance.now();
+    stats.fillW = fillWorld(I, S, kept);
+    const filled = fillSummits(I, S, kept, relief);
+    stats.fillR = filled.r;
+    stats.fillA = filled.a;
+    stats.ms_fill = Math.round((performance.now() - t0) * 10) / 10;
+  });
   lap('names');
+  stats.wDropped = ranked.wDropped;
+  stats.wQuota = ranked.wQuota;
   const traits = worldTraits(I, S, ranked.landmarks, ranked.heroes);
   lap('traits');
   for (const l of ranked.landmarks) stats[`n_${l.kind}`] = (stats[`n_${l.kind}`] ?? 0) + 1;

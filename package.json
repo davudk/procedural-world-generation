@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.gen.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "metrics": "node --experimental-transform-types --no-warnings --import ./metrics/register.mjs metrics/cli.ts"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

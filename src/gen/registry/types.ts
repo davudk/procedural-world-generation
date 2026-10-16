@@ -10,7 +10,7 @@ import type { Components, GridSpec } from './grid';
 /** Hero menu categories (research 05 §3.4). */
 export type HeroCat =
   | 'massif' | 'great-river' | 'great-lake' | 'fjord-coast' | 'volcano' | 'crater' | 'sand-sea' | 'canyon' | 'archipelago'
-  | 'karst-towers' | 'salt-basin';
+  | 'karst-towers' | 'salt-basin' | 'reef';
 
 /**
  * A detected landmark before ranking and naming. Detectors fill geometry and facts; the registry
@@ -41,6 +41,8 @@ export interface Candidate {
   /** Hero menu category and its score (≥ 1 meets the research 05 threshold). */
   hero?: { cat: HeroCat; score: number };
   tier?: Tier;
+  /** Elevation merge-tree component of the summit this candidate claimed (volcanoes), so a pass can free it. */
+  summit?: number;
   /** Island / continent label for language choice (land features). */
   landmass?: number;
 }

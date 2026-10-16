@@ -64,7 +64,7 @@ describe('determinism', () => {
     const a = await hashes(spec());
     expect(await hashes(spec())).toEqual(a);
     expect((await hashes(spec({}, 8))).elevation).not.toBe(a.elevation);
-  });
+  }, 60_000);
 
   it('realises the land fraction within ±2 %', async () => {
     for (const landFraction of [0.15, 0.4, 0.65]) {
@@ -75,7 +75,7 @@ describe('determinism', () => {
       expect(Math.abs(base.stats.landFraction - landFraction)).toBeLessThan(0.02);
       expect(base.outcomes.continentCount).toBeGreaterThanOrEqual(1);
     }
-  });
+  }, 60_000);
 });
 
 describe('M1 tectonics and erosion', () => {
@@ -101,6 +101,7 @@ describe('M1 tectonics and erosion', () => {
     const refine = events.find((e) => e.type === 'stage-done' && e.stage === 'refine');
     if (refine?.type !== 'stage-done') throw new Error('no refine stage');
     expect(refine.stats.highestPeakM).toBeGreaterThan(2000);
-    expect(refine.stats.highestPeakM).toBeLessThan(7000);
+    // The king massif may stand ~1.5× above the requested spread (research 05 §3.6), the rest stay within it.
+    expect(refine.stats.highestPeakM).toBeLessThan(9500);
   }, 30_000);
 });

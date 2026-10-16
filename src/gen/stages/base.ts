@@ -13,6 +13,34 @@ export const K0 = 1e-5;
 export const LEM_M = 0.4;
 /** Half spreading rate of mid-ocean ridges, km/Myr (for the √age depth profile). */
 const RIDGE_HALF_RATE = 25;
+/** Orogen uplift gain over the steady-state estimate (M8: the LEM never reaches steady state). */
+const OROGEN_GAIN = 1.6;
+/** Floor of the along-strike segmentation (0..1): higher = fewer low saddles along a range. */
+const ALONG_FLOOR = 0.7;
+/** Start of the gap smoothstep: lower = fewer stretches of a range belt switched off. */
+const GAP_START = -0.75;
+/** Exponent of the across-strike orogen profile (1 − t²)^p; 2 = the old `bump`. */
+const BELT_POWER = 1;
+/** Minimum convergence factor of a range's uplift (slow boundaries still build real ranges). */
+const CONV_FLOOR = 0.8;
+/** Plateau uplift behind a range, relative to the range's own uplift (Tibet, Altiplano). */
+const PLATEAU_GAIN = 0.5;
+/** Wanted share of continental crust inside range cores, and the most a belt may be widened for it. */
+const BELT_TARGET_SHARE = 0.1;
+const BELT_MAX_MUL = 2.2;
+/** Intraplate swells: share of the noise field above the cut, wavelength (km) and target summit (m). */
+const SWELL_SHARE = 0.32;
+const SWELL_KM = 500;
+const SWELL_PEAK = 4500;
+/** Cap on uplift, relative to the steady-state uplift for the top of the peakHeight spread. */
+const U_CAP_REL = 0.68;
+/** King massif: summit target relative to the top of the peakHeight spread, and cone radius (km). */
+const KING_REL = 1.7;
+const KING_RADIUS_KM = 40;
+/** Ceiling of the king's uplift target (m); erosion-model summits land ~1.25× above the target. */
+const KING_MAX_M = 8000;
+/** Dome profile exponent (1 − (r/R)²)^p: higher = a sharper summit, but a lower one. */
+const KING_SHAPE = 1;
 
 export interface BaseExtra {
   n: number;
@@ -85,6 +113,11 @@ export const baseStage: StageDef = {
 
     const sdf = signedDistance(cont, n);
     const segs = P.segments.map((s, id) => segProps(ctx.rng('segment', id), s, ctx));
+    // Direct steering of relief contrast (research 05 §3.6, CONFIG.md §4): when the range cores cover
+    // too little of the continental crust (few or short convergent boundaries), widen every belt.
+    const beltShare = beltCoreShare(P, segs);
+    const beltMul = Math.min(BELT_MAX_MUL, Math.max(1, BELT_TARGET_SHARE / Math.max(beltShare, 1e-3)));
+    for (const sp of segs) sp.halfWidthKm *= beltMul;
     const rangeLen = ctx.range('rangeLength');
     const segWavelength = Math.max(40, (rangeLen[0] + rangeLen[1]) / 2 / 2.5);
     const gain = Math.min(0.68, Math.max(0.38, 0.5 + (ctx.num('coastRoughness') - 1.25) * 1.2));
@@ -98,7 +131,9 @@ export const baseStage: StageDef = {
     const K = new Float32Array(N);
     const strata = new Float32Array(N);
     const deep = new Float32Array(N);
-    const uBg = upliftForPeak(250 + 700 * (1 - age), K0, LEM_M, 30_000, cellM);
+    const coastA = new Float32Array(N);
+    const uOro = new Float32Array(N);
+    const uBg = upliftForPeak(400 + 900 * (1 - age), K0, LEM_M, 30_000, cellM);
 
     for (let y = 0; y < n; y++) {
       for (let x = 0; x < n; x++) {
@@ -129,23 +164,28 @@ export const baseStage: StageDef = {
 
         let h = coast >= 0 ? landBase(coast, noise, wx, wy) : oceanProfile(-coast, activeMargin ? 25 : 75, noise, wx, wy);
         // Background hills are patchy: about a third of the land stays as quiet lowland plains.
-        const hilly = 0.12 + 0.88 * smoothstep(-0.15, 0.25, noise.fbm(wx / 420 + 13, wy / 420 - 5, 3));
+        const hilly = 0.25 + 0.75 * smoothstep(-0.15, 0.25, noise.fbm(wx / 420 + 13, wy / 420 - 5, 3));
         let u = coast >= 0 ? uBg * hilly * (0.4 + 0.6 * (0.5 + 0.5 * noise.fbm(wx / 120, wy / 120, 3))) : 0;
+        const uBack = u;
         let lith = 1;
 
         if (seg && sp) {
-          const along = 0.55 + 0.45 * segN.ridged(wx / segWavelength + sp.phase, wy / segWavelength - sp.phase, 3);
-          const gap = smoothstep(-0.55, -0.15, segN.fbm(wx / (segWavelength * 2) - sp.phase, wy / (segWavelength * 2), 2));
-          const convK = Math.min(1.3, Math.max(0.5, Math.abs(seg.conv) / 40));
-          const U0 = upliftForPeak(sp.peak, K0, LEM_M, sp.halfWidthKm * 1000, cellM) * convK * along * gap;
+          const along = ALONG_FLOOR + (1 - ALONG_FLOOR) * segN.ridged(wx / segWavelength + sp.phase, wy / segWavelength - sp.phase, 3);
+          const gap = smoothstep(GAP_START, -0.15, segN.fbm(wx / (segWavelength * 2) - sp.phase, wy / (segWavelength * 2), 2));
+          const convK = Math.min(1.3, Math.max(CONV_FLOOR, Math.abs(seg.conv) / 40));
+          const U0 = OROGEN_GAIN * upliftForPeak(sp.peak, K0, LEM_M, sp.halfWidthKm * 1000, cellM) * convK * along * gap;
           const w = sp.halfWidthKm;
           switch (cls) {
             case B.COLLISION:
-              u += U0 * bump(dB, w);
-              if (sp.plateau && seg.overriding === ownPlate) u += 0.35 * U0 * plateau(dB, w, 260);
+              u += U0 * belt(dB, w);
+              if (sp.plateau && seg.overriding === ownPlate) u += PLATEAU_GAIN * U0 * plateau(dB, w, 260);
               break;
             case B.SUBDUCTION:
-              if (ownCont) u += U0 * bump(dB - 0.7 * w, w * 0.8);
+              if (ownCont) {
+                u += U0 * belt(dB - 0.7 * w, w * 0.8);
+                // Altiplano: a high plateau behind the cordillera on the continental side.
+                if (sp.plateau) u += PLATEAU_GAIN * U0 * plateau(dB - 0.7 * w, 0.8 * w, 200);
+              }
               else h -= 3500 * Math.exp(-((dB / 35) ** 2));
               break;
             case B.ARC:
@@ -176,6 +216,8 @@ export const baseStage: StageDef = {
         if (noise.fbm(wx / 350 - 140, wy / 350 + 90, 3) > strataCut && coast > 30) strata[i] = 120 + 120 * (0.5 + 0.5 * noise.fbm(wx / 90, wy / 90, 2));
 
         h0[i] = h;
+        coastA[i] = coast;
+        uOro[i] = u - uBack;
         deep[i] = smoothstep(-25, -90, coast);
         U[i] = u;
         K[i] = K0 * lith;
@@ -183,6 +225,38 @@ export const baseStage: StageDef = {
       if ((y & 31) === 0) await ctx.checkpoint();
     }
 
+    // Intraplate swells (Colorado / East African / Iranian plateaus): broad highlands that need no
+    // convergent boundary, so worlds with weak or mostly offshore orogens still get high ground
+    // (research 05 §3.6). A land-only quantile places them on a fixed share of the inland crust.
+    const uSwell = OROGEN_GAIN * upliftForPeak(SWELL_PEAK * Math.max(0, 1.3 - age), K0, LEM_M, 40_000, cellM);
+    // Island worlds have little continental interior: swells shrink with the land fraction.
+    const swellShare = SWELL_SHARE * Math.min(1, ctx.num('landFraction') / 0.22);
+    if (swellShare > 0 && uSwell > 0) {
+      const sv = new Float32Array(N).fill(-Infinity);
+      const inland: number[] = [];
+      for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) {
+          const i = y * n + x;
+          if (coastA[i] <= 30) continue;
+          sv[i] = noise.fbm(((x + 0.5) * cellKm) / SWELL_KM + 211, ((y + 0.5) * cellKm) / SWELL_KM - 97, 3);
+          if (coastA[i] > 150) inland.push(sv[i]);
+        }
+      }
+      // Small worlds may have no land far enough inland: then there are no swells (and no NaN cut).
+      const cut = inland.length ? quantile(Float32Array.from(inland), 1 - swellShare) : Infinity;
+      for (let i = 0; Number.isFinite(cut) && i < N; i++) {
+        if (sv[i] === -Infinity) continue;
+        const sw = smoothstep(cut - 0.1, cut + 0.1, sv[i]);
+        if (!(sw > 0)) continue;
+        const k = sw * smoothstep(30, 150, coastA[i]) * (0.75 + 0.25 * noise.fbm(((i % n) + 0.5) * cellKm / 90 - 3, (Math.floor(i / n) + 0.5) * cellKm / 90 + 8, 2));
+        U[i] += uSwell * k;
+      }
+    }
+
+    // Summit cap: overlapping belts, plateaus and swells must not stack into 10 km peaks; ranges top
+    // out near the top of the peakHeight spread (the king massif is the one exception).
+    const uCap = U_CAP_REL * upliftForPeak(ctx.range('peakHeight')[1], K0, LEM_M, 40_000, cellM);
+    for (let i = 0; i < N; i++) if (U[i] > uCap) U[i] = uCap;
     // Deep-ocean features come from per-segment boundary profiles; smooth them so the abyss has no facets.
     const blurred = h0.slice();
     boxBlur(blurred, n, Math.max(1, Math.round(18 / cellKm)), 2);
@@ -191,6 +265,25 @@ export const baseStage: StageDef = {
     boxBlur(U, n, Math.max(1, Math.round(10 / cellKm)), 2);
 
     const sea = quantile(h0, 1 - ctx.num('landFraction'));
+    // King massif (research 05 §3.6: highest summit ≥ 1.5 × the 95th-percentile peak): one uplift
+    // cone with a uniform crystalline core, preferably on the strongest orogen well inland, standing
+    // clear above every other range. Placed after sea level is known, so the whole cone is on land.
+    const king = placeKing(n, cellKm, h0, U, uOro, coastA, sea);
+    if (king) {
+      const rCells = king.rKm / cellKm;
+      const r0 = Math.ceil(rCells);
+      const uKing = OROGEN_GAIN * upliftForPeak(Math.min(KING_MAX_M, KING_REL * ctx.range('peakHeight')[1]), K0, LEM_M, king.rKm * 1000, cellM);
+      for (let y = king.y - r0; y <= king.y + r0; y++) {
+        for (let x = king.x - r0; x <= king.x + r0; x++) {
+          const t = Math.hypot(x - king.x, y - king.y) / rCells;
+          if (t >= 1) continue;
+          const i = y * n + x;
+          U[i] = Math.max(U[i], uKing * (1 - t * t) ** KING_SHAPE);
+          K[i] = K0;
+          strata[i] = 0;
+        }
+      }
+    }
     let lo = Infinity;
     let hi = -Infinity;
     let uMax = 0;
@@ -211,7 +304,7 @@ export const baseStage: StageDef = {
       { id: 'erodibility', label: 'Erodibility (log10 K)', stage: 'base', kind: 'scalar', w: n, h: n, worldKm, unit: '', min: -6.5, max: -4.3, data: Klog },
     ];
     const extra: BaseExtra = { n, cellKm, h0, U, K, strata };
-    return { layers, stats: { maxUpliftMmYr: uMax * 1000, seaLevelShift: sea }, outcomes: {}, extra };
+    return { layers, stats: { maxUpliftMmYr: uMax * 1000, seaLevelShift: sea, beltShare, beltMul, kingRadiusKm: king ? king.rKm : 0, kingCell: king ? king.y * n + king.x : -1 }, outcomes: {}, extra };
   },
 };
 
@@ -249,6 +342,68 @@ function oceanProfile(d: number, shelfKm: number, noise: Noise2, wx: number, wy:
 function bump(x: number, w: number): number {
   const t = x / w;
   return t >= 1 || t <= -1 ? 0 : (1 - t * t) ** 2;
+}
+
+/**
+ * Site of the king massif: the land cell with the strongest uplift (orogens preferred, far inland
+ * slightly preferred) whose whole cone of radius r stands on land; r shrinks for small landmasses.
+ */
+function placeKing(
+  n: number, cellKm: number, h0: Float32Array, U: Float32Array, uOro: Float32Array, coastA: Float32Array, sea: number,
+): { x: number; y: number; rKm: number } | null {
+  const N = n * n;
+  for (const f of [1, 0.7, 0.5]) {
+    const rKm = KING_RADIUS_KM * f;
+    const rCells = rKm / cellKm;
+    const r0 = Math.ceil(rCells);
+    const score = (i: number): number => U[i] * (uOro[i] > 0 ? 1.25 : 1) * (1 + 0.15 * smoothstep(rKm, 400, coastA[i]));
+    let cands: number[] = [];
+    for (let i = 0; i < N; i++) if (h0[i] > sea && coastA[i] >= 0.8 * rKm) cands.push(i);
+    if (cands.length > 4000) {
+      // Only the strongest few thousand matter; trim before sorting (build grids have ~10⁶ cells).
+      const cut = quantile(Float32Array.from(cands, score), 1 - 4000 / cands.length);
+      cands = cands.filter((i) => score(i) >= cut);
+    }
+    cands.sort((a, b) => score(b) - score(a) || a - b);
+    for (const c of cands.slice(0, 400)) {
+      const kx = c % n;
+      const ky = (c - kx) / n;
+      let dry = kx >= r0 && ky >= r0 && kx < n - r0 && ky < n - r0;
+      for (let y = ky - r0; y <= ky + r0 && dry; y++) {
+        for (let x = kx - r0; x <= kx + r0; x++) {
+          if (Math.hypot(x - kx, y - ky) < rCells && h0[y * n + x] <= sea + 50) {
+            dry = false;
+            break;
+          }
+        }
+      }
+      if (dry) return { x: kx, y: ky, rKm };
+    }
+  }
+  return null;
+}
+
+/** Share of continental plate-grid cells inside the core of a collision or cordillera belt. */
+function beltCoreShare(P: PlatesExtra, segs: readonly SegProps[]): number {
+  let cont = 0;
+  let core = 0;
+  for (let c = 0; c < P.n * P.n; c++) {
+    if (P.continent[c] === -1) continue;
+    cont++;
+    const id = P.bSeg[P.nearest[c]];
+    if (id < 0) continue;
+    const cls = P.segments[id].cls;
+    const d = P.dBKm[c];
+    const w = segs[id].halfWidthKm;
+    if (cls === B.COLLISION ? d < 0.6 * w : cls === B.SUBDUCTION && Math.abs(d - 0.7 * w) < 0.5 * w) core++;
+  }
+  return core / Math.max(1, cont);
+}
+
+/** Orogen belt across strike: flatter-topped than `bump`, so more of the belt stands high. */
+function belt(x: number, w: number): number {
+  const t = x / w;
+  return t >= 1 || t <= -1 ? 0 : (1 - t * t) ** BELT_POWER;
 }
 
 /** Plateau behind a range: rises after the range half-width and fades over `len` km. */

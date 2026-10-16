@@ -196,7 +196,7 @@ function embayments(
     const [x, y] = snapSea(I, S, px, py);
     const isGulf = fac > 1 && areaKm2 >= 6000;
     list.push({
-      kind: isGulf ? 'gulf' : 'bay', x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000 * 1.2,
+      kind: isGulf ? 'gulf' : 'bay', x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000,
       mag: Math.min(1, Math.log10(areaKm2) / 5), data: { areaKm2: Math.round(areaKm2) }, idX: px, idY: py,
     });
   }
@@ -301,6 +301,8 @@ function coastalFeatures(I: RegistryInput, out: Candidate[]): void {
     out.push({
       kind: 'reef', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 150000),
       data: { lengthKm: Math.round(f.size / 1000), barrier: f.data?.barrier ? 1 : 0 }, idX: f.x, idY: f.y,
+      // A great barrier reef (≥ ~150 km) is a hero option of reef and island worlds (M8 baseline rec. 12).
+      hero: { cat: 'reef', score: f.size / 150000 },
     });
   }
   const atolls = fs.filter((f) => f.type === 'atoll').sort((a, b) => b.size - a.size).slice(0, 10);

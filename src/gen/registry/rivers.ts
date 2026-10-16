@@ -102,7 +102,7 @@ export function detectWaters(I: RegistryInput, S: Shared, out: Candidate[], rang
     .map((s, i) => ({ s, i, score: s.lengthKm * Math.sqrt(s.q) }))
     .filter(({ s }) => s.lengthKm >= (s.joins < 0 ? minLen : 1.5 * minLen))
     .sort((a, b) => b.score - a.score || a.i - b.i);
-  const cap = Math.round(Math.min(30, Math.max(5, S.landKm2 / 15000)));
+  const cap = Math.round(Math.max(5, S.landKm2 / 15000));
   const named = new Map<number, Candidate>();
   let longest = 0;
   for (const { s } of order) longest = Math.max(longest, s.lengthKm);
@@ -167,6 +167,7 @@ export function detectWaters(I: RegistryInput, S: Shared, out: Candidate[], rang
   detectLakes(I, S, out);
   detectFalls(I, S, out, reachOf);
   detectCanyons(I, S, out, stems, named, rangeOf);
+  detectGorges(I, S, out);
   return { stems, named };
 }
 
@@ -175,7 +176,7 @@ function detectLakes(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const minKm2 = Math.max(2 * cellKm2, 3);
   const idx = I.lakes.map((_, i) => i).filter((i) => I.lakes[i].areaKm2 >= minKm2);
   idx.sort((a, b) => I.lakes[b].areaKm2 - I.lakes[a].areaKm2 || a - b);
-  const cap = Math.round(Math.min(30, Math.max(5, S.landKm2 / 12000)));
+  const cap = Math.round(Math.max(5, S.landKm2 / 12000));
   const n = I.fine.n;
   for (const i of idx.slice(0, cap)) {
     const L = I.lakes[i];
@@ -213,15 +214,19 @@ function detectFalls(I: RegistryInput, S: Shared, out: Candidate[], reachOf: Int
     list.push({ node: i, drop, score: drop * Math.sqrt(g.q[i]) });
   }
   list.sort((a, b) => b.score - a.score || a.node - b.node);
-  const cap = Math.round(Math.min(25, Math.max(3, S.landKm2 / 20000)));
+  // Up to ~7 per 10⁵ km² of land (research 05 §4 row 32: 3–8), no absolute cap (M8 rec. 9).
+  const cap = Math.round(Math.max(3, S.landKm2 / 14000));
   const kept: number[] = [];
   for (const f of list) {
     if (kept.length >= cap) break;
     const i = f.node;
     if (kept.some((k) => Math.hypot(g.x[k] - g.x[i], g.y[k] - g.y[i]) < 8000)) continue;
     kept.push(i);
+    // Extent: the visible footprint of the fall with its plunge pool and gorge head, which grows with
+    // the drop (the same rule as its label band); the channel width alone understates it.
+    const visM = 1500 * Math.sqrt(f.drop / 50);
     out.push({
-      kind: 'waterfall', x: g.x[i], y: g.y[i], angle: NaN, extentM: Math.max(200, g.width[i] * 3), visM: 1500 * Math.sqrt(f.drop / 50),
+      kind: 'waterfall', x: g.x[i], y: g.y[i], angle: NaN, extentM: Math.max(200, g.width[i] * 3, Math.min(visM, 3000)), visM,
       mag: Math.min(1, f.drop / 500), data: { heightM: Math.round(f.drop), dischargeM3s: Math.round(g.q[i] * 10) / 10 }, idX: g.x[i], idY: g.y[i],
       landmass: S.masses.label[cellAtM(I.fine, g.x[i], g.y[i])],
     });
@@ -312,11 +317,92 @@ function detectCanyons(I: RegistryInput, S: Shared, out: Candidate[], stems: Ste
     if (a >= 0) flush(a, b);
   });
   found.sort((a, b) => b.mag - a.mag);
-  const cap = Math.round(Math.min(4, Math.max(1, S.landKm2 / 100000)));
+  const cap = Math.round(Math.max(1, S.landKm2 / 100000));
   const kept: Candidate[] = [];
   for (const c of found) {
     if (kept.length >= cap) break;
     if (kept.some((o) => Math.hypot(o.x - c.x, o.y - c.y) < 40000)) continue;
+    kept.push(c);
+  }
+  out.push(...kept);
+}
+
+/**
+ * Gorges (area band, research 05 §3.2 "gorges, waterfalls"): runs of a river of Strahler order ≥ 2
+ * where the water lies ≥ GORGE_DEPTH_M below the highest ground within GORGE_RADIUS_M, between
+ * GORGE_MIN_KM and GORGE_MAX_KM (below the world band's smallest feature; longer, deeper runs are
+ * canyons). Spaced ≥ GORGE_SPACING_KM,
+ * deepest first, at most one per GORGE_PER_KM2 of land.
+ */
+const GORGE_DEPTH_M = 200;
+const GORGE_RADIUS_M = 2500;
+const GORGE_MIN_KM = 3;
+const GORGE_MAX_KM = 12;
+const GORGE_SPACING_KM = 40;
+const GORGE_PER_KM2 = 50000;
+
+function detectGorges(I: RegistryInput, S: Shared, out: Candidate[]): void {
+  const g = I.rivers;
+  const { n, cellM } = I.fine;
+  const r = Math.max(1, Math.round(GORGE_RADIUS_M / cellM));
+  const depth = new Float32Array(g.n);
+  const deep = new Uint8Array(g.n);
+  for (let i = 0; i < g.n; i++) {
+    if (g.strahler[i] < 2 || g.flags[i] & RIVER.DISTRIBUTARY) continue;
+    const cx = Math.min(n - 1, Math.floor(g.x[i] / cellM));
+    const cy = Math.min(n - 1, Math.floor(g.y[i] / cellM));
+    let mx = -Infinity;
+    for (let dy = -r; dy <= r; dy++) {
+      const y = cy + dy;
+      if (y < 0 || y >= n) continue;
+      for (let dx = -r; dx <= r; dx++) {
+        const x = cx + dx;
+        if (x < 0 || x >= n || dx * dx + dy * dy > r * r) continue;
+        const h = I.h[y * n + x];
+        if (h > mx) mx = h;
+      }
+    }
+    depth[i] = mx - g.zWater[i];
+    if (depth[i] >= GORGE_DEPTH_M) deep[i] = 1;
+  }
+  const deepUp = new Uint8Array(g.n);
+  for (let i = 0; i < g.n; i++) if (deep[i] && g.down[i] >= 0) deepUp[g.down[i]] = 1;
+  const found: Candidate[] = [];
+  for (let i = 0; i < g.n; i++) {
+    if (!deep[i] || deepUp[i]) continue;
+    const xs: number[] = [];
+    const ys: number[] = [];
+    let len = 0;
+    let sum = 0;
+    let mx = 0;
+    let cnt = 0;
+    for (let c = i, guard = 0; c >= 0 && deep[c] && guard < g.n; guard++) {
+      if (xs.length) len += Math.hypot(g.x[c] - xs[xs.length - 1], g.y[c] - ys[ys.length - 1]);
+      xs.push(g.x[c]);
+      ys.push(g.y[c]);
+      sum += depth[c];
+      mx = Math.max(mx, depth[c]);
+      cnt++;
+      c = g.down[c];
+    }
+    const lenKm = len / 1000;
+    if (lenKm < GORGE_MIN_KM || lenKm > GORGE_MAX_KM) continue;
+    const path = decimate(xs, ys, Math.max(cellM, len / 30));
+    const at = alongPolyline(path, 0.5);
+    const mean = sum / cnt;
+    found.push({
+      kind: 'gorge', x: at.x, y: at.y, angle: labelAngle(at.dx, at.dy), extentM: len, mag: Math.min(1, mean / 1000),
+      data: { lengthKm: Math.round(lenKm * 10) / 10, depthM: Math.round(mean), maxDepthM: Math.round(mx) }, idX: xs[xs.length - 1], idY: ys[ys.length - 1],
+      path, tier: 'common', landmass: S.masses.label[cellAtM(I.fine, at.x, at.y)],
+    });
+  }
+  found.sort((a, b) => b.data.depthM - a.data.depthM || a.idX - b.idX || a.idY - b.idY);
+  const cap = Math.max(2, Math.round(S.landKm2 / GORGE_PER_KM2));
+  const sp2 = (GORGE_SPACING_KM * 1000) ** 2;
+  const kept: Candidate[] = [];
+  for (const c of found) {
+    if (kept.length >= cap) break;
+    if (kept.some((o) => (o.x - c.x) ** 2 + (o.y - c.y) ** 2 < sp2)) continue;
     kept.push(c);
   }
   out.push(...kept);

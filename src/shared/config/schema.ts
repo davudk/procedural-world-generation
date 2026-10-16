@@ -200,7 +200,7 @@ export const PARAMS: readonly ParamDef[] = [
     deps: ['rangeLength', 'tectonicActivity'],
     auto: (c) => {
       const l = c.mid('rangeLength') * (0.8 + 0.4 * c.num('tectonicActivity'));
-      return r(Math.round(0.15 * l), Math.round(0.3 * l));
+      return r(Math.round(0.22 * l), Math.round(0.4 * l));
     },
   }),
   spread({
@@ -227,8 +227,9 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'riftCount', label: 'Rifts', level: 2, section: 'mountains', stage: 'plates', target: true,
     help: 'Continental rift valleys where plates pull apart.',
     min: 0, max: 10, step: 1, integer: true,
-    deps: ['tectonicActivity', 'plateCount'],
-    auto: (c) => r(0, clamp(Math.round(0.8 * c.num('tectonicActivity') * c.mid('plateCount')), 1, 10)),
+    deps: ['tectonicActivity', 'plateCount', 'continentalShare'],
+    // More continental crust means more plate boundaries inside continents, so more rifts (M8).
+    auto: (c) => r(0, clamp(Math.round(0.8 * c.num('tectonicActivity') * c.mid('plateCount') * (0.6 + c.num('continentalShare'))), 1, 10)),
   }),
   num({
     id: 'volcanism', label: 'Volcanism', level: 2, section: 'mountains', stage: 'stamps',
@@ -350,7 +351,7 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'lakeDensity', label: 'Lake density', level: 2, section: 'water', stage: 'hydro',
     help: 'Scales lakes the grid cannot resolve (kettles, tarns, ponds) and the lake/breach balance.',
     min: 0, max: 5, step: 0.05,
-    deps: ['glaciation', 'humidity'], auto: (c) => (0.6 + 0.4 * c.num('glaciation')) * Math.sqrt(c.num('humidity')),
+    deps: ['glaciation', 'humidity'], auto: (c) => (0.7 + 0.2 * c.num('glaciation')) * Math.sqrt(c.num('humidity')),
   }),
   num({
     id: 'meanderStrength', label: 'Meanders', level: 2, section: 'water', stage: 'hydro',
@@ -362,7 +363,7 @@ export const PARAMS: readonly ParamDef[] = [
     id: 'wetlandShare', label: 'Wetlands', level: 2, section: 'water', stage: 'hydro', target: true,
     help: 'Share of land that is marsh, swamp, bog or fen.',
     min: 0, max: 0.3, step: 0.005,
-    deps: ['humidity'], auto: (c) => clamp(0.07 * c.num('humidity'), 0.01, 0.2),
+    deps: ['humidity'], auto: (c) => clamp(0.07 * Math.pow(c.num('humidity'), 1.5), 0.005, 0.1),
   }),
   num({
     id: 'waveEnergy', label: 'Wave energy', level: 2, section: 'water', stage: 'hydro',

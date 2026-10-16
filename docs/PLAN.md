@@ -841,3 +841,45 @@ Each research note lists its sources with URLs. The core references are:
 - Pre-erosion volcanoes and old craters are only named when they still stand out as peaks.
 - No deltas are labelled on some seeds, because the fan is under 2 km.
 - River labels have no terrain occlusion.
+
+### M8 — Density tuning (2026-10-16)
+
+**What landed:**
+- **Metrics harness** (`metrics/*`, `npm run metrics`; see research 09):
+  - 10 archetypes × 40 preview seeds, a build subset and a 512/1024/2048 km size sweep on worker threads;
+  - per-band interest budgets, empty disks, clustering, relief contrast, counts against research 05 §4 and 🎯 target satisfaction;
+  - boring and cluttered detectors with links to the flagged seeds;
+  - a self-contained `report.html`.
+- **Relief** (`stages/base.ts`, `plates.ts`, `lem.ts`): wider orogenic belts with a target belt share, Altiplano-style plateaus behind subduction, intraplate swells, an uplift cap, and a "king massif" so most worlds have one standout summit.
+- **Water** (`stages/hydro.ts`, `hydro/*`): the drainage-density outcome is reported as a ratio of the slider, lake districts, a double breach pass, wetland tiers, a delta discharge floor with a guaranteed delta, and great-river stats.
+- **AUTO formulas:** lakeDensity `(0.7+0.2·glaciation)·√humidity`; wetlandShare `clamp(0.07·h^1.5, 0.005, 0.1)`.
+- **Registry:** a per-kind label budget with fill-in kinds (hills, open country, passes, gorges).
+- **Archetypes:** rift moved into the tropics with more humidity; the craton is exempt from the high-relief contrast rule.
+- **Fixes:**
+  - PET floor (150 mm) for the aridity index, which removed the aridity seam.
+  - NaN uplift on small worlds with no deep-inland land. The swell quantile was infinite and crashed the LEM at 512 km.
+
+**Measurements** (448 worlds in 113 s on 9 workers):
+- Band W passes on 88–98 % of seeds.
+- Continent, range, rift, river-density and wetland targets pass on 93–100 %.
+- King summit: 80–100 %.
+- Land below 300 m: ≥ 98 %. Land above 2 km: 83–100 %.
+- Cluttered: 0 % in preview.
+- 184 tests pass.
+
+**Not met (the ≥ 90 % bar):**
+- **Band R passes on only 5–73 % of seeds.**
+  - Fjordland and ice-age worlds are too busy (p95 ≈ 42).
+  - Deserts are sparse.
+- **Bands A and L can only be judged in build mode.** In preview they are 0 % by construction.
+  - In build mode, A has a median of 16–35.
+  - L is still below 6–20 in deserts.
+- **Build mode is always flagged "cluttered".** The quiet-land metric is miscalibrated at 1 km cells.
+- **Counts off target:**
+  - Too many ultra-prominent peaks.
+  - Too few rivers of order 5–6 and rivers reaching the sea.
+  - Too few small lakes (1–10 km²) at preview resolution.
+  - Too few peninsulas per coast.
+  - Great rivers are rare in sea-dominated archetypes.
+- **Size invariance:** only 5 of 26 rows are within tolerance.
+- **"Boring":** up to 28 % of seeds (deserts dominated by hot desert, worlds with little high relief).

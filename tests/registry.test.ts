@@ -6,6 +6,7 @@ import { resolve } from '../src/shared/config/resolve';
 import type { Resolved, WorldSpec } from '../src/shared/config/types';
 import type { Landmark, LandmarkKind, WorldTraits } from '../src/shared/landmarks';
 import type { GenMode } from '../src/shared/protocol';
+import { HERO_SPACING_MIN } from '../src/gen/registry/rank';
 
 interface World {
   resolved: Resolved;
@@ -38,6 +39,12 @@ function world(archetype: string, seed: number, mode: GenMode = 'preview', pins:
 }
 
 const count = (w: World, k: LandmarkKind): number => w.landmarks.filter((l) => l.kind === k).length;
+
+function landArea(w: World): number {
+  let land = 0;
+  for (let c = 0; c < w.hydro.waterClass.length; c++) if (w.hydro.waterClass[c] !== WATER.OCEAN) land++;
+  return land * w.hydro.cellKm * w.hydro.cellKm;
+}
 
 function cellOf(e: HydroExtra, x: number, y: number): number {
   const m = e.cellKm * 1000;
@@ -95,14 +102,14 @@ function checkInvariants(w: World): void {
       expect(distToPath(l.path!, l.x, l.y), `${l.kind} ${l.name} anchor off its path`).toBeLessThan(hydro.cellKm * 1000 * 1.5);
     }
   }
-  // Heroes: flagged, listed, a quarter of the world apart, legible at band W.
+  // Heroes: flagged, listed, at least a seventh of the world apart (a quarter while the pool allows), legible at band W.
   const heroes = lms.filter((l) => l.hero);
   expect(heroes.map((h) => h.id).sort()).toEqual([...traits.heroes].sort());
   expect(heroes.length).toBeLessThanOrEqual(w.resolved.drawn.heroCount);
   for (let i = 0; i < heroes.length; i++) {
     expect(heroes[i].maxMpp).toBeGreaterThanOrEqual(640);
     for (let j = i + 1; j < heroes.length; j++) {
-      expect(Math.hypot(heroes[i].x - heroes[j].x, heroes[i].y - heroes[j].y)).toBeGreaterThanOrEqual(worldM / 4 - 1);
+      expect(Math.hypot(heroes[i].x - heroes[j].x, heroes[i].y - heroes[j].y)).toBeGreaterThanOrEqual(worldM * HERO_SPACING_MIN - 1);
     }
   }
   // World traits.
@@ -122,11 +129,25 @@ describe('landmark registry (S11)', () => {
     expect(count(w, 'range')).toBeLessThanOrEqual(8);
     expect(count(w, 'river')).toBeGreaterThanOrEqual(1);
     expect(count(w, 'peak')).toBeGreaterThanOrEqual(5);
-    expect(count(w, 'peak')).toBeLessThanOrEqual(80);
+    // Peaks of prominence ≥ 300 m scale with land (≈ 1 per 7000 km² labelled, plus fill summits);
+    // area-band summits are denser but stay below one per 150 km² of land.
+    const landKm2 = landArea(w);
+    expect(w.landmarks.filter((l) => l.kind === 'peak' && l.data.prominenceM >= 300).length).toBeLessThanOrEqual(10 + landKm2 / 2000);
+    expect(count(w, 'peak') + count(w, 'hill')).toBeLessThanOrEqual(landKm2 / 150);
+    // Region- and area-band additions (M8): hills and passes.
+    expect(count(w, 'hill')).toBeGreaterThanOrEqual(1);
+    expect(count(w, 'pass')).toBeGreaterThanOrEqual(1);
+    // World-band budget: W-scale landmarks other than rivers, lakes, continents and oceans stay within
+    // the registry's quota plus the protected ones (heroes, the king, world-band fill).
+    const worldM = (w.resolved.values.worldSize as number) * 1000;
+    const wScale = w.landmarks.filter((l) => l.extentM >= worldM / 80 && !['river', 'lake', 'continent', 'ocean'].includes(l.kind));
+    const prot = wScale.filter((l) => l.hero || l.data.worldKing || l.data.wFill).length;
+    expect(wScale.length).toBeLessThanOrEqual(w.reg.stats.wQuota + prot);
     expect(count(w, 'lake')).toBeGreaterThanOrEqual(1);
     expect(count(w, 'island')).toBeGreaterThanOrEqual(1);
-    expect(count(w, 'waterfall')).toBeLessThanOrEqual(30);
-    expect(count(w, 'canyon')).toBeLessThanOrEqual(4);
+    // Waterfalls ≤ 8 per 10⁵ km² of land (research 05 §4 row 32), canyons ≤ 1 per 10⁵ km² (min 1).
+    expect(count(w, 'waterfall')).toBeLessThanOrEqual(Math.max(3, Math.round(landArea(w) / 14000)));
+    expect(count(w, 'canyon')).toBeLessThanOrEqual(Math.max(1, Math.round(landArea(w) / 100000)));
     // Exactly one world king, on the highest labelled summit.
     const kings = w.landmarks.filter((l) => l.data.worldKing);
     expect(kings.length).toBe(1);
@@ -144,6 +165,10 @@ describe('landmark registry (S11)', () => {
     const ar = await world('archipelago', 7);
     checkInvariants(ar);
     expect(count(ar, 'island')).toBeGreaterThanOrEqual(5);
+    // Archipelago 8 has all its land in one ~300 km cluster: the relaxed hero spacing still finds 3.
+    const ar8 = await world('archipelago', 8);
+    checkInvariants(ar8);
+    expect(ar8.landmarks.filter((l) => l.hero).length).toBeGreaterThanOrEqual(Math.min(3, ar8.resolved.drawn.heroCount));
     const de = await world('desert', 7);
     checkInvariants(de);
     expect(count(de, 'desert') + count(de, 'erg')).toBeGreaterThanOrEqual(1);
@@ -182,6 +207,6 @@ describe('landmark registry (S11)', () => {
     const w = await world('earth', 7, 'build', { worldSize: 512, lemGrid: '256', macroGrid: '512' });
     checkInvariants(w);
     expect(count(w, 'continent') + count(w, 'island')).toBeGreaterThanOrEqual(1);
-    expect(count(w, 'peak')).toBeLessThanOrEqual(80);
+    expect(w.landmarks.filter((l) => l.kind === 'peak' && l.data.prominenceM >= 300).length).toBeLessThanOrEqual(10 + landArea(w) / 2000);
   }, 300_000);
 });

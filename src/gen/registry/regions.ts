@@ -65,7 +65,7 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
   // Great forests: one region per forest group.
   const forests: Candidate[] = [];
   for (const [gr, variant] of [[G.BOREAL, 'taiga'], [G.TEMPERATE, 'forest'], [G.TROPICAL, 'jungle']] as const) {
-    for (const r of regions([gr], 0.55, 12000).slice(0, 2)) {
+    for (const r of regions([gr], 0.55, 6000).slice(0, 3)) {
       const [x, y] = anchor(r.pole);
       forests.push({
         kind: 'forest', x, y, angle: NaN, extentM: Math.sqrt(r.areaKm2) * 1000, mag: Math.min(1, r.areaKm2 / 200000),
@@ -75,10 +75,36 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
     }
   }
   forests.sort((a, b) => b.extentM - a.extentM);
-  out.push(...forests.slice(0, 4));
+  out.push(...forests.slice(0, Math.max(4, Math.round(S.landKm2 / 60000))));
+
+  // Open country: steppe, savanna, scrub and tundra regions, named by their dominant biome. They fill
+  // the interiors that are neither forest nor desert (M8: the emptiest world-band views were savanna
+  // and shrubland with no name at all).
+  const open: Candidate[] = [];
+  for (const [gr, minKm2] of [[G.OPEN, 6000], [G.TUNDRA, 6000]] as const) {
+    for (const r of regions([gr], 0.5, minKm2)) {
+      const counts = new Map<number, number>();
+      for (const c of r.cells) {
+        const b = I.biome.biome[cellAtM(I.fine, cellX(R, c), cellY(R, c))];
+        if (groupOf(b, 0) === gr) counts.set(b, (counts.get(b) ?? 0) + 1);
+      }
+      let dom = -1;
+      let dc = -1;
+      for (const [b, k] of counts) if (k > dc || (k === dc && b < dom)) (dc = k), (dom = b);
+      const variant = dom === BIOME.SAVANNA ? 'savanna' : dom === BIOME.STEPPE ? 'steppe' : dom === BIOME.TUNDRA ? 'tundra' : 'scrub';
+      const [x, y] = anchor(r.pole);
+      open.push({
+        kind: 'grassland', x, y, angle: NaN, extentM: Math.sqrt(r.areaKm2) * 1000, mag: Math.min(1, r.areaKm2 / 200000),
+        data: { areaKm2: Math.round(r.areaKm2) }, idX: cellX(R, r.pole), idY: cellY(R, r.pole), variant,
+        landmass: S.masses.label[cellAtM(I.fine, x, y)],
+      });
+    }
+  }
+  open.sort((a, b) => b.extentM - a.extentM);
+  out.push(...open.slice(0, Math.max(3, Math.round(S.landKm2 / 60000))));
 
   // Wetlands, named by their dominant wetland biome.
-  for (const r of regions([G.WET], 0.35, 800).slice(0, 5)) {
+  for (const r of regions([G.WET], 0.35, 800).slice(0, Math.max(5, Math.round(S.landKm2 / 50000)))) {
     const counts = new Map<number, number>();
     for (const c of r.cells) {
       const b = I.biome.biome[cellAtM(I.fine, cellX(R, c), cellY(R, c))];

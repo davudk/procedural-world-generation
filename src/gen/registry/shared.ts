@@ -10,9 +10,9 @@ export const REGIONAL_M = 4000;
 const CONTINENT_WORLD_SHARE = 0.035;
 const CONTINENT_LAND_SHARE = 0.08;
 
-/** Biome groups counted per regional cell (deserts, forests, wetlands). */
-export const G = { DESERT: 0, BOREAL: 1, TEMPERATE: 2, TROPICAL: 3, WET: 4 } as const;
-export const GROUPS = 5;
+/** Biome groups counted per regional cell (deserts, forests, wetlands, open grass and scrub lands, tundra). */
+export const G = { DESERT: 0, BOREAL: 1, TEMPERATE: 2, TROPICAL: 3, WET: 4, OPEN: 5, TUNDRA: 6 } as const;
+export const GROUPS = 7;
 
 export function groupOf(b: number, water: number): number {
   if (water === WATER.WETLAND) return G.WET;
@@ -27,6 +27,10 @@ export function groupOf(b: number, water: number): number {
       return G.TROPICAL;
     case BIOME.MARSH: case BIOME.BOG: case BIOME.SWAMP: case BIOME.FEN: case BIOME.SALT_MARSH: case BIOME.MANGROVE:
       return G.WET;
+    case BIOME.STEPPE: case BIOME.SAVANNA: case BIOME.XERIC_SHRUB: case BIOME.MEDITERRANEAN:
+      return G.OPEN;
+    case BIOME.TUNDRA:
+      return G.TUNDRA;
     default:
       return -1;
   }

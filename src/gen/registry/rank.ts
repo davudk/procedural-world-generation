@@ -1,5 +1,6 @@
 import type { Landmark, LandmarkKind, Tier } from '../../shared/landmarks';
 import { hashMix, hashString } from '../../shared/hash';
+import { applyWBudget } from './budget';
 import type { Namer } from './names';
 import type { Candidate, HeroCat, Shared } from './types';
 
@@ -8,7 +9,7 @@ const KIND_WEIGHT: Record<LandmarkKind, number> = {
   continent: 1, ocean: 1, sea: 0.85, range: 0.85, river: 0.8, icecap: 0.75, desert: 0.75, gulf: 0.7, archipelago: 0.7, rift: 0.65,
   plateau: 0.6, lake: 0.6, crater: 0.65, volcano: 0.6, erg: 0.6, forest: 0.55, canyon: 0.6, peak: 0.55, caldera: 0.55, island: 0.55,
   peninsula: 0.55, strait: 0.55, delta: 0.5, fjord: 0.5, isthmus: 0.45, wetland: 0.45, plain: 0.45, 'mesa-field': 0.45, karst: 0.45,
-  bay: 0.45, atoll: 0.45, glacier: 0.4, cape: 0.4, lagoon: 0.35, reef: 0.35, waterfall: 0.35,
+  bay: 0.45, atoll: 0.45, glacier: 0.4, cape: 0.4, lagoon: 0.35, reef: 0.35, waterfall: 0.35, hill: 0.3, grassland: 0.5, pass: 0.3, gorge: 0.35,
 };
 
 const DEFAULT_TIER: Record<LandmarkKind, Tier> = {
@@ -17,18 +18,29 @@ const DEFAULT_TIER: Record<LandmarkKind, Tier> = {
   erg: 'uncommon', forest: 'common', canyon: 'uncommon', peak: 'common', caldera: 'rare', island: 'common', peninsula: 'uncommon',
   strait: 'uncommon', delta: 'uncommon', fjord: 'common', isthmus: 'uncommon', wetland: 'common', plain: 'common', 'mesa-field': 'uncommon',
   karst: 'uncommon', bay: 'common', atoll: 'rare', glacier: 'common', cape: 'common', lagoon: 'common', reef: 'uncommon', waterfall: 'common',
+  hill: 'common', grassland: 'common', pass: 'common', gorge: 'common',
 };
 
 /** Pixels a feature must span to read at a zoom band: W ≈ 640 m/px shows features ≥ ~15 km (research 05 §3.2). */
 const PX_TO_READ = 23;
 /** Hero rules (research 05 §3.4): legible at band W and a quarter of the world apart. */
 const HERO_MIN_FOOTPRINT_M = 15000;
+/** Hero spacing as a share of the world width, and the relaxed spacing used when the pool runs short. */
+export const HERO_SPACING = 1 / 4;
+export const HERO_SPACING_SHORT = 1 / 5;
+/** Last resort for worlds whose land is one small cluster (archipelago seeds with all land in ~300 km). */
+export const HERO_SPACING_MIN = 1 / 7;
 const W_BAND_MPP = 640;
+/**
+ * Labels readable at the whole-world view, heroes and the king aside. A land-weighted W view sees
+ * ~60–70 % of them: ~45 keeps a world screen near 30 labels (harness cap 60 at p95; M8 baseline 56–100).
+ */
+const W_LABELS = 45;
 
 /** Menu weights: how strongly each hero category reads as "special". */
 const HERO_WEIGHT: Record<HeroCat, number> = {
   massif: 1, 'great-river': 1, 'great-lake': 1, 'fjord-coast': 1.05, volcano: 1, crater: 1.1, 'sand-sea': 1, canyon: 1.05, archipelago: 1,
-  'karst-towers': 1.05, 'salt-basin': 0.95,
+  'karst-towers': 1.05, 'salt-basin': 0.95, reef: 0.95,
 };
 
 export interface Ranked {
@@ -38,36 +50,56 @@ export interface Ranked {
   heroPool: string[];
   /** Landmark index per candidate. */
   index: Map<Candidate, number>;
+  /** W-scale candidates dropped by the world-band budget, and the registry's share of that budget. */
+  wDropped: number;
+  wQuota: number;
 }
 
 /**
  * Importance, zoom band, tier, name and hero status for every candidate, then the output list
  * ordered by importance (ids are list indices).
  */
-export function rankAndName(cands: Candidate[], S: Shared, namer: Namer, worldM: number, heroCount: number): Ranked {
+export function rankAndName(
+  all: Candidate[], S: Shared, namer: Namer, worldM: number, heroCount: number, externalW: { count: number; xs: number[]; ys: number[] },
+  afterBudget?: (kept: Candidate[], dropped: readonly Candidate[]) => void,
+): Ranked {
   const imp = new Map<Candidate, number>();
-  for (const c of cands) {
+  const score = (c: Candidate): void => {
     let v = KIND_WEIGHT[c.kind] * (0.3 + 0.7 * Math.min(1, Math.max(0, c.mag)));
     if (c.data.worldKing) v = Math.max(v, 0.8);
     else if (c.data.rangeKing) v += 0.08;
     imp.set(c, Math.min(1, v));
-  }
+  };
+  for (const c of all) score(c);
 
-  // Heroes: best-scoring legible candidates, a quarter of the world apart, distinct categories first.
-  const pool = cands.filter((c) => c.hero && Math.max(c.extentM, c.visM ?? 0) >= HERO_MIN_FOOTPRINT_M);
+  // Heroes: best-scoring legible candidates, a quarter of the world apart (a fifth, then a seventh when
+  // the pool runs short, research 05 §3.4 / M8 baseline rec. 12), distinct categories first.
+  const pool = all.filter((c) => c.hero && Math.max(c.extentM, c.visM ?? 0) >= HERO_MIN_FOOTPRINT_M);
   pool.sort((a, b) => b.hero!.score * HERO_WEIGHT[b.hero!.cat] - a.hero!.score * HERO_WEIGHT[a.hero!.cat] || imp.get(b)! - imp.get(a)!);
   const heroes: Candidate[] = [];
-  const spacing = worldM / 4;
-  for (const [distinct, minScore] of [[true, 0.5], [false, 0.5], [true, 0.2], [false, 0.2]] as const) {
-    for (const c of pool) {
-      if (heroes.length >= heroCount) break;
-      if (heroes.includes(c) || c.hero!.score < minScore) continue;
-      if (distinct && heroes.some((h) => h.hero!.cat === c.hero!.cat)) continue;
-      if (heroes.some((h) => Math.hypot(h.x - c.x, h.y - c.y) < spacing)) continue;
-      heroes.push(c);
+  for (const spacing of [worldM * HERO_SPACING, worldM * HERO_SPACING_SHORT, worldM * HERO_SPACING_MIN]) {
+    for (const [distinct, minScore] of [[true, 0.5], [false, 0.5], [true, 0.2], [false, 0.2]] as const) {
+      for (const c of pool) {
+        if (heroes.length >= heroCount) break;
+        if (heroes.includes(c) || c.hero!.score < minScore) continue;
+        if (distinct && heroes.some((h) => h.hero!.cat === c.hero!.cat)) continue;
+        if (heroes.some((h) => Math.hypot(h.x - c.x, h.y - c.y) < spacing)) continue;
+        heroes.push(c);
+      }
     }
   }
   for (const h of heroes) imp.set(h, Math.min(1, Math.max(imp.get(h)!, 0.9) + 0.05 * Math.min(1, h.hero!.score)));
+
+  // World-band interest budget (research 05 §3.2, M8 baseline rec. 4).
+  const prot = new Set<Candidate>(heroes);
+  for (const c of all) if (c.data.worldKing || c.data.wFill) prot.add(c);
+  const budget = applyWBudget(all, imp, prot, worldM, externalW);
+  const cands = budget.kept;
+  // Later passes (the region / area fill) see what the budget left and may add candidates.
+  if (afterBudget) {
+    afterBudget(cands, budget.dropped);
+    for (const c of cands) if (!imp.has(c)) score(c);
+  }
 
   const order = cands.slice().sort((a, b) => imp.get(b)! - imp.get(a)! || a.kind.localeCompare(b.kind) || a.idX - b.idX || a.idY - b.idY);
   // Sources of shared names first (rivers before their deltas and canyons).
@@ -93,10 +125,15 @@ export function rankAndName(cands: Candidate[], S: Shared, namer: Namer, worldM:
 
   const landmarks: Landmark[] = [];
   const index = new Map<Candidate, number>();
+  // World-band label budget (M8 baseline rec. 4): at the whole-world view only the W_LABELS most
+  // important landmarks keep their label; the rest appear from the next zoom step on.
+  const wMpp = worldM / 1600;
+  let wLabels = 0;
   for (const c of order) {
     const isHero = heroes.includes(c);
     let maxMpp = Math.min(50000, Math.max(5, (c.visM ?? c.extentM) / PX_TO_READ));
-    if (isHero || c.data.worldKing) maxMpp = Math.max(maxMpp, W_BAND_MPP * 1.1);
+    if (isHero || c.data.worldKing) maxMpp = Math.max(maxMpp, W_BAND_MPP * 1.1, wMpp * 1.1);
+    else if (maxMpp >= wMpp && ++wLabels > W_LABELS) maxMpp = 0.95 * wMpp;
     const lm: Landmark = {
       id: landmarks.length, kind: c.kind, name: named.get(c)![0], x: c.x, y: c.y, angle: c.angle, extentM: c.extentM,
       importance: Math.round(imp.get(c)! * 1000) / 1000, maxMpp: Math.round(maxMpp), data: c.data,
@@ -108,5 +145,5 @@ export function rankAndName(cands: Candidate[], S: Shared, namer: Namer, worldM:
     landmarks.push(lm);
   }
   const heroPool = pool.filter((c) => c.hero!.score >= 0.2).map((c) => `${c.hero!.cat}:${c.hero!.score.toFixed(2)}@${Math.round(c.x / 1000)},${Math.round(c.y / 1000)}`);
-  return { landmarks, heroes: heroes.map((h) => index.get(h)!), heroPool, index };
+  return { landmarks, heroes: heroes.map((h) => index.get(h)!), heroPool, index, wDropped: budget.dropped.length, wQuota: budget.quota };
 }

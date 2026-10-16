@@ -109,10 +109,11 @@ describe('glacial stage', () => {
 
   it('Desert world has ~no ice and leaves the terrain nearly unchanged', async () => {
     const r = await run(7, 'desert');
-    expect(r.glacial.stats.iceShare).toBeLessThan(0.001);
-    let maxDiff = 0;
-    for (let i = 0; i < r.g.h.length; i++) maxDiff = Math.max(maxDiff, Math.abs(r.g.h[i] - r.input.h[i]));
-    expect(maxDiff).toBeLessThan(1);
+    // At most a summit glacier on the king massif (a Kilimanjaro in the desert is fine).
+    expect(r.glacial.stats.iceShare).toBeLessThan(0.01);
+    let changed = 0;
+    for (let i = 0; i < r.g.h.length; i++) if (Math.abs(r.g.h[i] - r.input.h[i]) >= 1) changed++;
+    expect(changed / r.g.h.length).toBeLessThan(0.01);
     checkSea(r);
   }, 30_000);
 

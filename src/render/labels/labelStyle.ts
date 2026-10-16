@@ -26,7 +26,7 @@ export interface LabelStyle {
 const WATER: ReadonlySet<LandmarkKind> = new Set<LandmarkKind>(['river', 'lake', 'ocean', 'sea', 'bay', 'gulf', 'strait', 'fjord', 'lagoon', 'reef']);
 const CAPS: ReadonlySet<LandmarkKind> = new Set<LandmarkKind>(['continent', 'range', 'ocean', 'sea']);
 /** Point symbols whose name sits above the point instead of covering it. */
-const ABOVE: ReadonlySet<LandmarkKind> = new Set<LandmarkKind>(['peak', 'volcano', 'waterfall', 'cape', 'caldera', 'crater']);
+const ABOVE: ReadonlySet<LandmarkKind> = new Set<LandmarkKind>(['peak', 'hill', 'pass', 'volcano', 'waterfall', 'cape', 'caldera', 'crater']);
 
 /** [min, max] font size (CSS px) by kind, interpolated by importance. */
 function sizeRange(kind: LandmarkKind): [number, number] {
@@ -35,7 +35,7 @@ function sizeRange(kind: LandmarkKind): [number, number] {
     case 'ocean': return [16, 24];
     case 'sea': return [13, 19];
     case 'range': return [11.5, 17];
-    case 'island': case 'archipelago': case 'gulf': case 'desert': case 'erg': case 'icecap': case 'plateau': return [11.5, 16];
+    case 'island': case 'archipelago': case 'gulf': case 'desert': case 'erg': case 'icecap': case 'plateau': case 'grassland': return [11.5, 16];
     case 'river': case 'fjord': case 'strait': return [11, 14.5];
     default: return [11, 14.5];
   }
@@ -57,7 +57,7 @@ export function labelStyle(l: Landmark): LabelStyle {
   else if (caps) letterSpacingEm = 0.14;
   else if (l.kind === 'river' || l.kind === 'fjord' || l.kind === 'strait') letterSpacingEm = 0.06;
   let mode: LabelMode = 'point';
-  if (l.path && l.path.length >= 4 && (l.kind === 'river' || l.kind === 'fjord' || l.kind === 'strait' || l.kind === 'canyon' || l.kind === 'rift')) mode = 'path';
+  if (l.path && l.path.length >= 4 && (l.kind === 'river' || l.kind === 'fjord' || l.kind === 'strait' || l.kind === 'canyon' || l.kind === 'gorge' || l.kind === 'rift')) mode = 'path';
   else if (Number.isFinite(l.angle)) mode = 'rotated';
   return {
     style: WATER.has(l.kind) ? STYLE_WATER : STYLE_LAND,

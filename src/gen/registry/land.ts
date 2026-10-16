@@ -57,7 +57,7 @@ export function detectLand(I: RegistryInput, S: Shared, out: Candidate[]): void 
   const islands: number[] = [];
   for (let k = 0; k < M.count; k++) if (!S.continents.has(k) && M.size[k] * cellKm2 >= minIsland) islands.push(k);
   islands.sort((a, b) => M.size[b] - M.size[a] || a - b);
-  const capIslands = Math.round(Math.min(60, Math.max(8, 8 + S.landKm2 / 8000)));
+  const capIslands = Math.round(8 + S.landKm2 / 8000);
   for (const k of islands.slice(0, capIslands)) {
     const [x, y] = anchorOf(k);
     const areaKm2 = M.size[k] * cellKm2;

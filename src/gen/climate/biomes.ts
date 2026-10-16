@@ -6,6 +6,8 @@ import { elaTemperature, LAPSE } from './tables';
 
 /** waterClass codes of the hydrology stage (mirrors WATER in stages/hydro.ts). */
 const W_OCEAN = 1;
+/** Minimum PET (mm/yr) used for the aridity index. */
+const PET_FLOOR_MM = 150;
 const W_LAKE = 2;
 const W_RIVER = 3;
 const W_WETLAND = 4;
@@ -105,7 +107,9 @@ export function classifyBiomes(inp: BiomeInput): BiomeFields {
     for (let x = 0; x < n; x++) {
       const i = y * n + x;
       const wc = waterClass[i];
-      aridity[i] = Math.min(10, precip[i] / Math.max(1, pet[i]));
+      // PET floor: Holdridge PET is 0 when every month freezes, which would make aridity jump to its
+      // clamp along that line (a visible seam in the colour LUT). Cold biome rules don't use aridity.
+      aridity[i] = Math.min(10, precip[i] / Math.max(PET_FLOOR_MM, pet[i]));
       if (wc === W_OCEAN || wc === W_LAKE || wc === W_RIVER || wc === W_SALT_LAKE) {
         raw[i] = BIOME.WATER;
         continue;

@@ -98,10 +98,27 @@ export function reliefSlope(S: Float32Array, n: number, cellM: number): Float32A
   return out;
 }
 
+/** PET/P above which no wetland forms without exotic water. */
+const OASIS_MAX_ARIDITY = 5;
+
+/** Wetland candidate tiers, filled in order until the target count is met. */
+export interface WetlandTiers {
+  /** Flat limit (local relief) for the first tier (research 02 §7). */
+  maxSlope: number;
+  /** Relaxed flat limit for humid land (P/PET ≥ 1) when flat land runs short: blanket bog and fen on gentle slopes. */
+  humidSlope: number;
+  /** Arid cells (P/PET < 0.5) that may hold wetlands anyway: lake and playa shores, river floodplains (saline marsh, riparian). */
+  aridOk?: Uint8Array;
+}
+
 /**
- * Picks `count` wetland cells among eligible land that is flat (local relief below `maxSlope`) and not
- * too dry (P/PET ≥ 0.5), wettest first. The score favours broad flats over narrow valley floors
- * (half the TWI plus the log of the inverse local relief) and humid climate. Returns the number marked.
+ * Picks `count` wetland cells among eligible land, wettest first, in tiers:
+ * 1. flat (local relief below `maxSlope`) and not too dry (P/PET ≥ 0.5);
+ * 2. flat arid cells next to exotic water (`aridOk`);
+ * 3. humid (P/PET ≥ 1) cells up to `humidSlope`;
+ * 4. other flat semi-arid cells (P/PET ≥ 1/OASIS_MAX_ARIDITY): spring-fed oases in valley floors.
+ * Within a tier the score favours broad flats over narrow valley floors (half the TWI plus the log of
+ * the inverse local relief) and humid climate. Returns the number marked.
  */
 export function selectWetlands(
   twi: Float32Array,
@@ -110,31 +127,47 @@ export function selectWetlands(
   eligible: Uint8Array,
   out: Uint8Array,
   count: number,
-  maxSlope: number,
+  tiers: WetlandTiers,
 ): number {
   if (count <= 0) return 0;
-  const cand: number[] = [];
-  for (let i = 0; i < twi.length; i++) {
-    if (!eligible[i] || out[i] || slope[i] > maxSlope || aridity[i] > 2) continue;
-    cand.push(i);
-  }
+  const tierOf = (i: number): number => {
+    const a = aridity[i];
+    const s = slope[i];
+    if (a <= 2) {
+      if (s <= tiers.maxSlope) return 1;
+      return a <= 1 && s <= tiers.humidSlope ? 3 : 0;
+    }
+    if (s > tiers.maxSlope) return 0;
+    return tiers.aridOk?.[i] ? 2 : a <= OASIS_MAX_ARIDITY ? 4 : 0;
+  };
   const score = (i: number): number => 0.5 * twi[i] - Math.log(Math.max(1e-4, slope[i])) - 0.5 * Math.log(Math.max(0.05, aridity[i]));
-  const scores = Float64Array.from(cand, score);
-  const k = Math.min(count, cand.length);
-  if (k === 0) return 0;
-  const thr = scores.slice().sort()[cand.length - k];
+  const byTier: number[][] = [[], [], [], [], []];
+  for (let i = 0; i < twi.length; i++) {
+    if (!eligible[i] || out[i]) continue;
+    const t = tierOf(i);
+    if (t > 0) byTier[t].push(i);
+  }
   let marked = 0;
-  for (let j = 0; j < cand.length; j++) {
-    if (scores[j] > thr) {
-      out[cand[j]] = 1;
-      marked++;
+  for (let t = 1; t <= 4 && marked < count; t++) {
+    const cand = byTier[t];
+    const k = Math.min(count - marked, cand.length);
+    if (k === 0) continue;
+    const scores = Float64Array.from(cand, score);
+    const thr = scores.slice().sort()[cand.length - k];
+    let got = 0;
+    for (let j = 0; j < cand.length; j++) {
+      if (scores[j] > thr) {
+        out[cand[j]] = 1;
+        got++;
+      }
     }
-  }
-  for (let j = 0; j < cand.length && marked < k; j++) {
-    if (scores[j] === thr) {
-      out[cand[j]] = 1;
-      marked++;
+    for (let j = 0; j < cand.length && got < k; j++) {
+      if (scores[j] === thr) {
+        out[cand[j]] = 1;
+        got++;
+      }
     }
+    marked += k;
   }
-  return k;
+  return marked;
 }

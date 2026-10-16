@@ -10,11 +10,11 @@ export interface AtlasCallbacks {
 
 /** Display order and plural group titles. */
 const GROUPS: readonly [string, readonly LandmarkKind[]][] = [
-  ['Mountains', ['range', 'peak', 'volcano', 'caldera', 'plateau', 'rift', 'canyon', 'mesa-field']],
+  ['Mountains', ['range', 'peak', 'hill', 'pass', 'volcano', 'caldera', 'plateau', 'rift', 'canyon', 'gorge', 'mesa-field']],
   ['Rivers & lakes', ['river', 'lake', 'waterfall', 'delta']],
   ['Seas & coasts', ['ocean', 'sea', 'gulf', 'bay', 'strait', 'lagoon', 'fjord', 'reef', 'atoll']],
   ['Lands', ['continent', 'island', 'archipelago', 'peninsula', 'cape', 'isthmus', 'plain']],
-  ['Ice, deserts & forests', ['icecap', 'glacier', 'desert', 'erg', 'forest', 'wetland', 'karst']],
+  ['Ice, deserts & forests', ['icecap', 'glacier', 'desert', 'erg', 'forest', 'grassland', 'wetland', 'karst']],
   ['Impacts', ['crater']],
 ];
 
@@ -24,7 +24,7 @@ const KIND_LABEL: Readonly<Record<LandmarkKind, string>> = {
   range: 'Mountain range', peak: 'Peak', volcano: 'Volcano', caldera: 'Caldera', crater: 'Impact crater', plateau: 'Plateau',
   rift: 'Rift', 'mesa-field': 'Mesas', canyon: 'Canyon', river: 'River', lake: 'Lake', waterfall: 'Waterfall', delta: 'Delta',
   fjord: 'Fjord', glacier: 'Glacier', icecap: 'Ice cap', desert: 'Desert', erg: 'Sand sea', forest: 'Forest', wetland: 'Wetland',
-  karst: 'Karst', reef: 'Reef', atoll: 'Atoll', plain: 'Plain',
+  karst: 'Karst', reef: 'Reef', atoll: 'Atoll', plain: 'Plain', hill: 'Hill', grassland: 'Open country', pass: 'Pass', gorge: 'Gorge',
 };
 
 /** Rows shown per group before "show more". */

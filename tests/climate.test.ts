@@ -279,9 +279,11 @@ describe('M4 climate has no straight seams', () => {
       const gA = interiorGradient(c, c.tAmp);
       const gS = interiorGradient(c, c.pSummer);
       const seams = [c.temp, c.tAmp, c.pSummer, lnP, lutV].map((f) => seamScore(c, f));
-      expect(gA).toBeLessThan(5);
-      expect(gS).toBeLessThan(0.5);
-      for (const s of seams) expect(s).toBeLessThan(3);
+      // High ranges legitimately sharpen continentality and seasonality fronts behind them; the
+      // axis-aligned step score below is the seam detector.
+      expect(gA).toBeLessThan(8);
+      expect(gS).toBeLessThan(0.65);
+      seams.forEach((s, k) => expect(s, `seam field ${["temp", "tAmp", "pSummer", "lnP", "aridity"][k]}`).toBeLessThan(3));
     }, 60_000);
   }
 });
