@@ -63,8 +63,10 @@ The world opens in **3D**. Press **V**, or the 2D/3D button, to switch to the 2D
 | Touch | 1 finger pan; 2 fingers pan, zoom and rotate; 2 fingers moving vertically tilt | Pan, pinch |
 | B | Full-quality build | Full-quality build |
 | A | Atlas of named places (click a row or a label to fly there) | — |
+| T | Play or pause the time of day | — |
+| Export button | Screenshot, heightmap, colour map, world JSON, share link | Same |
 
-Realistic colouring comes from a biome colour table over temperature and aridity, with snow, rock, sand and marsh overlays. Palettes: Satellite, Stylised and Hypsometric. The layer picker drapes any generated layer (plates, boundaries, uplift, drainage…) over the 3D terrain. The relief slider sets vertical exaggeration.
+Realistic colouring comes from a biome colour table over temperature and aridity, with snow, rock, sand and marsh overlays. Palettes: Satellite, Stylised and Hypsometric. Pick **World (final, realistic)** with the Satellite palette for the finished world; the time, season and clouds controls sit below it. The layer picker also drapes any generated layer (plates, boundaries, uplift, drainage…) over the 3D terrain. The relief slider sets vertical exaggeration.
 
 ## Configuration
 
