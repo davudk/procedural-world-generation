@@ -58,8 +58,9 @@ const BREACH_AREA = 4;
  * limits grow by DISTRICT_BREACH_DEPTH and DISTRICT_BREACH_AREA, so only deep troughs keep their lakes.
  */
 const DISTRICT_SHARE = 0.3;
-/** Spheres: lake density is scaled by min(1, this / cell size in km) (see the hydro stage). */
+/** Spheres: lake density is scaled by min(1, this / cell size in km), at least SPHERE_LAKE_MIN (see the hydro stage). */
 const SPHERE_LAKE_CELL_KM = 4;
+const SPHERE_LAKE_MIN = 0.5;
 const DISTRICT_KM = 250;
 const DISTRICT_BREACH_DEPTH = 5;
 const DISTRICT_BREACH_AREA = 100;
@@ -138,7 +139,7 @@ export const hydroStage: StageDef = {
     // Spheres: coarse cells keep every pit as a lake of at least a cell (64 km² in 8 km previews, 256+ km²
     // on big planets), so per area there were 2–3× more lakes of ≥ 100 km² than at 2 km; the density
     // scales with the cell size below SPHERE_LAKE_CELL_KM (research 11 §6).
-    const lakeDensity = ctx.num('lakeDensity') * (sphere ? Math.min(1, SPHERE_LAKE_CELL_KM / cellKm) : 1);
+    const lakeDensity = ctx.num('lakeDensity') * (sphere ? Math.max(SPHERE_LAKE_MIN, Math.min(1, SPHERE_LAKE_CELL_KM / cellKm)) : 1);
     const riverDensity = ctx.num('riverDensity');
     const stats: Record<string, number> = { n, cellKm };
     let tLap = performance.now();
