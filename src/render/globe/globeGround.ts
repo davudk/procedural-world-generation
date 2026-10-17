@@ -1,6 +1,60 @@
 import type { Layer } from '../../shared/protocol';
 import type { Vec3 } from '../camera/ground';
-import { dirToFaceAngles, PAD, padFaces } from './cubeTex';
+import { acrossCell, dirToFaceAngles, PAD, padFaces, SIDE_E, SIDE_N, SIDE_S, SIDE_W } from './cubeTex';
+
+/** Water level below this (m) means dry land (the hydrology stage writes −10000). */
+const DRY = -9000;
+
+/**
+ * Water rasters of a sphere world prepared for rendering, as `prepareWater` does on flat maps: levels
+ * (and classes) spread two rings past every water body so a bilinear sample is smooth at the shore,
+ * across seams through the face neighbours (the 4 axial ones beyond a face edge).
+ */
+export function prepareWaterSphere(water: Layer, wclass: Layer | null): { level: Float32Array; cls: Float32Array } {
+  const n = water.w;
+  const n2 = n * n;
+  const level = Float32Array.from(water.data);
+  const cls = wclass && wclass.w === n ? Float32Array.from(wclass.data) : new Float32Array(6 * n2);
+  const nb: number[] = [];
+  for (let ring = 0; ring < 2; ring++) {
+    const prevL = level.slice();
+    const prevC = cls.slice();
+    for (let f = 0; f < 6; f++) {
+      for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) {
+          const i = f * n2 + y * n + x;
+          if (prevL[i] > DRY) continue;
+          nb.length = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const nx = x + dx;
+              const ny = y + dy;
+              const offX = nx < 0 || nx >= n;
+              const offY = ny < 0 || ny >= n;
+              if (offX && offY) continue;
+              if (offX) nb.push(acrossCell(n, f, nx < 0 ? SIDE_W : SIDE_E, ny, 0));
+              else if (offY) nb.push(acrossCell(n, f, ny < 0 ? SIDE_N : SIDE_S, nx, 0));
+              else nb.push(f * n2 + ny * n + nx);
+            }
+          }
+          let best = DRY - 1;
+          let bestCls = 0;
+          for (const j of nb) {
+            if (prevL[j] > best) {
+              best = prevL[j];
+              bestCls = prevC[j];
+            }
+          }
+          if (best > DRY) {
+            level[i] = best;
+            if (cls[i] === 0) cls[i] = bestCls;
+          }
+        }
+      }
+    }
+  }
+  return { level, cls };
+}
 
 /**
  * Planet-centred world space for spheres (Sphere phase 3): metres, origin at the planet centre, +z
@@ -52,7 +106,8 @@ export class SphereGround implements GlobeGround {
 /**
  * CPU copy of a cube-sphere elevation for picking, culling and camera clamps: six faces padded like
  * the GPU textures (so CPU and GPU bilinear agree across seams) and per-face min/max pyramids of the
- * rendered surface max(h, 0) (the sea is the water lid at 0; spheres have no lakes yet).
+ * rendered surface: the water lid max(h, water level) where the hydrology stage put water (lakes at
+ * their level, the sea at 0), else max(h, 0). `padded` is also the GPU's surface texture.
  */
 export class GlobeHeightField implements GlobeGround {
   readonly radius: number;
@@ -71,7 +126,8 @@ export class GlobeHeightField implements GlobeGround {
   exaggeration = 1;
   private readonly fa = new Float64Array(3);
 
-  constructor(layer: Layer) {
+  /** `level`: prepared water levels (prepareWaterSphere) on the same grid, or null (sea at 0 only). */
+  constructor(layer: Layer, level: Float32Array | null = null) {
     const n = layer.w;
     this.n = n;
     this.radius = (layer.radiusKm ?? (layer.worldKm * 4) / (2 * Math.PI)) * 1000;
@@ -79,7 +135,11 @@ export class GlobeHeightField implements GlobeGround {
     this.cellM = this.delta * this.radius;
     this.data = layer.data instanceof Float32Array ? layer.data : Float32Array.from(layer.data);
     const surface = new Float32Array(this.data.length);
-    for (let i = 0; i < surface.length; i++) surface[i] = Math.max(0, this.data[i]);
+    if (level && level.length === surface.length) {
+      for (let i = 0; i < surface.length; i++) surface[i] = level[i] > DRY ? Math.max(this.data[i], level[i]) : Math.max(0, this.data[i]);
+    } else {
+      for (let i = 0; i < surface.length; i++) surface[i] = Math.max(0, this.data[i]);
+    }
     this.m = n + 2 * PAD;
     this.padded = padFaces(surface, n);
     const m = this.m;

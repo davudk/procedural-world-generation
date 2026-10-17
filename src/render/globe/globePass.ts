@@ -1,3 +1,4 @@
+import { BIOME } from '../../shared/biomes';
 import type { Layer, LayerKind } from '../../shared/protocol';
 import { compileProgram, uniforms } from '../gl/util';
 import { COLORMAPS_GLSL } from '../glsl/colormaps';
@@ -7,6 +8,7 @@ import { SPHERE_INSTANCE_FLOATS, SPHERE_MAX_NODES } from '../terrain/cdlodSphere
 import { bindGlobeAtmos, GLOBE_ATMOS_GLSL, type GlobeAtmosFrame } from './atmosphere';
 import { FACE_C, FACE_E, FACE_S, faceDir } from '../../shared/cube';
 import { acrossCell, arrayTexture, PAD, padFaces, SIDE_E, SIDE_N, SIDE_S, SIDE_W, uploadArray } from './cubeTex';
+import type { GlobeHeightField } from './globeGround';
 
 /** Cube-face addressing shared by the globe's vertex and fragment shaders. */
 const CUBE_GLSL = /* glsl */ `
@@ -16,6 +18,7 @@ uniform vec3 u_faceC[6];
 uniform vec3 u_faceE[6];
 uniform vec3 u_faceS[6];
 uniform highp sampler2DArray u_height;   // R32F raw elevation (m), 6 padded layers
+uniform highp sampler2DArray u_surf;     // R32F rendered surface (m): the water lid max(h, water level)
 uniform int u_hn;                        // cells per face side
 
 vec3 faceDirOf(int f, vec2 ang) {
@@ -23,8 +26,8 @@ vec3 faceDirOf(int f, vec2 ang) {
   return normalize(u_faceC[f] + t.x * u_faceE[f] + t.y * u_faceS[f]);
 }
 
-// Hand-filtered bilinear over the padded layer: never leaves the face's texture layer.
-// w.x = raw elevation, w.y = rendered surface max(h, 0) (the sea is the water lid at 0).
+// Hand-filtered bilinear over the padded layers: never leaves the face's texture layer.
+// w.x = raw elevation, w.y = rendered surface (the sea at 0, lakes at their level).
 vec2 heightAt(int f, vec2 ang) {
   float delta = 1.5707963267948966 / float(u_hn);
   int m = u_hn + 2 * PAD;
@@ -36,7 +39,11 @@ vec2 heightAt(int f, vec2 ang) {
   float c = texelFetch(u_height, ivec3(i + ivec2(0, 1), f), 0).r;
   float d = texelFetch(u_height, ivec3(i + ivec2(1, 1), f), 0).r;
   float raw = mix(mix(a, b, fr.x), mix(c, d, fr.x), fr.y);
-  float s = mix(mix(max(a, 0.0), max(b, 0.0), fr.x), mix(max(c, 0.0), max(d, 0.0), fr.x), fr.y);
+  float sa = texelFetch(u_surf, ivec3(i, f), 0).r;
+  float sb = texelFetch(u_surf, ivec3(i + ivec2(1, 0), f), 0).r;
+  float sc = texelFetch(u_surf, ivec3(i + ivec2(0, 1), f), 0).r;
+  float sd = texelFetch(u_surf, ivec3(i + ivec2(1, 1), f), 0).r;
+  float s = mix(mix(sa, sb, fr.x), mix(sc, sd, fr.x), fr.y);
   return vec2(raw, s);
 }`;
 
@@ -111,9 +118,14 @@ uniform float u_radius;
 uniform float u_exag;
 uniform float u_normalExag;
 uniform sampler2DArray u_grad;     // RGBA16F + mips, unpadded: 3D surface gradient (planet axes)
-uniform sampler2DArray u_climate;  // RGBA16F padded: mean T (°C), aridity proxy, summer rain share, half-range (°C)
+uniform sampler2DArray u_climate;  // RGBA16F padded: mean T (°C), aridity (biome stage, else a proxy), summer rain share, half-range (°C)
 uniform int u_cn;                  // climate cells per face side
 uniform int u_hasClimate;
+uniform sampler2DArray u_cover;    // RGBA8 padded (climate grid): snow/ice, bare rock, sand (beach, salt flat, erg), marsh/bog/mangrove
+uniform int u_hasCover;            // 1 once the biome stage exists (else the climate proxy colours)
+uniform highp sampler2DArray u_wlevel;  // R32F padded water level (m, < −9000 dry), spread 2 rings past the shore
+uniform highp sampler2DArray u_wclass;  // R32F padded water class (0 land, 1 ocean, 2 lake, 3 river, 4 wetland, 5 playa, 6 salt lake)
+uniform int u_hasWater;
 uniform sampler2D u_lut;
 uniform int u_palette;             // 0 biome LUT colours, 1 hypsometric
 uniform sampler2DArray u_layer;    // padded draped layer
@@ -179,6 +191,30 @@ vec4 climateAt(int f, vec2 ang) {
   vec2 p = ((ang + QUARTER) / delta + float(PAD)) / m;
   return texture(u_climate, vec3(p, float(f)));
 }
+vec4 coverAt(int f, vec2 ang) {
+  float delta = 1.5707963267948966 / float(u_cn);
+  float m = float(u_cn + 2 * PAD);
+  vec2 p = ((ang + QUARTER) / delta + float(PAD)) / m;
+  return texture(u_cover, vec3(p, float(f)));
+}
+// Water level (bilinear, as the flat terrain's waterLevelAt) and class (nearest) on the height grid.
+float waterLevelAt(int f, vec2 ang) {
+  float delta = 1.5707963267948966 / float(u_hn);
+  int m = u_hn + 2 * PAD;
+  vec2 p = clamp((ang + QUARTER) / delta - 0.5 + float(PAD), vec2(0.0), vec2(float(m) - 1.001));
+  ivec2 i = ivec2(floor(p));
+  vec2 fr = p - vec2(i);
+  float a = texelFetch(u_wlevel, ivec3(i, f), 0).r;
+  float b = texelFetch(u_wlevel, ivec3(i + ivec2(1, 0), f), 0).r;
+  float c = texelFetch(u_wlevel, ivec3(i + ivec2(0, 1), f), 0).r;
+  float d = texelFetch(u_wlevel, ivec3(i + ivec2(1, 1), f), 0).r;
+  return mix(mix(a, b, fr.x), mix(c, d, fr.x), fr.y);
+}
+float waterClassAt(int f, vec2 ang) {
+  float delta = 1.5707963267948966 / float(u_hn);
+  ivec2 t = ivec2(floor((ang + QUARTER) / delta)) + PAD;
+  return texelFetch(u_wclass, ivec3(clamp(t, ivec2(0), ivec2(u_hn + 2 * PAD - 1)), f), 0).r;
+}
 
 float layerFetch(ivec2 t, int f) { return texelFetch(u_layer, ivec3(clamp(t, ivec2(0), ivec2(u_ln + 2 * PAD - 1)), f), 0).r; }
 float layerAt(int f, vec2 ang, bool nearest) {
@@ -211,7 +247,14 @@ void main() {
   // Close up, smooth the cell structure of the coast (bilinear far out, where cells are a few px).
   float smoothK = 1.0 - smoothstep(0.08, 0.25, texelsPerPx);
   float h = smoothK > 0.0 ? mix(hs.x, heightSmooth(f, ang), smoothK) : hs.x;
-  bool water = h < 0.0;
+  // Water: the sea, plus lakes from the hydrology stage's levels (as the flat terrain's water lid).
+  float wl = u_hasWater == 1 ? waterLevelAt(f, ang) : -10000.0;
+  float cls = u_hasWater == 1 ? waterClassAt(f, ang) : 0.0;
+  // Lakes by class, or by a level above the sea where the spread rings meet other classes.
+  bool lake = cls > 1.5 && cls < 2.5 || cls > 5.5 || wl > 0.05;
+  // Every class but river cells (drawn as ribbons): coastal wetland or beach cells reached by the
+  // spread sea level keep a smooth shoreline instead of the nearest class's cell outline.
+  bool water = u_hasWater == 1 ? wl > h && !(cls > 2.5 && cls < 3.5) : h < 0.0;
   // Mipmapped gradient: smooth normals, no aliasing when cells are smaller than a pixel.
   vec3 grad = textureLod(u_grad, vec3((ang + QUARTER) / 1.5707963267948966, float(f)), max(0.0, log2(max(texelsPerPx, 1e-6)) - 0.5)).xyz;
   grad -= dot(grad, up) * up;
@@ -237,11 +280,13 @@ void main() {
   float tNow = cl.r + cl.a * u_season.x;
   vec3 col;
   if (water && u_layerMode == 0) {
-    float depth = -h;
-    col = mix(vec3(0.24, 0.56, 0.62), vec3(0.03, 0.10, 0.22), pow(clamp(depth / 4000.0, 0.0, 1.0), 0.35));
-    col = mix(col, vec3(0.42, 0.68, 0.70), (1.0 - smoothstep(0.0, 60.0, depth)) * 0.6);
-    // Sea ice where the water is cold now.
-    float ice = u_hasClimate == 1 && u_realistic == 1 ? smoothstep(-4.0, -10.0, tNow) : 0.0;
+    float depth = lake ? max(0.0, wl - h) : -h;
+    vec3 shallow = lake ? vec3(0.22, 0.48, 0.52) : vec3(0.24, 0.56, 0.62);
+    vec3 deep = lake ? vec3(0.05, 0.16, 0.24) : vec3(0.03, 0.10, 0.22);
+    col = mix(shallow, deep, pow(clamp(depth / (lake ? 400.0 : 4000.0), 0.0, 1.0), 0.35));
+    col = mix(col, vec3(0.42, 0.68, 0.70), (1.0 - smoothstep(0.0, lake ? 15.0 : 60.0, depth)) * 0.6);
+    // Sea and lake ice where the water is cold now (lakes freeze sooner).
+    float ice = u_hasClimate == 1 && u_realistic == 1 ? (lake ? smoothstep(-0.5, -5.0, tNow) : smoothstep(-4.0, -10.0, tNow)) : 0.0;
     ice = smoothstep(0.3, 0.6, ice + 0.3 * (vnoise3(P / 30000.0) - 0.5));
     float fres = 0.02 + 0.98 * pow(1.0 - max(dot(up, V), 0.0), 5.0);
     col = mix(col, vec3(0.55, 0.65, 0.78) * amb, fres * 0.5);
@@ -253,8 +298,9 @@ void main() {
     if (u_layerMode == 1) col = categorical(floor(layerAt(f, ang, true) + 0.5));
     else if (u_layerMode == 2) col = viridis((layerAt(f, ang, false) - u_layerMin) / max(1e-6, u_layerMax - u_layerMin));
     else if (u_hasClimate == 1 && u_palette == 0) {
-      // Biome-table colours from temperature and an aridity proxy (no biome stage on spheres yet),
-      // varied by 3D noise; rock on steep slopes and snow from temperature.
+      // Biome-table colours over temperature and aridity (the biome stage's P/PET once it exists, else
+      // a proxy from precipitation), varied by 3D noise; the biome stage's cover (sand, marsh, rock,
+      // perennial snow) as on flat maps, else rock on steep slopes and snow from temperature.
       float fine = 1.0 - smoothstep(600.0, 2500.0, pxFoot);
       float t = cl.r + 3.0 * (vnoise3(P / 35000.0) - 0.5);
       float ai = max(0.02, cl.g) * exp(0.4 * (vnoise3(P / 28000.0 + 11.0) - 0.5));
@@ -265,11 +311,23 @@ void main() {
       col *= mix(1.0, 0.9 + 0.2 * vnoise3(P / 3500.0), fine);
       float slope = length(grad);
       vec3 rockCol = vec3(0.44, 0.42, 0.40) * (0.85 + 0.3 * vnoise3(P / 6000.0));
-      col = mix(col, rockCol, smoothstep(0.35, 0.75, slope) * 0.85);
       float snowBreak = 0.35 * (vnoise3(P / 7000.0) - 0.5) - 0.3 * smoothstep(0.6, 1.2, slope);
-      float snowT = u_realistic == 1 ? min(tNow, cl.r + 2.0) : cl.r;
-      float snow = smoothstep(0.35, 0.95, smoothstep(-1.0, -7.0, snowT + 4.0 * snowBreak) + snowBreak);
-      col = mix(col, vec3(0.90, 0.92, 0.96), snow * 0.85 * smoothstep(0.05, 0.25, ai));
+      if (u_hasCover == 1) {
+        vec4 cv = coverAt(f, ang);
+        col = mix(col, vec3(0.86, 0.80, 0.66), smoothstep(0.15, 0.7, cv.b) * 0.9);   // beach / dunes / salt / erg
+        col = mix(col, vec3(0.24, 0.32, 0.22), smoothstep(0.15, 0.8, cv.a) * 0.5);   // marsh / bog / mangrove
+        col = mix(col, rockCol, max(smoothstep(0.2, 0.75, cv.g), smoothstep(0.35, 0.75, slope)) * 0.85);
+        float snow = smoothstep(0.35, 0.95, 0.85 * cv.r + snowBreak);
+        // Seasonal snow where it is below freezing now but not at the warm peak (as on flat maps).
+        float sSnow = u_realistic == 1 ? max(0.0, smoothstep(1.5, -3.0, tNow) - smoothstep(1.5, -3.0, cl.r + cl.a)) * smoothstep(0.08, 0.3, ai) : 0.0;
+        snow = max(snow, smoothstep(0.15, 0.7, sSnow + 0.6 * snowBreak));
+        col = mix(col, vec3(0.90, 0.92, 0.96), snow * 0.85);
+      } else {
+        col = mix(col, rockCol, smoothstep(0.35, 0.75, slope) * 0.85);
+        float snowT = u_realistic == 1 ? min(tNow, cl.r + 2.0) : cl.r;
+        float snow = smoothstep(0.35, 0.95, smoothstep(-1.0, -7.0, snowT + 4.0 * snowBreak) + snowBreak);
+        col = mix(col, vec3(0.90, 0.92, 0.96), snow * 0.85 * smoothstep(0.05, 0.25, ai));
+      }
     } else col = hypsometric(h);
     float lambert = max(dot(n, L), 0.0);
     float sky = 0.5 + 0.5 * dot(n, up);
@@ -302,12 +360,20 @@ export interface GlobeFrame {
   atmos: GlobeAtmosFrame;
 }
 
-/** Climate rasters for globe colouring (any face grid). */
+/**
+ * Climate rasters for globe colouring (any face grid), plus the biome stage's rasters once they exist
+ * (on the same grid as the temperature; otherwise the climate proxy colours stay).
+ */
 export interface GlobeSurface {
   temperature: Layer;
   precip: Layer | null;
   summerRain: Layer | null;
   tempRange: Layer | null;
+  /** Biome stage: P / PET, biome ids and perennial snow; optional landform erg mask (0–255). */
+  aridity?: Layer | null;
+  biome?: Layer | null;
+  snow?: Layer | null;
+  erg?: Layer | null;
 }
 
 const LAYER_MODE: Record<LayerKind, number> = { elevation: 0, categorical: 1, scalar: 2 };
@@ -328,6 +394,12 @@ export class GlobePass {
   private readonly heightTex: WebGLTexture;
   private readonly gradTex: WebGLTexture;
   private readonly climateTex: WebGLTexture;
+  private readonly coverTex: WebGLTexture;
+  private readonly surfTex: WebGLTexture;
+  private readonly wlevelTex: WebGLTexture;
+  private readonly wclassTex: WebGLTexture;
+  private hasCover = 0;
+  private hasWater = 0;
   private readonly layerTex: WebGLTexture;
   private readonly lutTex: WebGLTexture;
   palette: Palette | 'hypsometric' = 'satellite';
@@ -347,6 +419,7 @@ export class GlobePass {
       'u_viewProj', 'u_radius', 'u_exag', 'u_normalExag', 'u_faceC', 'u_faceE', 'u_faceS', 'u_height', 'u_hn', 'u_grad',
       'u_climate', 'u_cn', 'u_hasClimate', 'u_lut', 'u_palette', 'u_layer', 'u_ln', 'u_layerMode', 'u_layerMin', 'u_layerMax',
       'u_sunCarto', 'u_camRight', 'u_camUp', 'u_sunReal', 'u_realK', 'u_lightCol', 'u_ambient', 'u_realistic', 'u_season', 'u_time',
+      'u_surf', 'u_cover', 'u_hasCover', 'u_wlevel', 'u_wclass', 'u_hasWater',
     ] as const);
 
     const verts = new Float32Array((GRID + 1) * (GRID + 1) * 2);
@@ -390,6 +463,10 @@ export class GlobePass {
     this.heightTex = arrayTexture(gl, 'r32f');
     this.gradTex = arrayTexture(gl, 'rgba16f');
     this.climateTex = arrayTexture(gl, 'rgba16f');
+    this.coverTex = arrayTexture(gl, 'rgba8');
+    this.surfTex = arrayTexture(gl, 'r32f');
+    this.wlevelTex = arrayTexture(gl, 'r32f');
+    this.wclassTex = arrayTexture(gl, 'r32f');
     this.layerTex = arrayTexture(gl, 'r32f');
     this.lutTex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
@@ -400,13 +477,24 @@ export class GlobePass {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
   }
 
-  /** Elevation (six faces) and its CPU-built 3D gradients. */
-  setTerrain(layer: Layer, radiusM: number): void {
+  /**
+   * Elevation (six faces), its CPU-built 3D gradients and the rendered surface of the CPU height field
+   * (`hf.padded`: the water lid). `water`: prepared levels and classes (prepareWaterSphere) on the
+   * same grid, or null (the sea only).
+   */
+  setTerrain(layer: Layer, hf: GlobeHeightField, water: { level: Float32Array; cls: Float32Array } | null = null): void {
     const gl = this.gl;
     const n = layer.w;
+    const radiusM = hf.radius;
     this.hn = n;
     this.radius = radiusM;
     uploadArray(gl, this.heightTex, padFaces(layer.data, n), n + 2 * PAD, 'r32f');
+    uploadArray(gl, this.surfTex, hf.padded, n + 2 * PAD, 'r32f');
+    this.hasWater = water ? 1 : 0;
+    if (water) {
+      uploadArray(gl, this.wlevelTex, padFaces(water.level, n), n + 2 * PAD, 'r32f');
+      uploadArray(gl, this.wclassTex, padFaces(water.cls, n), n + 2 * PAD, 'r32f');
+    }
     // Gradient mips per layer (a texture array's levels must all hold 6 layers).
     let g = sphereGradients(layer.data, n, radiusM);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.gradTex);
@@ -434,19 +522,27 @@ export class GlobePass {
     const pr = fit(s.precip);
     const sr = fit(s.summerRain);
     const tr = fit(s.tempRange);
+    const ar = fit(s.aridity ?? null);
     const clim = new Float32Array(N * 4);
     for (let i = 0; i < N; i++) {
       const t = s.temperature.data[i];
-      // Aridity index P / PET with a Holdridge-style PET (58.93 mm per °C of biotemperature), as the
-      // generator's climate model; the floor keeps cold places from jumping to the clamp.
+      // Without the biome stage: aridity P / PET with a Holdridge-style PET (58.93 mm per °C of
+      // biotemperature), as the generator's climate model; the floor keeps cold places from the clamp.
       const pet = 58.93 * Math.min(30, Math.max(0, t));
       clim[i * 4] = t;
-      clim[i * 4 + 1] = pr ? Math.min(10, pr.data[i] / Math.max(150, pet)) : 1;
+      clim[i * 4 + 1] = ar ? ar.data[i] : pr ? Math.min(10, pr.data[i] / Math.max(150, pet)) : 1;
       clim[i * 4 + 2] = sr ? sr.data[i] : 0.5;
       clim[i * 4 + 3] = tr ? tr.data[i] : 10;
     }
     this.cn = n;
     uploadArray(this.gl, this.climateTex, padFaces(clim, n, PAD, 4), n + 2 * PAD, 'rgba16f', true);
+    const bio = fit(s.biome ?? null);
+    const snow = fit(s.snow ?? null);
+    this.hasCover = bio && snow && ar ? 1 : 0;
+    if (bio && snow && ar) {
+      const cover = coverMasksSphere(bio.data, snow.data, fit(s.erg ?? null)?.data ?? null, n);
+      uploadArray(this.gl, this.coverTex, cover, n + 2 * PAD, 'rgba8', true);
+    }
   }
 
   /** Drapes a sphere layer over the globe (null = realistic colouring). */
@@ -460,6 +556,11 @@ export class GlobePass {
     this.layerMode = LAYER_MODE[layer.kind];
     this.layerMin = layer.min;
     this.layerMax = layer.max;
+  }
+
+  /** No data layer is draped (realistic or hypsometric colours): rivers draw over it. */
+  get layerModeRealistic(): boolean {
+    return this.layerMode === 0;
   }
 
   /** Realistic colouring is showing (time of day and seasons apply). */
@@ -520,6 +621,12 @@ export class GlobePass {
     bindArr(1, this.gradTex, u.u_grad);
     bindArr(2, this.climateTex, u.u_climate);
     bindArr(3, this.layerTex, u.u_layer);
+    bindArr(5, this.surfTex, u.u_surf);
+    bindArr(6, this.coverTex, u.u_cover);
+    bindArr(7, this.wlevelTex, u.u_wlevel);
+    bindArr(8, this.wclassTex, u.u_wclass);
+    gl.uniform1i(u.u_hasCover, this.hasCover);
+    gl.uniform1i(u.u_hasWater, this.hasWater);
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
     gl.uniform1i(u.u_lut, 4);
@@ -643,6 +750,40 @@ function borderGradient(data: ArrayLike<number>, n: number, R: number, f: number
   out[o] = al * ta[0] + be * tb[0];
   out[o + 1] = al * ta[1] + be * tb[1];
   out[o + 2] = al * ta[2] + be * tb[2];
+}
+
+/**
+ * Cover masks of the flat terrain (snow/ice, bare rock, sand, marsh) on six faces, 3×3 box-blurred
+ * across seams (through 1-texel face padding) and padded for upload as RGBA8. Sand includes the
+ * landform erg mask (0–255) where given.
+ */
+export function coverMasksSphere(biome: ArrayLike<number>, snow: ArrayLike<number>, erg: ArrayLike<number> | null, n: number): Uint8Array {
+  const N = 6 * n * n;
+  const raw = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++) {
+    const id = biome[i];
+    raw[i * 4] = Math.max(snow[i], id === BIOME.ICE ? 1 : 0);
+    raw[i * 4 + 1] = id === BIOME.ROCK || id === BIOME.NIVAL ? 1 : 0;
+    raw[i * 4 + 2] = Math.max(id === BIOME.BEACH || id === BIOME.SALT_FLAT ? 1 : 0, erg ? (0.6 * erg[i]) / 255 : 0);
+    raw[i * 4 + 3] = id === BIOME.MARSH || id === BIOME.BOG || id === BIOME.SALT_MARSH || id === BIOME.MANGROVE || id === BIOME.SWAMP || id === BIOME.FEN ? 1 : 0;
+  }
+  const p1 = padFaces(raw, n, 1, 4);
+  const m1 = n + 2;
+  const blurred = new Float32Array(N * 4);
+  for (let f = 0; f < 6; f++) {
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        const o = ((f * n + y) * n + x) * 4;
+        for (let c = 0; c < 4; c++) {
+          let acc = 0;
+          for (let dy = 0; dy < 3; dy++) for (let dx = 0; dx < 3; dx++) acc += p1[((f * m1 + y + dy) * m1 + x + dx) * 4 + c];
+          blurred[o + c] = acc / 9;
+        }
+      }
+    }
+  }
+  const padded = padFaces(blurred, n, PAD, 4);
+  return Uint8Array.from(padded, (v) => Math.round(255 * Math.min(1, Math.max(0, v))));
 }
 
 /** 2×2 box-filtered half-resolution copy of six interleaved RGBA faces. */

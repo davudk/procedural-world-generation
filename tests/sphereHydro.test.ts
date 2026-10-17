@@ -17,6 +17,7 @@ import type { ErodedExtra } from '../src/gen/stages/lem';
 import { resolve } from '../src/shared/config/resolve';
 import { SPHERE_STAGES } from '../src/shared/config/types';
 import { hashBytes } from '../src/shared/hash';
+import { globeRiverVertices } from '../src/render/water/globeRivers';
 import { RIVER, type FromWorker, type LakeInfo, type RiverGraph } from '../src/shared/protocol';
 
 interface SphereWorld {
@@ -286,3 +287,17 @@ describe('biomes on the sphere', () => {
   }, 60_000);
 });
 
+describe('globe river ribbons', () => {
+  it('place every node on its direction with a side vector in the tangent plane', async () => {
+    const w = await sphereWorld(7);
+    const built = globeRiverVertices(w.rivers, w.grid.radiusM)!;
+    expect(built.idx.length).toBeGreaterThan(0);
+    const v = built.verts;
+    for (let o = 0; o < v.length; o += 12) {
+      expect(Math.hypot(v[o], v[o + 1], v[o + 2])).toBeCloseTo(1, 5);
+      expect(Math.hypot(v[o + 4], v[o + 5], v[o + 6])).toBeCloseTo(1, 4);
+      expect(Math.abs(v[o] * v[o + 4] + v[o + 1] * v[o + 5] + v[o + 2] * v[o + 6])).toBeLessThan(1e-3);
+    }
+    for (const i of built.idx) expect(i).toBeLessThan(v.length / 12);
+  }, 60_000);
+});

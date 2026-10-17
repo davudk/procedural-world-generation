@@ -5,7 +5,7 @@ import { OrbitCamera } from './camera/orbitCamera';
 import { GlobeCamera } from './camera/globeCamera';
 import type { ViewCamera } from './camera/viewCamera';
 import { GlobeSkyPass, type GlobeAtmosFrame } from './globe/atmosphere';
-import { GlobeHeightField, SphereGround } from './globe/globeGround';
+import { GlobeHeightField, prepareWaterSphere, SphereGround } from './globe/globeGround';
 import { GlobePass, type GlobeSurface } from './globe/globePass';
 import { SphereCdlodSelector } from './terrain/cdlodSphere';
 import { HeightField, prepareWater } from './heightField';
@@ -22,6 +22,7 @@ import { CloudPass } from './lighting/clouds';
 import { declination, DEFAULT_SEASON, DEFAULT_TIME, DEFAULT_VIEW, seasonPhase, sunLight, type ViewSettings } from './lighting/sun';
 import { TerrainPass, type SurfaceLayers } from './terrain/terrainPass';
 import { CreekManager } from './water/creeks/creekManager';
+import { GlobeRiverPass } from './water/globeRivers';
 import { RiverPass } from './water/rivers';
 
 /** Cloud base above sea level (m, before exaggeration). */
@@ -85,6 +86,7 @@ export class WorldView {
   private sky!: SkyPass;
   private clouds!: CloudPass;
   private globe!: GlobePass;
+  private globeRivers!: GlobeRiverPass;
   private globeSky!: GlobeSkyPass;
   /** Time of day, season and clouds (M9 view settings; the defaults keep the pre-M9 look). */
   view: ViewSettings = { ...DEFAULT_VIEW };
@@ -107,11 +109,13 @@ export class WorldView {
     drape: Layer | null;
     detail: DetailInput | null;
     globe: Layer | null;
+    /** Prepared water rasters of the globe (prepareWaterSphere), or null. */
+    globeWater: { level: Float32Array; cls: Float32Array } | null;
     globeSurface: GlobeSurface | null;
     globeDrape: Layer | null;
   } = {
     terrain: null, surface: null, masks: null, rivers: null, landmarks: [], highlight: null, drape: null, detail: null,
-    globe: null, globeSurface: null, globeDrape: null,
+    globe: null, globeWater: null, globeSurface: null, globeDrape: null,
   };
   /** Camera and viewport state of the last drawn frame (to skip redraws when nothing changed). */
   private drawnKey = '';
@@ -164,6 +168,7 @@ export class WorldView {
     const labelsOn = this.labels?.enabled ?? true;
     this.terrain = new TerrainPass(gl);
     this.globe = new GlobePass(gl);
+    this.globeRivers = new GlobeRiverPass(gl);
     if (palette) this.terrain.palette = this.globe.palette = palette;
     this.globeSky = new GlobeSkyPass(gl);
     this.rivers = new RiverPass(gl);
@@ -198,12 +203,13 @@ export class WorldView {
     this.terrain.setSurface(s.surface);
     this.terrain.setLandformMasks(s.masks);
     this.terrain.setDrape(s.drape);
-    this.rivers.setRivers(s.rivers, this.hf?.size ?? 0);
+    this.rivers.setRivers(s.rivers?.face ? null : s.rivers, this.hf?.size ?? 0);
     this.labels.setLandmarks(s.landmarks, this.hf?.size ?? 1024e3);
     this.labels.highlight(s.highlight);
     this.setCreekWorld(this.creekWorld);
     if (s.detail) this.detail.build(s.detail);
-    if (s.globe && this.globeHf) this.globe.setTerrain(s.globe, this.globeHf.radius);
+    if (s.globe && this.globeHf) this.globe.setTerrain(s.globe, this.globeHf, s.globeWater);
+    this.globeRivers.setRivers(s.rivers?.face ? s.rivers : null, this.globeHf?.radius ?? 1);
     this.globe.setSurface(s.globeSurface);
     this.globe.setDrape(s.globeDrape);
     this.dirty = true;
@@ -291,11 +297,15 @@ export class WorldView {
   /**
    * Shows a sphere world (six-face elevation): builds the CPU height field and uploads the globe
    * textures. The globe camera fits the planet when its radius changes, otherwise keeps the view.
+   * `water` / `wclass`: the hydrology stage's water level and class on the same grid (lakes in the
+   * water lid, as on flat maps), or null.
    */
-  setGlobe(layer: Layer): void {
+  setGlobe(layer: Layer, water: Layer | null = null, wclass: Layer | null = null): void {
     this.sphere = true;
     this.src.globe = layer;
-    const hf = new GlobeHeightField(layer);
+    const prepared = water && water.faces === 6 && water.w === layer.w ? prepareWaterSphere(water, wclass) : null;
+    this.src.globeWater = prepared;
+    const hf = new GlobeHeightField(layer, prepared?.level ?? null);
     hf.exaggeration = this.exaggeration;
     this.globeHf = hf;
     this.globeCam.setGround(hf);
@@ -304,7 +314,10 @@ export class WorldView {
       this.globeCam.fitWorld();
     }
     this.dirty = true;
-    if (!this.contextLost) this.globe.setTerrain(layer, hf.radius);
+    if (!this.contextLost) {
+      this.globe.setTerrain(layer, hf, prepared);
+      this.globeRivers.setRivers(this.src.rivers?.face ? this.src.rivers : null, hf.radius);
+    }
   }
 
   /** Forgets the sphere world (the next world is flat): the view draws flat terrain again. */
@@ -312,6 +325,7 @@ export class WorldView {
     this.sphere = false;
     this.globeHf = null;
     this.src.globe = this.src.globeSurface = this.src.globeDrape = null;
+    this.src.globeWater = null;
     this.dirty = true;
   }
 
@@ -407,10 +421,13 @@ export class WorldView {
     this.labels.highlight(id);
   }
 
+  /** River graph of the world on show: flat ribbons, or globe ribbons for a sphere graph (`face` set). */
   setRivers(graph: RiverGraph | null): void {
     this.src.rivers = graph;
     this.dirty = true;
-    if (!this.contextLost) this.rivers.setRivers(graph, this.hf?.size ?? 0);
+    if (this.contextLost) return;
+    this.rivers.setRivers(graph?.face ? null : graph, this.hf?.size ?? 0);
+    this.globeRivers.setRivers(graph?.face && this.globeHf ? graph : null, this.globeHf?.radius ?? 1);
   }
 
   setDrape(layer: Layer | null): void {
@@ -640,6 +657,20 @@ export class WorldView {
         time: timeSec,
         atmos,
       });
+      // Rivers only over the realistic view (data drapes show the raster alone, as on flat maps).
+      if (this.globe.layerModeRealistic) {
+        this.globeRivers.draw({
+          viewProj: this.viewProj,
+          exaggeration: this.exaggeration,
+          pxScale: (2 * Math.tan(cam.fovY / 2)) / Math.max(1, cam.viewH),
+          time: timeSec,
+          sunReal,
+          realK,
+          light: local.light,
+          ambient: local.ambient,
+          atmos,
+        });
+      }
       gl.disable(gl.DEPTH_TEST);
     }
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbo);
