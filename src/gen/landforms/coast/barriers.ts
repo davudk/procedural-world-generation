@@ -1,12 +1,12 @@
 import { Noise2 } from '../../../shared/noise';
 import { Noise3 } from '../../../shared/noise3';
 import { asCube, unitPositions } from '../../grid/cube';
-import { AXIAL_DX, AXIAL_DY, cellFace, cellX, cellY, chartXY, tryCellIndex } from '../../grid/grid';
+import { AXIAL_DX, AXIAL_DY, cellFace, cellX, cellY, chartXY, tryCellIndex, type Grid } from '../../grid/grid';
 import { capScale, centreOf, featureAt } from '../profiles';
 import { spherePos } from '../sphere';
 import type { LandformCtx } from '../types';
 import { COAST, type CoastInfo } from './classify';
-import { DiskSet, labelList, line4, poisson, shuffle } from './grid';
+import { cellSpanKm, DiskSet, labelList, line4, poisson, shuffle } from './grid';
 
 /** Share of eligible low sandy coast fronted by barrier islands at density 1 (Earth: ~10–15 % of all coasts). */
 const BARRIER_SHARE = 0.32;
@@ -221,8 +221,10 @@ export function placeBarriers(
   let sandyKm = 0;
   let softKm = 0;
   for (let k = 0; k < M; k++) {
-    if (cls[k] === COAST.SANDY) sandyKm += cellKm;
-    if (cls[k] === COAST.SANDY || cls[k] === COAST.SHELTERED) softKm += cellKm;
+    // Spheres: the cell's own size (0.71–1 × nominal).
+    const km = g.uniform ? cellKm : meanSpan(g, cells[k]);
+    if (cls[k] === COAST.SANDY) sandyKm += km;
+    if (cls[k] === COAST.SANDY || cls[k] === COAST.SHELTERED) softKm += km;
   }
   const spitCand: number[] = [];
   for (let k = 0; k < M; k++) {
@@ -427,4 +429,10 @@ function barrierFeaturesSphere(c: LandformCtx, barList: number[], label: Int32Ar
     c.features.push({ type: 'barrier-island', ...featureAt(c, p.x, p.y), size: len, data: { cells: barSizes[l] } });
   }
   return islands;
+}
+
+/** Spheres: mean true extent of a cell (km). */
+function meanSpan(g: Grid, i: number): number {
+  const [x, y] = cellSpanKm(g, i);
+  return (x + y) / 2;
 }

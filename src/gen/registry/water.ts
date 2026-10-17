@@ -1,7 +1,7 @@
 import { cellIndex, cellFace, coarser, cellX as colOf, cellY as rowOf, onFace, tryCellIndex } from '../grid/grid';
 import { chamferDistance } from '../grid/ops';
 import { candidate, own } from './candidate';
-import { blockMean, cellAtM, cellX, cellY, compKm2, insideDistance, label, labelAngle, mergeTree, nearestWhereM, resolveOwners, type GridSpec, type MergeTree } from './grid';
+import { blockMean, cellAtM, cellCountKm2, cellX, cellY, compKm2, insideDistance, label, labelAngle, mergeTree, nearestWhereM, resolveOwners, type GridSpec, type MergeTree } from './grid';
 import { gradAt } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
 
@@ -49,6 +49,8 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
   const MM = R.cells;
   const rKm = R.cellM / 1000;
   const rKm2 = rKm * rKm;
+  // Merge-tree areas are cell counts: the mean cell area on spheres.
+  const tKm2 = cellCountKm2(R, rKm2);
   const seaR = new Uint8Array(MM);
   for (let i = 0; i < MM; i++) seaR[i] = 1 - S.land[i];
 
@@ -56,7 +58,7 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
   const t = mergeTree(S.dLand, seaR, R, false, 0.05);
   const keep = new Uint8Array(t.count);
   for (let k = 0; k < t.count; k++) {
-    const big = t.area[k] * rKm2 >= SEA_MIN_KM2 && t.peakV[k] * rKm >= SEA_MIN_DEPTH_KM;
+    const big = t.area[k] * tKm2 >= SEA_MIN_KM2 && t.peakV[k] * rKm >= SEA_MIN_DEPTH_KM;
     keep[k] = big && (t.parent[k] < 0 || t.peakV[k] - t.colV[k] >= 0.5 * t.peakV[k]) ? 1 : 0;
   }
   const ocean = S.sphere ? splitOceans(I, S, t, seaR) : null;
@@ -111,13 +113,13 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
     if (p < 0) continue;
     const widthKm = 2 * t.colV[k] * rKm;
     if (widthKm > STRAIT_MAX_KM || t.peakV[k] < 2 * t.colV[k] || t.peakV[k] * rKm < 10) continue;
-    if (t.area[k] * rKm2 < STRAIT_SIDE_KM2 || t.area[p] * rKm2 < STRAIT_SIDE_KM2) continue;
+    if (t.area[k] * tKm2 < STRAIT_SIDE_KM2 || t.area[p] * tKm2 < STRAIT_SIDE_KM2) continue;
     const c = t.col[k];
     const [vx, vy] = gradAt(S.dLand, R, c);
     const [x, y] = snapSea(I, S, cellX(R, c), cellY(R, c));
     straits.push(candidate({
       kind: 'strait', x, y, angle: S.sphere ? S.geo.angleFromCell(R, c, -vy, vx, x, y) : labelAngle(-vy, vx), extentM: Math.max(3 * widthKm, 15) * 1000,
-      mag: Math.min(1, Math.min(t.area[k], t.area[p]) * rKm2 / 50000),
+      mag: Math.min(1, Math.min(t.area[k], t.area[p]) * tKm2 / 50000),
       data: { widthKm: Math.max(1, Math.round(widthKm)) }, idX: cellX(R, c), idY: cellY(R, c),
     }));
   }
@@ -288,7 +290,7 @@ function embayments(
     if (b >= 0 && basinArea[b] * (R.cellM / 1000) ** 2 < 2.5 * areaKm2) continue;
     if (parent) {
       const pk = parent.lab[cellAtM(parent.g, px, py)];
-      if (pk >= 0 && parent.area[pk] * (parent.g.cellM / 1000) ** 2 < 2.5 * areaKm2) continue;
+      if (pk >= 0 && parent.area[pk] * cellCountKm2(parent.g, (parent.g.cellM / 1000) ** 2) < 2.5 * areaKm2) continue;
     }
     const [x, y] = snapSea(I, S, px, py);
     const isGulf = fac > 1 && areaKm2 >= 6000;

@@ -42,6 +42,19 @@ const KING_REL = 1.7;
 const KING_RADIUS_KM = 40;
 /** Ceiling of the king's uplift target (m). Erosion-model summits land ~1.5× above it; the refine stage's summit ceiling keeps them below 9 km. */
 const KING_MAX_M = 7000;
+/**
+ * Spheres: the first resolved cell of the uplift calibration (`upliftForPeak`'s s0) is capped at this
+ * size. The calibration was fitted on 2–4 km erosion cells; on coarser cells (8 km in sphere previews,
+ * 4–16 km on larger planets) the erosion model builds more relief than it predicts, so every range
+ * reached the summit ceiling (p95 peak 7.8 km on the small planet against 5.1 km on a flat world). With
+ * the cap the p95 peak, the share of land above 2 km and the king ratio match the flat defaults
+ * (research 11 §3). Cells coarser than SPHERE_RELIEF_COARSE_M (previews of 8,192 km and larger planets)
+ * overshoot further, so there s0 shrinks in proportion (s0 · cell = 2.5 km × 8 km). The king massif
+ * keeps the true cell size: it is meant to stand at the ceiling. Flat worlds use their own cell size
+ * (their goldens are unchanged).
+ */
+const SPHERE_RELIEF_CELL_M = 2500;
+const SPHERE_RELIEF_COARSE_M = 8000;
 /** Dome profile exponent (1 − (r/R)²)^p: higher = a sharper summit, but a lower one. */
 const KING_SHAPE = 1;
 
@@ -90,6 +103,8 @@ export const baseStage: StageDef = {
     const worldKm = ctx.num('worldSize');
     const cellKm = sphere ? g.cellKm : worldKm / n;
     const cellM = cellKm * 1000;
+    // Spheres: uplift is calibrated as if the erosion cells were at most SPHERE_RELIEF_CELL_M (see there).
+    const upM = sphere ? Math.min(cellM, SPHERE_RELIEF_CELL_M * Math.min(1, SPHERE_RELIEF_COARSE_M / cellM)) : cellM;
     const N = g.cells;
     const pg = ctx.grid(P.n);
     // Planar noise on flat maps (bit-identical to Noise2), 3D noise at the surface position on the sphere.
@@ -175,7 +190,7 @@ export const baseStage: StageDef = {
     const deep = new Float32Array(N);
     const coastA = new Float32Array(N);
     const uOro = new Float32Array(N);
-    const uBg = upliftForPeak(400 + 900 * (1 - age), K0, LEM_M, 30_000, cellM);
+    const uBg = upliftForPeak(400 + 900 * (1 - age), K0, LEM_M, 30_000, upM);
 
     const PB = sphere ? unitPositions(asCube(pg)) : null;
     const q3 = new Float64Array(3);
@@ -227,7 +242,7 @@ export const baseStage: StageDef = {
             ALONG_FLOOR + (1 - ALONG_FLOOR) * segN.ridged3(wx / segWavelength + sp.phase, wy / segWavelength - sp.phase, wz / segWavelength + 0.5 * sp.phase, 3);
           const gap = smoothstep(GAP_START, -0.15, segN.fbm3(wx / (segWavelength * 2) - sp.phase, wy / (segWavelength * 2), wz / (segWavelength * 2) + sp.phase, 2));
           const convK = Math.min(1.3, Math.max(CONV_FLOOR, Math.abs(seg.conv) / 40));
-          const U0 = OROGEN_GAIN * upliftForPeak(sp.peak, K0, LEM_M, sp.halfWidthKm * 1000, cellM) * convK * along * gap;
+          const U0 = OROGEN_GAIN * upliftForPeak(sp.peak, K0, LEM_M, sp.halfWidthKm * 1000, upM) * convK * along * gap;
           const w = sp.halfWidthKm;
           switch (cls) {
             case B.COLLISION:
@@ -284,7 +299,7 @@ export const baseStage: StageDef = {
     // Intraplate swells (Colorado / East African / Iranian plateaus): broad highlands that need no
     // convergent boundary, so worlds with weak or mostly offshore orogens still get high ground
     // (research 05 §3.6). A land-only quantile places them on a fixed share of the inland crust.
-    const uSwell = OROGEN_GAIN * upliftForPeak(SWELL_PEAK * Math.max(0, 1.3 - age), K0, LEM_M, 40_000, cellM);
+    const uSwell = OROGEN_GAIN * upliftForPeak(SWELL_PEAK * Math.max(0, 1.3 - age), K0, LEM_M, 40_000, upM);
     // Island worlds have little continental interior: swells shrink with the land fraction.
     const swellShare = SWELL_SHARE * Math.min(1, ctx.num('landFraction') / 0.22);
     if (swellShare > 0 && uSwell > 0) {
@@ -310,7 +325,7 @@ export const baseStage: StageDef = {
 
     // Summit cap: overlapping belts, plateaus and swells must not stack into 10 km peaks; ranges top
     // out near the top of the peakHeight spread (the king massif is the one exception).
-    const uCap = U_CAP_REL * upliftForPeak(ctx.range('peakHeight')[1], K0, LEM_M, 40_000, cellM);
+    const uCap = U_CAP_REL * upliftForPeak(ctx.range('peakHeight')[1], K0, LEM_M, 40_000, upM);
     for (let i = 0; i < N; i++) if (U[i] > uCap) U[i] = uCap;
     // Deep-ocean features come from per-segment boundary profiles; smooth them so the abyss has no facets.
     const blurred = h0.slice();

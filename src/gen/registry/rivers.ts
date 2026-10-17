@@ -243,6 +243,33 @@ function detectFalls(I: RegistryInput, S: Shared, out: Candidate[], reachOf: Int
   }
 }
 
+/** Rim search radius of a canyon on spheres: the flat rule's 3 × 3 regional cells of 4 km. */
+const CANYON_RADIUS_M = 6000;
+
+/**
+ * Spheres: highest ground within ~CANYON_RADIUS_M of each regional cell. On flat maps the regional
+ * cells are 4 km and the 3 × 3 neighbourhood is that radius; sphere previews have 8 km cells, whose
+ * neighbourhood reaches 8–11 km and turned most hill rivers into canyons hundreds of km long. Here a
+ * neighbour's rise counts in proportion to how much of its distance lies inside the radius (all of it
+ * on ≤ 4 km cells, as on flat maps).
+ */
+function canyonRims(S: Shared): Float32Array {
+  const R = S.reg;
+  const near = new Float32Array(R.cells);
+  for (let i = 0; i < R.cells; i++) {
+    const h0 = S.hMax[i];
+    let v = h0;
+    for (let k = 0; k < 8; k++) {
+      const j = R.nbr(i, k);
+      if (j < 0) continue;
+      const rise = S.hMax[j] - h0;
+      if (rise > 0) v = Math.max(v, h0 + rise * Math.min(1, CANYON_RADIUS_M / R.dist(i, k)));
+    }
+    near[i] = v;
+  }
+  return near;
+}
+
 /**
  * Canyons: runs ≥ 20 km of a main stem where the river lies ≥ 600 m below the highest ground within
  * ~6 km; outside mountain ranges (or ≥ 1.5 km deep inside them, then called a gorge).
@@ -254,9 +281,9 @@ function detectCanyons(I: RegistryInput, S: Shared, out: Candidate[], stems: Ste
   const geo = S.geo;
   const R = S.reg;
   const { off8, border } = R;
-  // Highest ground of each regional cell and its 8 neighbours.
-  const near = new Float32Array(R.cells);
-  for (let i = 0; i < R.cells; i++) {
+  // Highest ground of each regional cell and its 8 neighbours (spheres: within CANYON_RADIUS_M, below).
+  const near = S.sphere ? canyonRims(S) : new Float32Array(R.cells);
+  for (let i = 0; !S.sphere && i < R.cells; i++) {
     let v = S.hMax[i];
     const b = border[i];
     for (let k = 0; k < 8; k++) {

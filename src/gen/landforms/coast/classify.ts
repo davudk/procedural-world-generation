@@ -4,7 +4,7 @@ import { blockGrid, cellFace, cellIndex, cellX, cellY, forWindow, tryCellIndex, 
 import { smoothstep } from '../../grid/ops';
 import { sphereBlock } from '../sphere';
 import type { LandformCtx } from '../types';
-import { blockMeanList } from './grid';
+import { blockMeanList, coastEdgeKm } from './grid';
 
 /** Coast classes (research 03 §3.2 rule 4, FEATURES F10–F19). */
 export const COAST = { NONE: 0, SANDY: 1, ROCKY: 2, SHELTERED: 3, ICE: 4 } as const;
@@ -266,13 +266,14 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
     else if (wave[k] < 0.17 || landShare[k] > 0.72) k2 = COAST.SHELTERED;
     cls[k] = k2;
     classOf[i] = k2;
-    const km = seaEdges(g, sea, i) * edgeKm;
+    // Spheres: true edge lengths (cells are 0.71–1 × nominal; the nominal sum was ~8 % long).
+    const km = sphere ? coastEdgeKm(g, sea, i) : seaEdges(g, sea, i) * edgeKm;
     if (k2 === COAST.SANDY) lengthKm.sandy += km;
     else if (k2 === COAST.ROCKY) lengthKm.rocky += km;
     else if (k2 === COAST.SHELTERED) lengthKm.sheltered += km;
     else lengthKm.ice += km;
   }
-  lengthKm.total = edges * edgeKm;
+  lengthKm.total = sphere ? lengthKm.sandy + lengthKm.rocky + lengthKm.sheltered + lengthKm.ice : edges * edgeKm;
   return { sea, cells, slot, nx, ny, wx, wy, exposure, wave, relief, shelf, landShare, cls, classOf, lengthKm };
 }
 

@@ -95,7 +95,7 @@ describe('climate on the sphere', () => {
       return { worst };
     };
     const t = spread(f.temp);
-    // Precipitation (first-order upwind transport on a non-uniform grid) is zonal to within about ±17 %:
+    // Precipitation (first-order upwind transport on a non-uniform grid) is zonal to within about ±15 % (area-aware upwind weights; ±17 % before):
     // the 5–95 % range between longitudes in each ½° band, relative to the band mean.
     let pWorst = 0;
     for (let b = -90; b < 90; b += 0.5) {
@@ -108,7 +108,7 @@ describe('climate on the sphere', () => {
     }
     console.log(`[sphere] water world: temperature spread ${t.worst.toFixed(3)} °C, precipitation 5–95 % range ${(100 * pWorst).toFixed(1)} % of the band mean; ${JSON.stringify(f.stats)}`);
     expect(t.worst).toBeLessThan(0.5);
-    expect(pWorst).toBeLessThan(0.4);
+    expect(pWorst).toBeLessThan(0.35);
     for (const k of ['roundsMarine0', 'roundsMarine1', 'roundsMoisture0', 'roundsMoisture1']) expect(f.stats[k]).toBeLessThanOrEqual(4);
   });
 

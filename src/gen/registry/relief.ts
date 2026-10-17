@@ -1,5 +1,5 @@
 import { cellIndex, cellX as colOf, cellY as rowOf } from '../grid/grid';
-import { axesDir, axesXY, compKm2 } from './grid';
+import { axesDir, axesXY, cellCountKm2, compKm2 } from './grid';
 import { B } from '../stages/plates';
 import { candidate, own } from './candidate';
 import { cellAtM, cellX, cellY, insideDistance, label, labelAngle, mergeTree, nearestWhereM, pca, resolveOwners, type MergeTree } from './grid';
@@ -219,9 +219,11 @@ function detectRanges(I: RegistryInput, S: Shared, out: Candidate[], peaks: Cand
   for (let i = 0; i < MM; i++) mask[i] = S.land[i] && S.hSmooth[i] >= T && S.relief[i] >= 120 ? 1 : 0;
   const t = mergeTree(S.hSmooth, mask, R, true, 5);
   const minKm2 = 1500;
+  // Merge-tree areas are cell counts: the mean cell area on spheres.
+  const tKm2 = cellCountKm2(R, rKm * rKm);
   const keep = new Uint8Array(t.count);
   for (let k = 0; k < t.count; k++) {
-    if (t.area[k] * rKm * rKm < minKm2) continue;
+    if ((R.uniform ? t.area[k] * rKm * rKm : t.area[k] * tKm2) < minKm2) continue;
     keep[k] = t.parent[k] < 0 || t.peakV[k] - t.colV[k] >= Math.max(400, 0.25 * (t.peakV[k] - T)) ? 1 : 0;
   }
   const res = resolveOwners(t, keep);

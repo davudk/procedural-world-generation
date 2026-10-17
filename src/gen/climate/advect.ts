@@ -52,12 +52,18 @@ export function buildStencil(w: Wind, g: Grid): Stencil {
       iu[i] = gx > 0 ? g.nbr(i, 3) : gx < 0 ? g.nbr(i, 4) : i;
       ju[i] = gy > 0 ? g.nbr(i, 1) : gy < 0 ? g.nbr(i, 6) : i;
     }
-    wa[i] = a / s;
-    if (g.uniform) ds[i] = (cellKm * s) / Math.sqrt(gx * gx + gy * gy);
-    else {
+    if (g.uniform) {
+      wa[i] = a / s;
+      ds[i] = (cellKm * s) / Math.sqrt(gx * gx + gy * gy);
+    } else {
       // Sphere: the cell's own spacing along each face axis (0.71–1 × nominal).
       const hx = (g.dist(i, 3) + g.dist(i, 4)) / 2000;
       const hy = (g.dist(i, 1) + g.dist(i, 6)) / 2000;
+      // Area-aware upwind weights: the flux through each upwind face is the wind component times the
+      // face's length (the cell's extent across that axis), so x gets |gx|·hy and y gets |gy|·hx. On a
+      // uniform grid that is the flat |gx| : |gy|; on the cube it cuts the water world's zonal
+      // precipitation spread from ±17 % to ±15 % (research 11 §5).
+      wa[i] = (a * hy) / (a * hy + b * hx);
       ds[i] = (a * hx + b * hy) / Math.sqrt(gx * gx + gy * gy);
     }
     quad[i] = (gx >= 0 ? 0 : 1) | (gy >= 0 ? 0 : 2);

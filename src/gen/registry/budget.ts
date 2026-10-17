@@ -23,10 +23,17 @@ const W_WORLD_BUDGET = 50;
 /** The registry keeps at least this many W-scale landmarks whatever hydrology and landforms add. */
 const W_MIN_OWN = 18;
 /**
- * A globe view shows one hemisphere of a planet (research 10 §7 band G), so the per-world budgets of a
- * sphere are this many W views' worth.
+ * Spheres: band W is a fixed 1,024 km cap (research 10 §7), the size of the flat default world, not the
+ * planet's equal-area size. The world-band budget, the world fill and the W label tier work at that
+ * scale, with the per-world numbers of a flat 1024 km world per (1,024 km)² of planet (research 11 §4).
  */
-export const SPHERE_W_VIEWS = 2;
+export const SPHERE_W_CAP_M = 1_024_000;
+
+/** View width (m) of band W and how many such views the world's area holds (flat: the world, 1). */
+export function wBand(worldM: number, geo: Geo): { viewM: number; views: number } {
+  if (!geo.sphere) return { viewM: worldM, views: 1 };
+  return { viewM: SPHERE_W_CAP_M, views: (4 * Math.PI * geo.R * geo.R) / (SPHERE_W_CAP_M * SPHERE_W_CAP_M) };
+}
 /** Importance multiplier per earlier pick of the same kind. */
 const KIND_DECAY = 0.72;
 /** Kinds with at least SIGNATURE_MIN world-scale candidates keep their SIGNATURE_KEEP best. */
@@ -48,8 +55,7 @@ const W_RIVER_ORDER = 6;
 
 /** W-scale features the registry does not own: big lakes, trunk rivers and landform places. */
 export function externalWScale(I: RegistryInput, S: Shared): { count: number; xs: number[]; ys: number[] } {
-  const worldM = I.worldKm * 1000;
-  const lo = worldM * W_SCALE_FRAC;
+  const lo = wBand(I.worldKm * 1000, S.geo).viewM * W_SCALE_FRAC;
   let n = 0;
   const xs: number[] = [];
   const ys: number[] = [];
@@ -92,24 +98,28 @@ export function applyWBudget(
   cands: Candidate[], imp: Map<Candidate, number>, protectedSet: ReadonlySet<Candidate>, worldM: number,
   external: { count: number; xs: number[]; ys: number[] }, geo: Geo,
 ): { kept: Candidate[]; dropped: Candidate[]; quota: number } {
-  const lo = worldM * W_SCALE_FRAC;
-  const views = geo.sphere ? SPHERE_W_VIEWS : 1;
+  const { viewM, views } = wBand(worldM, geo);
+  const lo = viewM * W_SCALE_FRAC;
   const quota = Math.max(W_MIN_OWN * views, W_WORLD_BUDGET * views - external.count);
-  const px = external.xs.slice();
-  const py = external.ys.slice();
-  const d0 = SPREAD * worldM;
-  const near = (c: Candidate): number => {
+  const d0 = SPREAD * viewM;
+  const wScale = cands.filter((c) => !FREE.has(c.kind) && c.extentM >= lo);
+  // Distance from each W-scale candidate to the nearest kept land feature, updated as features are
+  // placed (the same minimum as a scan of every placed feature, in O(candidates) per placement).
+  const nearD = new Map<Candidate, number>();
+  for (const c of wScale) {
     let d = Infinity;
-    for (let i = 0; i < px.length; i++) d = Math.min(d, geo.dist(px[i], py[i], c.x, c.y));
-    return d;
-  };
-  const spread = (c: Candidate): number => 0.2 + 0.8 * (SEA_KINDS.has(c.kind) ? 0.5 : Math.min(1, near(c) / d0));
+    for (let i = 0; i < external.xs.length; i++) d = Math.min(d, geo.dist(external.xs[i], external.ys[i], c.x, c.y));
+    nearD.set(c, d);
+  }
+  const spread = (c: Candidate): number => 0.2 + 0.8 * (SEA_KINDS.has(c.kind) ? 0.5 : Math.min(1, nearD.get(c)! / d0));
   const place = (c: Candidate): void => {
     if (SEA_KINDS.has(c.kind)) return;
-    px.push(c.x);
-    py.push(c.y);
+    for (const o of wScale) {
+      if (SEA_KINDS.has(o.kind)) continue;
+      const d = geo.dist(c.x, c.y, o.x, o.y);
+      if (d < nearD.get(o)!) nearD.set(o, d);
+    }
   };
-  const wScale = cands.filter((c) => !FREE.has(c.kind) && c.extentM >= lo);
   const keep = new Set<Candidate>();
   // A kind with many world-scale instances characterises the world (fjords of a fjordland, islands of
   // an archipelago): its best SIGNATURE_KEEP always stay.

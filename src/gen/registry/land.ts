@@ -1,7 +1,7 @@
 import { cellX as colOf, cellY as rowOf } from '../grid/grid';
 import { chamferDistance } from '../grid/ops';
 import { candidate } from './candidate';
-import { cellAtM, cellX, cellY, compKm2, label, labelAngle, mergeTree, nearestWhere, nearestWhereM, type GridSpec } from './grid';
+import { cellAtM, cellCountKm2, cellX, cellY, compKm2, label, labelAngle, mergeTree, nearestWhere, nearestWhereM, type GridSpec } from './grid';
 import { gradAt } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
 
@@ -359,13 +359,16 @@ function detectIsthmuses(I: RegistryInput, S: Shared, R: GridSpec, rKm: number, 
   const t = mergeTree(S.dSea, S.land, R, true, 0.05);
   const found: Candidate[] = [];
   const core = 12 / rKm;
+  // Merge-tree areas are cell counts: the mean cell area on spheres (flat: the expression as it was).
+  const tKm2 = cellCountKm2(R, rKm * rKm);
+  const areaKm2 = (k: number): number => (R.uniform ? t.area[k] * rKm * rKm : t.area[k] * tKm2);
   for (let k = 0; k < t.count; k++) {
     const p = t.parent[k];
     if (p < 0) continue;
     const widthKm = 2 * t.colV[k] * rKm;
     if (widthKm > 40 || t.peakV[k] < core || t.peakV[p] < core) continue;
     if (t.peakV[k] < 2 * t.colV[k]) continue;
-    if (t.area[k] * rKm * rKm < 3000 || t.area[p] * rKm * rKm < 3000) continue;
+    if (areaKm2(k) < 3000 || areaKm2(p) < 3000) continue;
     const c = t.col[k];
     const [vx, vy] = gradAt(S.dSea, R, c);
     const ax = cellX(R, c);

@@ -1,6 +1,6 @@
 import type { Landmark, LandmarkKind, Tier } from '../../shared/landmarks';
 import { hashMix, hashString } from '../../shared/hash';
-import { applyWBudget, SPHERE_W_VIEWS } from './budget';
+import { applyWBudget, SPHERE_W_CAP_M } from './budget';
 import { own } from './candidate';
 import type { Namer } from './names';
 import type { Candidate, HeroCat, Shared } from './types';
@@ -37,6 +37,19 @@ const W_BAND_MPP = 640;
  * ~60–70 % of them: ~45 keeps a world screen near 30 labels (harness cap 60 at p95; M8 baseline 56–100).
  */
 const W_LABELS = 45;
+/**
+ * Spheres (research 11 §4): labels readable on the whole globe, heroes, the king, continents and oceans
+ * aside. Land is often gathered on one side of the planet, so a land-centred globe view sees most of
+ * them; 36 keeps it near the 60-label screen cap at p95.
+ */
+const SPHERE_GLOBE_LABELS = 36;
+/**
+ * Spheres: band W is a 1,024 km cap. Labels readable there (≥ W_BAND_MPP) are kept while fewer than
+ * SPHERE_W_LOCAL_LABELS others lie within SPHERE_W_LOCAL_RADIUS_M along the surface (the flat world's
+ * W_LABELS per 1024² km², over a disc of that radius); the rest appear from the next zoom step on.
+ */
+const SPHERE_W_LOCAL_RADIUS_M = SPHERE_W_CAP_M / 2;
+const SPHERE_W_LOCAL_LABELS = Math.round((W_LABELS * Math.PI) / 4);
 
 /** Menu weights: how strongly each hero category reads as "special". */
 const HERO_WEIGHT: Record<HeroCat, number> = {
@@ -134,7 +147,8 @@ export function rankAndName(
   // Spheres: the whole planet fitted (2.2 R with the camera margin) into a 700 px tall view.
   const wMpp = S.sphere ? (2.2 * S.geo.R) / 700 : worldM / 1600;
   let wLabels = 0;
-  const wLabelCap = S.sphere ? W_LABELS * SPHERE_W_VIEWS : W_LABELS;
+  const wLabelCap = S.sphere ? SPHERE_GLOBE_LABELS : W_LABELS;
+  const wTier = S.sphere ? new LocalLabelTier(S, W_BAND_MPP, SPHERE_W_LOCAL_RADIUS_M, SPHERE_W_LOCAL_LABELS) : null;
   for (const c of order) {
     const isHero = heroes.includes(c);
     let maxMpp = Math.min(50000, Math.max(5, (c.visM ?? c.extentM) / PX_TO_READ));
@@ -142,6 +156,7 @@ export function rankAndName(
     // A globe from space always names its continents and oceans.
     else if (S.sphere && (c.kind === 'continent' || c.kind === 'ocean')) maxMpp = Math.max(maxMpp, wMpp * 1.1);
     else if (maxMpp >= wMpp && ++wLabels > wLabelCap) maxMpp = 0.95 * wMpp;
+    if (wTier) maxMpp = wTier.admit(c, maxMpp, isHero || !!c.data.worldKing || c.kind === 'continent' || c.kind === 'ocean');
     const lm: Landmark = {
       id: landmarks.length, kind: c.kind, name: named.get(c)![0], x: c.x, y: c.y, angle: c.angle, extentM: c.extentM,
       importance: Math.round(imp.get(c)! * 1000) / 1000, maxMpp: Math.round(maxMpp), data: c.data,
@@ -171,4 +186,34 @@ export function rankAndName(
   }
   const heroPool = pool.filter((c) => c.hero!.score >= 0.2).map((c) => `${c.hero!.cat}:${c.hero!.score.toFixed(2)}@${Math.round(c.x / 1000)},${Math.round(c.y / 1000)}`);
   return { landmarks, heroes: heroes.map((h) => index.get(h)!), heroPool, index, wDropped: budget.dropped.length, wQuota: budget.quota };
+}
+
+/**
+ * Spheres: a spatial label budget for one zoom tier (labels with maxMpp ≥ `mpp`). Candidates come in
+ * importance order; one keeps its tier while fewer than `cap` kept ones lie within `radiusM` (great
+ * circle), else it drops just below the tier. Forced ones (heroes, the king, continents, oceans) always
+ * stay and count.
+ */
+class LocalLabelTier {
+  private readonly xs: number[] = [];
+  private readonly ys: number[] = [];
+
+  constructor(
+    private readonly S: Shared,
+    private readonly mpp: number,
+    private readonly radiusM: number,
+    private readonly cap: number,
+  ) {}
+
+  admit(c: Candidate, maxMpp: number, forced: boolean): number {
+    if (maxMpp < this.mpp) return maxMpp;
+    if (!forced) {
+      let k = 0;
+      for (let i = 0; i < this.xs.length && k < this.cap; i++) if (this.S.geo.dist(this.xs[i], this.ys[i], c.x, c.y) <= this.radiusM) k++;
+      if (k >= this.cap) return 0.95 * this.mpp;
+    }
+    this.xs.push(c.x);
+    this.ys.push(c.y);
+    return maxMpp;
+  }
 }

@@ -33,6 +33,8 @@ const HOLDRIDGE = 58.93;
  * reads a σ 5 km blurred DEM, so sweeping finer than 2 km only costs time.
  */
 const SWEEP_KM = 2;
+/** Spheres: the precipitation blur is at least this many sweep cells (σ), whatever the 8 km storm scale gives. */
+const SPHERE_STORM_CELLS = 1;
 /**
  * Cross-wind mixing (km, σ) and streamline meander (km, ± displacement at WARP_WAVE_KM). The upwind
  * sweeps have almost no cross-wind diffusion, so under a uniform wind the edge of a coastal air mass
@@ -177,8 +179,11 @@ export async function computeClimate(
   tLap = performance.now();
 
   // 3. Post-processing on the sweep grid (storm-scale spreading, seasonality), then full resolution.
-  gaussBlur(sw.ps, g.grid, 8 / g.cellKm);
-  gaussBlur(sw.pw, g.grid, 8 / g.cellKm);
+  // Spheres: at least one cell, so coarse planets (16–23 km preview cells) spread a one-cell snow-out
+  // or uplift spike as finer grids do (research 11 §5); flat maps keep the 8 km storm scale.
+  const stormCells = sphere ? Math.max(8 / g.cellKm, SPHERE_STORM_CELLS) : 8 / g.cellKm;
+  gaussBlur(sw.ps, g.grid, stormCells);
+  gaussBlur(sw.pw, g.grid, stormCells);
   const pC = new Float32Array(g.grid.cells);
   const psC = new Float32Array(g.grid.cells);
   for (let i = 0; i < pC.length; i++) {

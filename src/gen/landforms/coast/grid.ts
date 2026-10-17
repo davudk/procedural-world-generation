@@ -429,3 +429,28 @@ function boxBlurSmall(a: Float32Array, g: Grid, r: number): void {
     }
   }
 }
+
+/**
+ * Spheres: the cell's true extent (km) along its face's x axis and y axis, from the great-circle
+ * spacing to its neighbours (cells are 0.71–1 × the nominal size; the 24 cube-corner cells lack one
+ * neighbour, so a missing side takes the other).
+ */
+export function cellSpanKm(g: Grid, i: number): [number, number] {
+  const side = (a: number, b: number): number => (a > 0 && b > 0 ? (a + b) / 2 : Math.max(a, b)) / 1000;
+  return [side(g.dist(i, 3), g.dist(i, 4)), side(g.dist(i, 1), g.dist(i, 6))];
+}
+
+/**
+ * Spheres: coast length of a land cell (km), each sea 4-edge weighted by its true length (the cell's
+ * extent across that edge), times π/4 as on flat maps (a staircase overestimates a smooth coast).
+ */
+export function coastEdgeKm(g: Grid, sea: Uint8Array, i: number): number {
+  const [sx, sy] = cellSpanKm(g, i);
+  let km = 0;
+  for (let k = 0; k < 4; k++) {
+    const j = g.nbr(i, g.axialToRaster[k]);
+    // Axial E, W cross an edge that runs along y; S, N one that runs along x.
+    if (j >= 0 && sea[j]) km += k < 2 ? sy : sx;
+  }
+  return km * (Math.PI / 4);
+}

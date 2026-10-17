@@ -265,7 +265,8 @@ export const PARAMS: readonly ParamDef[] = [
       const a = c.num('tectonicActivity');
       const age = 1 - 0.45 * (c.num('geologicAge') - 0.5);
       const lo = (1500 + 2000 * a) * age;
-      const hi = Math.min(9000, (3000 + 4000 * a + 500 * Math.max(0, s2(c))) * age);
+      // Spheres get no size bonus: their summits already reach the 8.9 km ceiling on the small planet (research 11 §3).
+      const hi = Math.min(9000, (3000 + 4000 * a + (sphere(c) ? 0 : 500 * Math.max(0, s2(c)))) * age);
       return r(Math.round(lo / 50) * 50, Math.round(hi / 50) * 50);
     },
   }),
@@ -383,8 +384,10 @@ export const PARAMS: readonly ParamDef[] = [
     deps: ['temperatureOffset', 'worldShape', 'latitudeSpan', 'peakHeight'],
     auto: (c) => {
       const [a, b] = c.range('latitudeSpan');
-      // A planet always has poles.
-      const maxLat = sphere(c) ? 90 : Math.max(Math.abs(a), Math.abs(b));
+      // A planet always has poles, but their cold already comes from the climate model's latitudes; the
+      // flat term only stands in for a map's poleward reach. Spheres read the Earth-like 65° reach, so
+      // an Earth-like planet gets the flat Earth-like glaciation (~1) instead of the clamp at 2 (research 11 §3).
+      const maxLat = sphere(c) ? 65 : Math.max(Math.abs(a), Math.abs(b));
       return clamp(
         0.25 + (0.5 * (maxLat - 45)) / 20 + (0.25 * (c.range('peakHeight')[1] - 3000)) / 2000 - c.num('temperatureOffset') / 12,
         0,

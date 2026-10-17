@@ -78,6 +78,14 @@ export interface Components {
   areaM2?: Float64Array;
 }
 
+/**
+ * km² per cell for areas counted in cells (merge-tree areas): `nominalKm2` on flat maps, the mean cell
+ * area on spheres, whose cells are 0.5–1 × the nominal (cellM)² (the nominal was ~18 % high on average).
+ */
+export function cellCountKm2(g: GridSpec, nominalKm2: number): number {
+  return g.uniform ? nominalKm2 : g.totalArea / g.cells / 1e6;
+}
+
 /** Area of component k (km²): exact cell areas on spheres, size · cellKm2 on flat maps. */
 export function compKm2(m: Components, k: number, cellKm2: number): number {
   return m.areaM2 ? m.areaM2[k] / 1e6 : m.size[k] * cellKm2;

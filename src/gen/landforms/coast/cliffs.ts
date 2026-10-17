@@ -4,7 +4,7 @@ import { capScale, featureAt } from '../profiles';
 import { SphereCentroids, spherePos } from '../sphere';
 import type { LandformCtx } from '../types';
 import { COAST, type CoastInfo } from './classify';
-import { DiskSet, poisson, shuffle } from './grid';
+import { coastEdgeKm, DiskSet, poisson, shuffle } from './grid';
 
 /** Sea stacks per 1000 km of exposed cliff coast at density 1 (FEATURES F12: uncommon). */
 const STACK_RATE = 8;
@@ -61,7 +61,7 @@ export function placeCliffs(c: LandformCtx, info: CoastInfo, edited: Uint8Array,
         edited[j] = 1;
       }
     }
-    km += e * cellKm * (Math.PI / 4);
+    km += g.uniform ? e * cellKm * (Math.PI / 4) : coastEdgeKm(g, sea, i);
   }
 
   // Sea stacks: Poisson count per cliff length, Poisson-disk spaced, just off the cliff foot.

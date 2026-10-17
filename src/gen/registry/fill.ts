@@ -3,8 +3,9 @@ import { chamferDistance } from '../grid/ops';
 import { RIVER } from '../../shared/protocol';
 import type { LandmarkKind } from '../../shared/landmarks';
 import { BIOME } from '../../shared/biomes';
+import { wBand } from './budget';
 import { candidate } from './candidate';
-import { cellAtM, cellX, cellY, compKm2, label, nearestWhere, nearestWhereM } from './grid';
+import { cellAtM, cellCountKm2, cellX, cellY, compKm2, label, nearestWhere, nearestWhereM } from './grid';
 import { G, groupOf } from './shared';
 import type { ReliefResult } from './relief';
 import type { Geo } from './geo';
@@ -84,7 +85,8 @@ function fillBand(I: RegistryInput, S: Shared, out: Candidate[], relief: ReliefR
   const far = (c: number): boolean => dist[area ? c : cellAtM(cg, cellX(fine, c), cellY(fine, c))] >= fillCells;
 
   const { tree: t, prom, used } = relief;
-  const cellKm2 = (cellM / 1000) ** 2;
+  // Summit tree areas are cell counts: the mean cell area on spheres.
+  const cellKm2 = cellCountKm2(fine, (cellM / 1000) ** 2);
   const summits: FillItem[] = [];
   const ks: number[] = [];
   for (let k = 0; k < t.count; k++) {
@@ -285,7 +287,8 @@ const W_FILL_MIN_SHARE = 0.4;
 export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number {
   const R = S.reg;
   const MM = R.cells;
-  const worldM = I.worldKm * 1000;
+  // Spheres: at the scale of the 1,024 km W cap (budget.ts wBand), not of the whole planet.
+  const worldM = wBand(I.worldKm * 1000, S.geo).viewM;
   const lo = worldM / 80;
   const covered = new Uint8Array(MM);
   const mark = (x: number, y: number): void => {
