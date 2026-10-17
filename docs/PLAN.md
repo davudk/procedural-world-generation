@@ -1069,3 +1069,73 @@ Spherical worlds are being added as an option, with flat staying the default ([r
 - Atmosphere colours are tuned by eye; there is no multiple scattering, and the cartographic and real sun can disagree slightly in sky brightness at mid zoom.
 - Elevation uploads are not sliced (~250 ms per layer at build size).
 - When the built-in browser pane is hidden, `requestAnimationFrame` stops, so the first fit can run with a 1 × 1 view. Flat worlds also showed a NaN `DetailGround` height in a hidden pane (a pre-existing issue, not looked into here).
+
+### Sphere phase 4b — Close-zoom detail on the globe (2026-10-16)
+
+**What landed:**
+- **Streamed detail tiles** (`render/globe/detailTiles.ts` pure parts, `render/globe/globeDetail.ts` GPU), research 10 §6.7:
+  - Lattice: k detail texels per macro cell (the power of two nearest cell / 250 m), each face n·k texels, split into T × T tiles of N texels. Default small planet: 250 m texels, 4 × 4 tiles of 1024² per face (256 km). Each tile is stored with a 12-texel margin and built with a 48-texel apron, both in the face's gnomonic chart extended past the face edge.
+  - A tile is a pure function of (seed, world, face, tile). Per world (sliced, ≈ 0.2 s CPU): padded macro, water level (the sea at 0 until the sphere hydrology lands), a coastal band (cells whose 3×3 neighbourhood across seams holds sea and land) and an RGBA8 control cube (roughness, rock, water proximity). Per tile (≈ 2–3 ms CPU): local rasters, exact inside the face and sampled by direction across seams.
+  - GPU build: the flat detail map's passes over a tile-local head (`detailBuildSources(head)`; the flat shader sources stay byte-identical, tested by hash). Cap and river carve by depth-MIN, base = Catmull-Rom macro + baked 3D noise + coastal noise, 12 thermal, 24 pipe-model hydraulic, 12 thermal, re-anchoring (±60 m). The core and margin are then copied into a slot of an R32F `TEXTURE_2D_ARRAY` and read back through a PBO for picking. Without float render targets tiles are built on the CPU (no hydraulic erosion or re-anchoring), sliced.
+  - Streaming (`TileCache`): a tile is wanted while its nearest point is drawn at under 2.5 texels per pixel and may be above the horizon; in-frustum tiles come first, each group by distance. One build at a time, LRU eviction of tiles no longer wanted, and a new tile fades in over 0.4 s.
+  - Time slicing: `update()` runs ≈ 3 ms (2 ms while moving) of CPU plus estimated GPU work per frame and never waits on the GPU (fences). Shaders compile with `KHR_parallel_shader_compile` when present. With `EXT_disjoint_timer_query_webgl2` the per-pass GPU estimates are calibrated against measured time (they were ≈ 3× low on Apple silicon).
+  - Quality tiers: high 12 slots of 1024², medium 8 of 1024², low 8 of 512² (same 250 m texels, 16 hydraulic and thermal steps).
+- **Globe height function** (`render/glsl/globeDetail.ts` ↔ `render/height/globeHeightFn.ts`; the GLSL is generated from the TS constants):
+  - Far out it is exactly the phase-3 bilinear macro. Below two texels per pixel the base is the resident tiles, blended by a partition of unity: each tile's weight ramps over ±8 texels at its edges, computed in its own face chart, then normalised. The Catmull-Rom macro takes the share of missing or fading tiles. Near a face edge the faces across it are visited too, so seams and the 8 cube corners need no special cases.
+  - Octaves: footprint-faded, derivative-damped, ridged 3D value noise at the sea-level point dir·R. It uses an integer hash on a 3D lattice, evaluated from the eye's 65 536 m lattice tile plus a camera-relative offset, so it is seamless and precise at Earth radius. The amplitude comes from the control cube and is capped so the octaves never cross the sea level.
+  - Two deliberate departures from the flat function, both for continuity:
+    - The Catmull-Rom is not clamped to the four nearest texels; that clamp jumps where the set changes at texel edges.
+    - The slope damping accumulates the unridged octave gradient. The ridged one flips sign at the crease, which made the damping, and so the height, jump by up to ~1 m.
+  - The VS uses the morph-coupled footprint as on flat maps; the FS evaluates the height and its 3D tangent gradient per pixel. With detail, the phase-3 B-spline rounding is no longer used.
+  - `GlobeDetailGround` (camera clamps, picking, zoom to cursor) is the TS port with a Lipschitz ray march; beyond two texels per pixel it is the macro height field and its fast march. The closest globe zoom is 8 m/px once the detail exists (40 without). CDLOD depth then gives ~16 m leaves, and node bounds are padded by the detail's reach.
+- **Coastlines:** the shoreline is the zero contour of the detailed height (the sea lid uses the same h), no longer the bilinear contour of the 2 km cells.
+  - Inside the coastal band the tiles' water bounds relax, and a slope-scaled coastal noise moves the coast by up to ~0.35 cells (2–60 m of height).
+  - Outside it, land stays ≥ 0.5 m and sea ≤ −0.5 m as on flat maps, so detail never makes inland seas or open-ocean islands. The shader octaves never flip land and sea.
+- **River-carving hook:** `GlobeDetailWorld.rivers` takes a `SphereRivers`: the river graph's n, zWater, zBed, width and down, plus each node's unit direction. Tiles project the nodes into their chart and reuse the flat `riverSegments` and carve pass; without it nothing is carved. `waterLevel`, `waterClass`, `discharge` and `biome` (6-face rasters on the elevation grid) feed the bounds and the control when present. `main.ts` passes them when layers of the same stage exist and leaves `rivers: null` with a comment.
+- **Fixed: NaN camera in a hidden pane (flat and globe).** A hidden or collapsed page reports a 0 × 0 canvas. `WorldView.resize` handed that to the cameras, whose fit distance, target and metres per pixel became NaN (aspect 0/0, division by viewH). A NaN footprint passes every fade test in the height function, so `DetailGround.heightAt` returned NaN too. Zero sizes are now skipped (`applyViewSize`), and `DetailGround` sanitises its footprint.
+- **Also fixed:** `GlobeHeightField` now lids the padded raw elevation, as the shader does, instead of padding the lidded one; the two differed at the cube-corner texels.
+
+**Measurements** (built-in browser pane, Apple Silicon, 504 × 718 CSS at DPR 2 = 1008 × 1436, 4× MSAA; each frame timed with a 1-pixel readback; the pane was hidden, so frames were driven by script):
+- Frame time with detail: whole planet p50 1.8 ms (no tiles wanted); region at 300 m/px 4.4 ms; 10–12 m/px top-down 5.7–5.9 ms, against 3.1–3.3 ms with detail off; tilted 60° at 30 m/px 8.1 ms (185 nodes).
+- Tile builds (high tier, 1120² rasters):
+  - ≈ 47 ms of GPU per tile, spread over ≈ 10–17 frames, so ≈ 170–300 ms wall per tile at frame rate; 12 tiles around a new view take ≈ 2–4 s.
+  - GPU per build slice: p50 3.5 ms, p95 4.2–6.6 ms. CPU per slice ≤ 3–4 ms (the per-tile preparation is the largest). Readback ≈ 15 ms wall.
+  - The first tile after a page load also compiles the 15 build programs (≈ 270 ms wall); one ≈ 80 ms frame was seen once.
+- World preparation: ≈ 0.2 s CPU (node), ≈ 1.3 s wall at frame rate.
+- Memory:
+  - High: on the GPU, 52.7 MB of tiles, 6.4 MB of control and 120 MB of build scratch (freed 5 s after the last build); on the CPU, 53 MB of tile copies and 25 MB of padded rasters.
+  - Medium: 35 MB of tiles, the same scratch.
+  - Low: 9.2 MB of tiles and 35 MB of scratch; 9 MB of tile copies.
+- `GlobeHeightFn.sample` ≈ 0.15 µs without tiles. A CPU fallback tile takes ≈ 0.7 s, sliced.
+- Flat maps: the flat code path is unchanged. The build shaders and `DETAIL_GLSL` hash identical; only the resize guard and the footprint sanitising are new. Fitted view p50 3.3 ms, tilted at 18 m/px 6.6 ms in the same pane.
+
+**Tests** (`tests/globeDetail.test.ts`, `tests/hiddenView.test.ts`):
+- Lattice sizes per tier; partition of unity of the tile weights; chart gradients against finite differences.
+- Noise: the 3D hash is bit-exact against BigInt, and `noise3` matches a float32 port of the GLSL camera-relative path at 652 km and at Earth radius. Also noise gradients, GLSL generated from the constants, and the flat shader sources unchanged (hash).
+- Tiles (CPU reference build on a tiny 6 × 16² planet):
+  - Deterministic per tile and seed.
+  - Within the bake + coast amplitude of the macro; water and land are kept outside the coastal band.
+  - Continuous across a tile edge, a face seam and a cube corner (max step < 0.5 m); the two tiles at a seam agree within tens of metres.
+  - A river given through the hook is carved.
+- Height function:
+  - Equals the phase-3 globe far out.
+  - On steep terrain, refined around the largest step, no jump exceeds 5 cm. This test caught the clamp and ridge-damping jumps.
+  - Octaves never cross the sea level; the gradient matches finite differences; detailed picking agrees with its own heights.
+- Streaming: nothing is wanted at globe zoom, the tile under a low camera comes first, wanted tiles are never evicted, LRU recycling works, and so do the fade-in and the index texture.
+- Hidden view: a 0 × 0 view made the camera NaN; `applyViewSize` keeps both cameras finite; `DetailGround` stays finite for NaN, 0, negative and infinite footprints.
+
+**Verified in the browser:**
+- Zooming from space to 10 m/px on a coast: the 2 km cells' polygonal coast becomes a natural curve.
+- A snow-capped range at 25 m/px top-down and tilted 60°. Detail on vs off raises the image's high-frequency energy ≈ 13× at 25 m/px.
+- Across the face 0 | face 4 seam and the corner of faces 1, 2 and 4: on the GPU-built tiles, the height across those seams, the corner and a tile edge shows no step. Refined to 0.6 mm spacing, the largest step is ≈ 2 mm.
+- Switching to the low tier rebuilds with 512² tiles. A flat world with the canvas hidden (0 × 0) keeps a finite camera.
+
+**Known gaps:**
+- There is one tile LOD (250 m) plus the macro, with no coarser tile level, so far parts of tilted views use the macro and octaves only. The two are blended by footprint, plus the 0.4 s fade-in when a tile arrives.
+- Tile texels are equal-angle, so their metric size varies by up to ~1.4× across a face; erosion constants use the nominal texel.
+- In a tile's apron across a seam the macro is resampled bilinearly, so the two tiles at a seam differ by up to tens of metres before the blend.
+- No dunes, lakes or rivers on spheres yet: the sea at 0 is the only water, and nothing is carved until the hydrology passes `rivers` and `waterLevel`.
+- The coastal noise can make small lagoons and skerries within ~2 cells of the coast.
+- The control cube is at macro resolution (2 km), so amplification fades within about a cell of water.
+- Tiles are rebuilt only when the elevation layer changes, so a biome layer that arrives later does not reach the roughness (it falls back to the default biome).
+- With the browser pane hidden, `requestAnimationFrame` runs at ~1 Hz, so world preparation and streaming take tens of seconds there (they advance per drawn frame).
