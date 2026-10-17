@@ -123,8 +123,8 @@ export class GenProgress {
     this.status.classList.remove('faded');
     const total = this.steps.length;
     const what = this.mode === 'preview' ? 'Preview' : 'Building';
-    // Spheres stop after climate for now; say so rather than implying the world is complete.
-    const later = this.shape === 'sphere' ? ' · later stages (rivers, biomes, landmarks) are not available on spheres yet' : '';
+    // Spheres stop before the landmark registry for now; say so rather than implying the world is complete.
+    const later = this.shape === 'sphere' ? ' · landmarks are not available on spheres yet' : '';
     if (finished === total) this.status.textContent = (this.mode === 'preview' ? 'Preview ready' : 'World ready') + later;
     else if (running) this.status.textContent = `${what} · ${this.labels.get(running)} · ${finished + 1} of ${total}`;
     else this.status.textContent = `${what} · ${finished} of ${total}`;

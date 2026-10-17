@@ -1,5 +1,8 @@
-import { blockGrid, cellIndex, cellX, cellY, forWindow, tryCellIndex, type Grid } from '../../grid/grid';
+import { faceAxes } from '../../climate/sphere';
+import { asCube, unitPositions } from '../../grid/cube';
+import { blockGrid, cellFace, cellIndex, cellX, cellY, forWindow, tryCellIndex, type Grid } from '../../grid/grid';
 import { smoothstep } from '../../grid/ops';
+import { sphereBlock } from '../sphere';
 import type { LandformCtx } from '../types';
 import { blockMeanList } from './grid';
 
@@ -16,10 +19,10 @@ export interface CoastInfo {
   cells: Int32Array;
   /** Per coastal cell: index into `cells`, −1 elsewhere. */
   slot: Int32Array;
-  /** Per coastal cell (by slot): unit normal pointing to the sea (grid x east, y south). */
+  /** Per coastal cell (by slot): unit normal pointing to the sea (grid x east, y south; sphere: the cell's face columns and rows). */
   nx: Float32Array;
   ny: Float32Array;
-  /** Prevailing wind (direction blown toward) per slot. */
+  /** Prevailing wind (direction blown toward) per slot, in the same axes as the normal. */
   wx: Float32Array;
   wy: Float32Array;
   /** Wave exposure 0–1 (fetch along the wind and the 8 compass directions), smoothed along the coast. */
@@ -90,10 +93,12 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
   // Normals from the land moments in a ~3 km disc; land share in a ~5 km disc.
   const rN = Math.max(2, Math.round(3 / cellKm));
   const rL = Math.max(2, Math.round(5 / cellKm));
-  // Summed-area table of land for the (square) land-share window.
+  // Summed-area table of land for the (square) land-share window (flat; the sphere counts the window
+  // across seams instead).
+  const sphere = g.shape !== 'flat';
   const W = n + 1;
-  const sat = new Int32Array(W * W);
-  for (let y = 0; y < n; y++) {
+  const sat = new Int32Array(sphere ? 0 : W * W);
+  for (let y = 0; y < n && !sphere; y++) {
     let row = 0;
     const r = cellIndex(g, 0, y);
     for (let x = 0; x < n; x++) {
@@ -105,20 +110,46 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
   const stride = Math.max(1, Math.round(3 / cellKm));
   const DIRS: [number, number][] = [];
   for (let k = 0; k < 8; k++) DIRS.push([Math.cos((k * Math.PI) / 4), Math.sin((k * Math.PI) / 4)]);
+  // Rays walk the extended chart of the origin cell's face (`face`), so on the sphere they continue
+  // across seams; off the map (flat; on the sphere only where that chart ends, 90° away) counts as
+  // open sea: on 'continent' edges the map border is land anyway.
+  let face = 0;
+  // Sphere: chart cells are not all cellKm across (down to ~0.7 near face edges), so the fetch is the
+  // great-circle distance to the first land cell, and the ray runs until it has covered FETCH_REF_KM.
+  let origin3 = -1;
+  const up = sphere ? unitPositions(asCube(g)) : null;
+  const Rk = g.radiusM / 1000;
+  const fetchSphere = (x0: number, y0: number, dx: number, dy: number): number => {
+    const o = origin3 * 3;
+    for (let s = stride; s <= 3 * fetchMax; s += stride) {
+      const j = tryCellIndex(g, Math.round(x0 + dx * s), Math.round(y0 + dy * s), face);
+      if (j < 0) return 1;
+      const q = j * 3;
+      const cx = up![o + 1] * up![q + 2] - up![o + 2] * up![q + 1];
+      const cy = up![o + 2] * up![q] - up![o] * up![q + 2];
+      const cz = up![o] * up![q + 1] - up![o + 1] * up![q];
+      const dot = up![o] * up![q] + up![o + 1] * up![q + 1] + up![o + 2] * up![q + 2];
+      const km = Rk * Math.atan2(Math.sqrt(cx * cx + cy * cy + cz * cz), dot);
+      if (km >= FETCH_REF_KM) return 1;
+      if (!sea[j]) return km / FETCH_REF_KM;
+    }
+    return 1;
+  };
   const fetch = (x0: number, y0: number, dx: number, dy: number): number => {
+    if (sphere) return fetchSphere(x0, y0, dx, dy);
     for (let s = stride; s <= fetchMax; s += stride) {
       const x = Math.round(x0 + dx * s);
       const y = Math.round(y0 + dy * s);
-      // Off the map counts as open sea: on 'continent' edges the map border is land anyway.
-      const j = tryCellIndex(g, x, y);
+      const j = tryCellIndex(g, x, y, face);
       if (j < 0) return 1;
       if (!sea[j]) return s / fetchMax;
     }
     return 1;
   };
 
-  const fb = Math.max(1, Math.round(3 / cellKm));
+  const fb = sphere ? sphereBlock(n, Math.max(1, Math.round(3 / cellKm))) : Math.max(1, Math.round(3 / cellKm));
   const fg = blockGrid(g, fb);
+  const axes = sphere ? faceAxes(asCube(g)) : null;
   const origin = new Uint8Array(fg.cells);
   const isOrigin = new Uint8Array(M);
   const { border, off4, axialToRaster } = g;
@@ -126,6 +157,8 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
     const i = cells[k];
     const x = cellX(g, i);
     const y = cellY(g, i);
+    face = cellFace(g, i);
+    origin3 = i;
     let mx = 0;
     let my = 0;
     forWindow(g, i, rN, (j, dx, dy) => {
@@ -133,7 +166,15 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
       mx += dx;
       my += dy;
     });
-    {
+    if (sphere) {
+      let land = 0;
+      let all = 0;
+      forWindow(g, i, rL, (j) => {
+        all++;
+        if (!sea[j]) land++;
+      });
+      landShare[k] = land / all;
+    } else {
       const x0 = Math.max(0, x - rL);
       const x1 = Math.min(n, x + rL + 1);
       const y0 = Math.max(0, y - rL);
@@ -156,13 +197,23 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
     }
     nx[k] = -mx / len;
     ny[k] = -my / len;
-    const [ux, uy] = windAt(c.climate.lat[i]);
+    let [ux, uy] = windAt(c.climate.lat[i]);
+    if (axes) {
+      // Sphere: (east, south) → the face's column/row axes at this cell.
+      const we = ux;
+      const wn = -uy;
+      ux = we * axes[i * 4] + wn * axes[i * 4 + 1];
+      uy = we * axes[i * 4 + 2] + wn * axes[i * 4 + 3];
+      const len = Math.hypot(ux, uy) || 1;
+      ux /= len;
+      uy /= len;
+    }
     wx[k] = ux;
     wy[k] = uy;
 
     // Fetch: upwind (waves travel with the wind) plus swell from all eight directions.
     // Fetch rays from one coastal cell per ~3 km block (exposure is smoothed along the coast anyway).
-    const ob = cellIndex(fg, Math.floor(x / fb), Math.floor(y / fb));
+    const ob = cellIndex(fg, Math.floor(x / fb), Math.floor(y / fb), face);
     if (origin[ob] === 0) {
       origin[ob] = 1;
       isOrigin[k] = 1;
@@ -176,19 +227,24 @@ export function classifyCoast(c: LandformCtx): CoastInfo {
     const steps = Math.max(1, Math.round(2.5 / cellKm));
     let rel = h[i];
     for (let s = 1; s <= steps; s++) {
-      const j = tryCellIndex(g, Math.round(x - nx[k] * s), Math.round(y - ny[k] * s));
+      const j = tryCellIndex(g, Math.round(x - nx[k] * s), Math.round(y - ny[k] * s), face);
       if (j < 0) break;
       if (!sea[j]) rel = Math.max(rel, h[j]);
     }
     relief[k] = rel;
     const off = Math.max(1, Math.round(8 / cellKm));
-    const sxx = Math.min(n - 1, Math.max(0, Math.round(x + nx[k] * off)));
-    const syy = Math.min(n - 1, Math.max(0, Math.round(y + ny[k] * off)));
-    shelf[k] = Math.min(0, h[cellIndex(g, sxx, syy)]);
+    if (sphere) {
+      const j = tryCellIndex(g, Math.round(x + nx[k] * off), Math.round(y + ny[k] * off), face);
+      shelf[k] = Math.min(0, h[j < 0 ? i : j]);
+    } else {
+      const sxx = Math.min(n - 1, Math.max(0, Math.round(x + nx[k] * off)));
+      const syy = Math.min(n - 1, Math.max(0, Math.round(y + ny[k] * off)));
+      shelf[k] = Math.min(0, h[cellIndex(g, sxx, syy)]);
+    }
   }
 
   // Smooth exposure and relief along the coast over ~10 km blocks so classes come in stretches.
-  const block = Math.max(1, Math.round(4 / cellKm));
+  const block = sphere ? sphereBlock(n, Math.max(1, Math.round(4 / cellKm))) : Math.max(1, Math.round(4 / cellKm));
   const me = blockMeanList(cells, exposure, isOrigin, g, block, 1);
   const mr = blockMeanList(cells, relief, null, g, block, 1);
   const waveMul = 0.5 + c.num('waveEnergy');

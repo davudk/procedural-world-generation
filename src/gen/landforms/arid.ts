@@ -1,9 +1,11 @@
+import { asCube } from '../grid/cube';
 import { coarser } from '../grid/grid';
 import { boxBlur } from '../grid/ops';
 import {
-  areaFactor, aridityAt, bigRegions, centreOf, coarseNoise, coarsen, concavity, DiskSet, drains, forDisk, poisson, refineCoarse,
+  areaFactor, aridityAt, bigRegions, centreOf, coarseNoise, coarsen, concavity, DiskSet, drains, featureAt, forDisk, meanCellKm2, poisson, refineCoarse,
   settleFixed, snapshot, sstep, stampRadial, strataField,
 } from './profiles';
+import { eastSouthToFace } from './sphere';
 import type { LandformCtx } from './types';
 
 /** Width of the riser within one terrace step (share of the step height). */
@@ -32,6 +34,11 @@ export function applyArid(c: LandformCtx): void {
   const rng = c.rng('arid');
   const T = rng.range(140, 220);
   const af = areaFactor(c);
+  const flat = grid.shape === 'flat';
+  // Area of `k` cells (km²): flat k·cellKm² exactly as before; sphere the mean cell area.
+  const cellsKm2 = (k: number): number => (flat ? k * ck * ck : k * meanCellKm2(c));
+  // Axial neighbour k (−1 at a cube corner's missing diagonal; on flat maps only used inside).
+  const nbAt = (i: number, k: number): number => (border[i] === 0 ? i + off8Axial[k] : grid.nbr(i, axialToRaster[k]));
 
   // ── Caprock terracing ──────────────────────────────────────────────────────────────────────
   const w = new Float32Array(N);
@@ -56,7 +63,14 @@ export function applyArid(c: LandformCtx): void {
   }
   // New pits from spatially varying weights: lift back just above the lowest neighbour.
   const wasPit = (i: number): boolean => {
-    if (border[i]) return false;
+    if (border[i]) {
+      if (flat) return false;
+      for (let k = 0; k < 8; k++) {
+        const j = nbAt(i, k);
+        if (j >= 0 && snap.h[j] < snap.h[i]) return false;
+      }
+      return true;
+    }
     for (let k = 0; k < 8; k++) if (snap.h[i + off8Axial[k]] < snap.h[i]) return false;
     return true;
   };
@@ -65,9 +79,15 @@ export function applyArid(c: LandformCtx): void {
     let fixes = 0;
     for (const i of changed) {
       if (drains(c, i) || wasPit(i)) continue;
-      // Not draining implies an interior cell (drains() is true on the border).
+      // Not draining implies an interior cell on flat maps (drains() is true on the map border); on the
+      // sphere seam cells read their neighbours across the seam.
       let lo = Infinity;
-      for (let k = 0; k < 8; k++) lo = Math.min(lo, h[i + off8Axial[k]]);
+      if (border[i]) {
+        for (let k = 0; k < 8; k++) {
+          const j = nbAt(i, k);
+          if (j >= 0) lo = Math.min(lo, h[j]);
+        }
+      } else for (let k = 0; k < 8; k++) lo = Math.min(lo, h[i + off8Axial[k]]);
       h[i] = Math.min(snap.h[i], lo + 0.1);
       fixes++;
     }
@@ -104,7 +124,7 @@ export function applyArid(c: LandformCtx): void {
       }
     }
     if (!isTop || k < 1) continue;
-    const km2 = cells.length * ck * ck;
+    const km2 = cellsKm2(cells.length);
     if (km2 > 150) continue;
     if (km2 < 2) buttes++;
     else mesas++;
@@ -114,13 +134,18 @@ export function applyArid(c: LandformCtx): void {
   // Escarpments: risers of at least half a step between neighbouring cells.
   const esc = new Uint8Array(N);
   for (const i of changed) {
-    if (w[i] < 0.3 || border[i]) continue;
+    if (w[i] < 0.3 || (flat && border[i])) continue;
     let lo = Infinity;
-    for (let k = 0; k < 8; k++) lo = Math.min(lo, h[i + off8Axial[k]]);
+    if (border[i]) {
+      for (let k = 0; k < 8; k++) {
+        const j = nbAt(i, k);
+        if (j >= 0) lo = Math.min(lo, h[j]);
+      }
+    } else for (let k = 0; k < 8; k++) lo = Math.min(lo, h[i + off8Axial[k]]);
     if (h[i] - lo >= 0.5 * T) esc[i] = 1;
   }
   const escs = changed.length ? bigRegions(c, esc, 40 * ck, Math.ceil(10 * af)).list : [];
-  for (const e of escs) c.features.push({ type: 'escarpment', x: e.x * 1000, y: e.y * 1000, size: (e.km2 / ck) * 1000, data: { step: T } });
+  for (const e of escs) c.features.push({ type: 'escarpment', ...featureAt(c, e.x, e.y), size: (e.km2 / ck) * 1000, data: { step: T } });
 
   const zoneMask = new Uint8Array(N);
   const mesaMask = new Uint8Array(N);
@@ -133,7 +158,7 @@ export function applyArid(c: LandformCtx): void {
     const tops = new Map<number, number>();
     for (let i = 0; i < N; i++) if (topMask[i] && label[i] >= 0) tops.set(label[i], (tops.get(label[i]) ?? 0) + 1);
     for (const f of fields) {
-      c.features.push({ type: 'mesa-field', x: f.x * 1000, y: f.y * 1000, size: Math.sqrt(f.km2) * 1000, data: { areaKm2: f.km2, tops: tops.get(f.label) ?? 0, step: T } });
+      c.features.push({ type: 'mesa-field', ...featureAt(c, f.x, f.y), size: Math.sqrt(f.km2) * 1000, data: { areaKm2: f.km2, tops: tops.get(f.label) ?? 0, step: T } });
     }
   }
   c.masks.set('mesa', mesaMask);
@@ -144,12 +169,24 @@ export function applyArid(c: LandformCtx): void {
   const cm = co.m;
   const ckC = ck * co.f;
   const cg = coarser(grid, co.f);
-  const sC = new Float32Array(cm * cm);
+  const sC = new Float32Array(cg.cells);
   {
-    // Central differences on interior coarse cells (raster offsets W E N S); the rim stays 0.
+    // Central differences on interior coarse cells (raster offsets W E N S); the rim stays 0 on flat
+    // maps. On the sphere seam cells difference across the seam, over the true neighbour distances.
     const { border: cb, off8: o } = cg;
     for (let i = 0; i < cg.cells; i++) {
-      if (cb[i]) continue;
+      if (cb[i]) {
+        if (flat) continue;
+        const jW = cg.nbr(i, 3);
+        const jE = cg.nbr(i, 4);
+        const jN = cg.nbr(i, 1);
+        const jS = cg.nbr(i, 6);
+        sC[i] = Math.hypot(
+          (co.g[jE] - co.g[jW]) / (cg.dist(i, 4) + cg.dist(i, 3)),
+          (co.g[jS] - co.g[jN]) / (cg.dist(i, 6) + cg.dist(i, 1)),
+        );
+        continue;
+      }
       sC[i] = Math.hypot(co.g[i + o[4]] - co.g[i + o[3]], co.g[i + o[6]] - co.g[i + o[1]]) / (2 * ckC * 1000);
     }
   }
@@ -161,6 +198,7 @@ export function applyArid(c: LandformCtx): void {
   const dens = c.num('density_arid');
   const erg = new Uint8Array(N);
   const dunes = new Uint8Array(N);
+  const fa = new Float64Array(2);
   let ergCells = 0;
   for (let i = 0; i < N; i++) {
     if (fixed[i] || h[i] <= 0 || c.ice[i] > 0.1) continue;
@@ -172,12 +210,18 @@ export function applyArid(c: LandformCtx): void {
     if (v <= 0) continue;
     erg[i] = v;
     ergCells++;
-    dunes[i] = windCode(c.climate.lat[i]);
+    if (flat) dunes[i] = windCode(c.climate.lat[i]);
+    else {
+      // Sphere: the belt wind (east, south) turned into the face's column/row axes.
+      const [vx, vy] = windVec(c.climate.lat[i]);
+      eastSouthToFace(asCube(grid), i, vx, vy, fa);
+      dunes[i] = azimuthCode(fa[0], fa[1]);
+    }
   }
   const ergBig = new Uint8Array(N);
   for (let i = 0; i < N; i++) ergBig[i] = erg[i] >= 128 ? 1 : 0;
   const ergs = bigRegions(c, ergBig, 2000, Math.ceil(6 * af)).list;
-  for (const e of ergs) c.features.push({ type: 'erg', x: e.x * 1000, y: e.y * 1000, size: Math.sqrt(e.km2) * 1000, data: { areaKm2: e.km2 } });
+  for (const e of ergs) c.features.push({ type: 'erg', ...featureAt(c, e.x, e.y), size: Math.sqrt(e.km2) * 1000, data: { areaKm2: e.km2 } });
   c.masks.set('erg', erg);
   c.masks.set('dunes', dunes);
 
@@ -187,9 +231,9 @@ export function applyArid(c: LandformCtx): void {
   for (let i = 0; i < N; i++) if (plain(i)) plainCells++;
   const age = c.num('geologicAge');
   const irng = c.rng('inselbergs');
-  const lambda = ((plainCells * ck * ck) / 1e5) * 6 * sstep(0.3, 0.9, age) * c.num('density_relief');
+  const lambda = (cellsKm2(plainCells) / 1e5) * 6 * sstep(0.3, 0.9, age) * c.num('density_relief');
   const want = Math.min(Math.ceil(40 * af), poisson(irng, lambda));
-  const idisk = new DiskSet(25);
+  const idisk = new DiskSet(25, c.grid);
   let inselbergs = 0;
   for (let t = 0; t < want * 40 && inselbergs < want && plainCells > 0; t++) {
     const i = irng.int(N);
@@ -207,18 +251,18 @@ export function applyArid(c: LandformCtx): void {
       continue;
     }
     idisk.add(p.x, p.y);
-    c.features.push({ type: 'inselberg', x: p.x * 1000, y: p.y * 1000, size: 2 * r * 1000, data: { height: hi } });
+    c.features.push({ type: 'inselberg', ...featureAt(c, p.x, p.y), size: 2 * r * 1000, data: { height: hi } });
     inselbergs++;
   }
 
   c.stats['terraceStepM'] = T;
-  c.stats['terracedKm2'] = changed.length * ck * ck;
+  c.stats['terracedKm2'] = cellsKm2(changed.length);
   c.stats['terracePitsRepaired'] = repaired;
   c.stats['mesas'] = mesas;
   c.stats['buttes'] = buttes;
   c.stats['mesaFields'] = fields.length;
   c.stats['escarpments'] = escs.length;
-  c.stats['ergKm2'] = ergCells * ck * ck;
+  c.stats['ergKm2'] = cellsKm2(ergCells);
   c.stats['ergs'] = ergs.length;
   c.stats['inselbergs'] = inselbergs;
   c.stats['aridDrowned'] = settleFixed(c, snap);
@@ -226,9 +270,16 @@ export function applyArid(c: LandformCtx): void {
 
 /**
  * Prevailing sand-moving wind (the direction it blows towards) from the latitude belts, encoded as
- * 1 + 254·(azimuth / 2π) with azimuth measured from +x (east) towards +y (south on the map).
+ * 1 + 254·(azimuth / 2π) with azimuth measured from +x (east) towards +y (south on the map). On the
+ * sphere the azimuth is measured from the face's +x (columns) towards its +y (rows).
  */
 function windCode(lat: number): number {
+  const [vx, vy] = windVec(lat);
+  return azimuthCode(vx, vy);
+}
+
+/** Belt wind (east, south) components (not normalised). */
+function windVec(lat: number): [number, number] {
   const a = Math.abs(lat);
   const north = lat >= 0;
   let vx: number;
@@ -243,6 +294,10 @@ function windCode(lat: number): number {
     vx = -1;
     vy = north ? 0.4 : -0.4;
   }
+  return [vx, vy];
+}
+
+function azimuthCode(vx: number, vy: number): number {
   let az = Math.atan2(vy, vx);
   if (az < 0) az += Math.PI * 2;
   return 1 + Math.round((254 * az) / (Math.PI * 2));

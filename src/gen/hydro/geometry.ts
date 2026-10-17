@@ -1,6 +1,7 @@
+import { dirToCell, surfaceDir } from '../../shared/cube';
 import { hashMix } from '../../shared/hash';
 import { RIVER } from '../../shared/protocol';
-import { tryCellIndex, cellIndex, cellX, cellY, type Grid } from '../grid/grid';
+import { tryCellIndex, cellFace, cellIndex, cellX, cellY, chartXY, type Grid } from '../grid/grid';
 import { smoothstep } from '../grid/ops';
 import type { GraphBuilder } from './graph';
 import { kinoshita, sinuosity, targetSinuosity, thetaForAmplitude, thetaForSinuosity, THETA_MAX } from './meander';
@@ -42,6 +43,8 @@ export interface GeometryInput {
   sigmaMax: number;
   /** Target node spacing along the channel (m). */
   spacing: number;
+  /** Sphere only: 3D position (m) of every cell's jittered node (`nodePositions`); null on flat maps. */
+  pos: Float64Array | null;
 }
 
 export interface CellChannel {
@@ -56,10 +59,13 @@ export interface CellChannel {
 /** Per channel cell: width, depth, smoothed slope, waterfall/rapids and climate flags. */
 export function channelCells(g: GeometryInput): CellChannel {
   const { grid, S, rcv, q, aridity, temp, jx, jy, net, donStart, donList, area } = g;
+  if (grid.shape !== 'flat' && !g.pos) throw new Error('channelCells: sphere grids need node positions');
   const { cells: N, cellM } = grid;
   const { chan, strahler } = net;
   const raw = new Float32Array(N);
+  const pos = g.pos;
   const dist = (a: number, b: number): number => {
+    if (pos) return Math.hypot(pos[3 * b] - pos[3 * a], pos[3 * b + 1] - pos[3 * a + 1], pos[3 * b + 2] - pos[3 * a + 2]);
     const dx = cellX(grid, b) - cellX(grid, a) + jx[b] - jx[a];
     const dy = cellY(grid, b) - cellY(grid, a) + jy[b] - jy[a];
     return Math.hypot(dx, dy) * cellM;
@@ -127,16 +133,27 @@ export function meanderRoom(g: GeometryInput, cc: CellChannel): Float32Array {
   const { cells: N, cellM } = grid;
   const { chan, reachOfCell } = net;
   const room = new Float32Array(N);
+  const flat = grid.shape === 'flat';
+  const q = new Float64Array(2);
   for (let i = 0; i < N; i++) {
     if (!chan[i]) continue;
     const r = rcv[i];
     const x = cellX(grid, i);
     const y = cellY(grid, i);
+    // Sphere: the cross-section walk runs in the chart of i's face (crossing seams); a receiver on
+    // another face is placed by its chart position (its jitter is in that face's axes, so it is left out).
+    const f = cellFace(grid, i);
     let dx = 1;
     let dy = 0;
     if (r !== i) {
-      dx = cellX(grid, r) - x + jx[r] - jx[i];
-      dy = cellY(grid, r) - y + jy[r] - jy[i];
+      if (flat || cellFace(grid, r) === f) {
+        dx = cellX(grid, r) - x + jx[r] - jx[i];
+        dy = cellY(grid, r) - y + jy[r] - jy[i];
+      } else {
+        chartXY(grid, f, r, q);
+        dx = q[0] - x - jx[i];
+        dy = q[1] - y - jy[i];
+      }
       const l = Math.hypot(dx, dy) || 1;
       dx /= l;
       dy /= l;
@@ -145,7 +162,7 @@ export function meanderRoom(g: GeometryInput, cc: CellChannel): Float32Array {
     let best = ROOM_MAX;
     for (const side of [-1, 1]) {
       for (let k = 1; k < best; k++) {
-        const j = tryCellIndex(grid, Math.round(x - side * k * dy), Math.round(y + side * k * dx));
+        const j = tryCellIndex(grid, Math.round(x - side * k * dy), Math.round(y + side * k * dx), f);
         if (j < 0) {
           best = Math.min(best, k - 0.5);
           break;
@@ -203,6 +220,107 @@ function chaikin(px: number[], py: number[], passes: number): Axis {
   return { x, y, t, cum };
 }
 
+/** Chaikin corner cutting of a 3D polyline (sphere), as `chaikin`; `z` carries the third coordinate. */
+function chaikin3(px: number[], py: number[], pz: number[], passes: number): Axis & { z: number[] } {
+  let x = px;
+  let y = py;
+  let z = pz;
+  let t = px.map((_, i) => i);
+  for (let p = 0; p < passes && x.length > 2; p++) {
+    const nx = [x[0]];
+    const ny = [y[0]];
+    const nz = [z[0]];
+    const nt = [t[0]];
+    for (let i = 0; i < x.length - 1; i++) {
+      nx.push(0.75 * x[i] + 0.25 * x[i + 1], 0.25 * x[i] + 0.75 * x[i + 1]);
+      ny.push(0.75 * y[i] + 0.25 * y[i + 1], 0.25 * y[i] + 0.75 * y[i + 1]);
+      nz.push(0.75 * z[i] + 0.25 * z[i + 1], 0.25 * z[i] + 0.75 * z[i + 1]);
+      nt.push(0.75 * t[i] + 0.25 * t[i + 1], 0.25 * t[i] + 0.75 * t[i + 1]);
+    }
+    nx.push(x[x.length - 1]);
+    ny.push(y[y.length - 1]);
+    nz.push(z[z.length - 1]);
+    nt.push(t[t.length - 1]);
+    x = nx;
+    y = ny;
+    z = nz;
+    t = nt;
+  }
+  const cum = [0];
+  for (let i = 1; i < x.length; i++) cum.push(cum[i - 1] + Math.hypot(x[i] - x[i - 1], y[i] - y[i - 1], z[i] - z[i - 1]));
+  return { x, y, z, t, cum };
+}
+
+/**
+ * evalAxis on a 3D axis: out = [px, py, pz, sx, sy, sz, t] with s the unit side vector
+ * (radial up × tangent, the 3D counterpart of the flat axis's left normal).
+ */
+function evalAxis3(a: Axis & { z: number[] }, u: number, out: Float64Array): void {
+  const { x, y, z, t, cum } = a;
+  const m = x.length;
+  let lo = 0;
+  let hi = 0;
+  let f = 0;
+  if (m > 1) {
+    const L = cum[m - 1];
+    const v = Math.min(L, Math.max(0, u));
+    hi = m - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (cum[mid] <= v) lo = mid;
+      else hi = mid;
+    }
+    f = (v - cum[lo]) / (cum[hi] - cum[lo] || 1);
+  }
+  const px = x[lo] + (x[hi] - x[lo]) * f;
+  const py = y[lo] + (y[hi] - y[lo]) * f;
+  const pz = z[lo] + (z[hi] - z[lo]) * f;
+  let tx = x[hi] - x[lo];
+  let ty = y[hi] - y[lo];
+  let tz = z[hi] - z[lo];
+  const r = Math.hypot(px, py, pz) || 1;
+  const ux = px / r;
+  const uy = py / r;
+  const uz = pz / r;
+  if (m === 1) {
+    // Any tangent direction will do for a one-point axis.
+    tx = -uy;
+    ty = ux;
+    tz = 0;
+  }
+  let sx = uy * tz - uz * ty;
+  let sy = uz * tx - ux * tz;
+  let sz = ux * ty - uy * tx;
+  const sl = Math.hypot(sx, sy, sz) || 1;
+  sx /= sl;
+  sy /= sl;
+  sz /= sl;
+  out[0] = px;
+  out[1] = py;
+  out[2] = pz;
+  out[3] = sx;
+  out[4] = sy;
+  out[5] = sz;
+  out[6] = t[lo] + (t[hi] - t[lo]) * f;
+}
+
+/**
+ * Sphere: 3D position (m from the planet centre) of every cell's jittered routing node, 3 per cell.
+ * The jitter is applied in the cell's own face coordinates.
+ */
+export function nodePositions(grid: Grid, jx: Float32Array, jy: Float32Array): Float64Array {
+  const N = grid.cells;
+  const R = grid.radiusM;
+  const out = new Float64Array(3 * N);
+  for (let i = 0; i < N; i++) {
+    surfaceDir(cellFace(grid, i), (cellX(grid, i) + 0.5 + jx[i]) * grid.cellM, (cellY(grid, i) + 0.5 + jy[i]) * grid.cellM, R, out, 3 * i);
+    out[3 * i] *= R;
+    out[3 * i + 1] *= R;
+    out[3 * i + 2] *= R;
+  }
+  return out;
+}
+
 /** Position, unit tangent and control parameter at arclength u along the axis. */
 function evalAxis(a: Axis, u: number, out: Float64Array): void {
   const { x, y, t, cum } = a;
@@ -254,13 +372,22 @@ export function buildRivers(g: GeometryInput, cc: CellChannel, room: Float32Arra
   const { n, cellM } = grid;
   const { strahler } = net;
   const nr = net.start.length;
-  const posX = (c: number): number => (cellX(grid, c) + 0.5 + jx[c]) * cellM;
-  const posY = (c: number): number => (cellY(grid, c) + 0.5 + jy[c]) * cellM;
+  // Sphere: node positions are 3D (x, y, w) metres from the planet centre and the axis is smoothed in
+  // 3D (GraphBuilder stores them so; research 10 §5.9). Flat: map metres (x, y).
+  const P = g.pos;
+  const posX = P ? (c: number): number => P[3 * c] : (c: number): number => (cellX(grid, c) + 0.5 + jx[c]) * cellM;
+  const posY = P ? (c: number): number => P[3 * c + 1] : (c: number): number => (cellY(grid, c) + 0.5 + jy[c]) * cellM;
+  const posW = (c: number): number => (P ? P[3 * c + 2] : 0);
+  const T = P ? 6 : 4;
   const firstNode = new Int32Array(nr).fill(-1);
   const outletNode = new Int32Array(lakeCount).fill(-1);
   const outletQ = new Float64Array(lakeCount).fill(-1);
-  const ev = new Float64Array(5);
-  const wetCell = (x: number, y: number): boolean => {
+  const ev = new Float64Array(7);
+  const wetCell = (x: number, y: number, w: number): boolean => {
+    if (P) {
+      const c = dirToCell(x, y, w, n);
+      return fixed[c] === 1 || lakeId[c] >= 0;
+    }
     const cx = Math.min(n - 1, Math.max(0, Math.floor(x / cellM)));
     const cy = Math.min(n - 1, Math.max(0, Math.floor(y / cellM)));
     const c = cellIndex(grid, cx, cy);
@@ -272,18 +399,21 @@ export function buildRivers(g: GeometryInput, cc: CellChannel, room: Float32Arra
     const last = cells[cells.length - 1];
     const px: number[] = [];
     const py: number[] = [];
+    const pw: number[] = [];
     const pz: number[] = [];
     const pc: number[] = [];
     const fromLake = net.fromLakeCell[r];
     if (net.head[r] === HEAD.LAKE_OUT && fromLake >= 0) {
       px.push(0.5 * (posX(fromLake) + posX(cells[0])));
       py.push(0.5 * (posY(fromLake) + posY(cells[0])));
+      if (P) pw.push(0.5 * (posW(fromLake) + posW(cells[0])));
       pz.push(Math.max(S[cells[0]], lakeLevel[lakeId[fromLake]]));
       pc.push(cells[0]);
     }
     for (const c of cells) {
       px.push(posX(c));
       py.push(posY(c));
+      if (P) pw.push(posW(c));
       pz.push(S[c]);
       pc.push(c);
     }
@@ -293,19 +423,22 @@ export function buildRivers(g: GeometryInput, cc: CellChannel, room: Float32Arra
     if (end === END.CONFLUENCE) {
       px.push(posX(tgt));
       py.push(posY(tgt));
+      if (P) pw.push(posW(tgt));
       pz.push(S[tgt]);
       pc.push(last);
       emitEnd = false;
     } else if (end !== END.DRY) {
       px.push(0.5 * (posX(last) + posX(tgt)));
       py.push(0.5 * (posY(last) + posY(tgt)));
+      if (P) pw.push(0.5 * (posW(last) + posW(tgt)));
       const level = end === END.SEA ? (h[tgt] <= 0 ? 0 : h[tgt]) : end === END.PLAYA ? S[tgt] : lakeLevel[lakeId[tgt]];
       pz.push(Math.min(S[last], level));
       pc.push(last);
     }
     for (let k = 1; k < pz.length; k++) pz[k] = Math.min(pz[k], pz[k - 1]);
 
-    const axis = chaikin(px, py, 2);
+    const axis = P ? chaikin3(px, py, pw, 2) : chaikin(px, py, 2);
+    const at = P ? (u: number): void => evalAxis3(axis as Axis & { z: number[] }, u, ev) : (u: number): void => evalAxis(axis, u, ev);
     const L = axis.cum[axis.cum.length - 1];
     const nctrl = pz.length;
     const cellOf = (t: number): number => pc[Math.min(nctrl - 1, Math.max(0, Math.floor(t)))];
@@ -347,8 +480,8 @@ export function buildRivers(g: GeometryInput, cc: CellChannel, room: Float32Arra
       let phi = ((hashMix(seed, cells[0]) & 0xffff) / 65536) * 2 * Math.PI;
       const limit = Math.ceil((L / ds) * 8) + 16;
       while (x < L && X.length < limit) {
-        evalAxis(axis, x, ev);
-        const c = cellOf(ev[4]);
+        at(x);
+        const c = cellOf(ev[T]);
         const lv = Math.max(11 * cc.width[c], 7 * spacing);
         const win = smoothstep(0, lv, x) * smoothstep(0, lv, L - x);
         const a = room[c];
@@ -396,14 +529,15 @@ export function buildRivers(g: GeometryInput, cc: CellChannel, room: Float32Arra
     let prevT = -1;
     let prevNode = -1;
     for (let k = 0; k < nodeU.length; k++) {
-      evalAxis(axis, nodeU[k], ev);
-      let x = ev[0] - ev[3] * nodeLat[k];
-      let y = ev[1] + ev[2] * nodeLat[k];
-      const t = ev[4];
+      at(nodeU[k]);
+      let x = P ? ev[0] + ev[3] * nodeLat[k] : ev[0] - ev[3] * nodeLat[k];
+      let y = P ? ev[1] + ev[4] * nodeLat[k] : ev[1] + ev[2] * nodeLat[k];
+      let w = P ? ev[2] + ev[5] * nodeLat[k] : 0;
+      const t = ev[T];
       const c = cellOf(t);
       uz = Math.max(uz, nodeU[k]);
-      evalAxis(axis, uz, ev);
-      const tz = ev[4];
+      at(uz);
+      const tz = ev[T];
       const zw = Math.min(prevZ, zAt(tz));
       prevZ = zw;
       const isFirst = k === 0;
@@ -418,19 +552,23 @@ export function buildRivers(g: GeometryInput, cc: CellChannel, room: Float32Arra
         else flags |= RIVER.SINK_DRY;
       }
       const exempt = (isLast && emitEnd && end !== END.DRY) || (isFirst && net.head[r] === HEAD.LAKE_OUT);
-      if (!exempt && wetCell(x, y)) {
+      if (!exempt && wetCell(x, y, w)) {
         // Back onto the valley axis, and if that is still wet, toward the channel cell itself.
-        evalAxis(axis, nodeU[k], ev);
+        at(nodeU[k]);
         x = ev[0];
         y = ev[1];
+        w = P ? ev[2] : 0;
         const cx = posX(c);
         const cy = posY(c);
+        const cw = posW(c);
         for (const f of [0, 0.25, 0.5, 0.75, 1]) {
           const tx = x + (cx - x) * f;
           const ty = y + (cy - y) * f;
-          if (!wetCell(tx, ty) || f === 1) {
+          const tw = w + (cw - w) * f;
+          if (!wetCell(tx, ty, tw) || f === 1) {
             x = tx;
             y = ty;
+            w = tw;
             break;
           }
         }
@@ -441,7 +579,7 @@ export function buildRivers(g: GeometryInput, cc: CellChannel, room: Float32Arra
         if (k0 < nctrl - 1 && cc.fall[pc[k0]] && pc[k0] !== pc[k0 + 1] && prevT - k0 < 0.5 && tz >= k0 + 0.5) gb.flags[prevNode] |= RIVER.WATERFALL;
       }
       const Q = Math.max(0, q[c]);
-      const node = gb.node(x, y, zw, zw - cc.depth[c], Q, area[c], cc.width[c], cc.depth[c], strahler[c], flags);
+      const node = gb.node(x, y, zw, zw - cc.depth[c], Q, area[c], cc.width[c], cc.depth[c], strahler[c], flags, w);
       prevNode = node;
       prevT = tz;
     }
@@ -474,9 +612,9 @@ export function buildRivers(g: GeometryInput, cc: CellChannel, room: Float32Arra
     const w = Math.max(1, WIDTH_COEF * Math.sqrt(Q));
     const d = Math.max(0.1, DEPTH_COEF * Math.pow(Q, 0.4));
     gb.beginReach();
-    const first = gb.node(posX(from), posY(from), level, level - d, Q, area[from], w, d, 1, RIVER.LAKE_OUT);
+    const first = gb.node(posX(from), posY(from), level, level - d, Q, area[from], w, d, 1, RIVER.LAKE_OUT, posW(from));
     const endFlags = fixed[to] ? RIVER.MOUTH_SEA : RIVER.MOUTH_LAKE | RIVER.LAKE_IN | (g.lakeKind[lakeId[to]] === 0 ? 0 : RIVER.LAKE_TERMINAL);
-    gb.node(posX(to), posY(to), toLevel, toLevel - d, Q, area[from], w, d, 1, endFlags);
+    gb.node(posX(to), posY(to), toLevel, toLevel - d, Q, area[from], w, d, 1, endFlags, posW(to));
     if (Q > outletQ[l]) {
       outletQ[l] = Q;
       outletNode[l] = first;

@@ -11,7 +11,7 @@
  * Index layout: cell i = f·n² + y·n + x, face-major, row-major within a face, row 0 = the face's
  * north (flat: the map's north edge, y grows south).
  */
-import { cubeGrid } from './cube';
+import { cubeGrid, type CubeGrid } from './cube';
 
 export type WorldShape = 'flat' | 'sphere';
 export type MapEdge = 'ocean' | 'continent';
@@ -289,9 +289,14 @@ export function mapEdgeDistance(g: Grid, i: number): number {
  * Visits the (2r + 1)² window of cells around c with their offsets in cells (dx east, dy south),
  * rows north to south, west to east; cells off the map are skipped. `visit` may return false to
  * stop early. For per-feature stamps and small-window statistics, not for per-cell hot loops.
+ * On the sphere the window continues across seams in the extended chart of c's face (each cell
+ * once, breadth-first; offsets of cells on other faces are not integers; see CubeGrid.window).
  */
 export function forWindow(g: Grid, c: number, r: number, visit: (j: number, dx: number, dy: number) => boolean | void): void {
-  if (g.shape !== 'flat') throw new Error('forWindow: only flat grids exist yet');
+  if (g.shape !== 'flat') {
+    (g as CubeGrid).window(c, r, visit);
+    return;
+  }
   const n = g.n;
   const x = c % n;
   const y = (c - x) / n;
@@ -306,11 +311,24 @@ export function forWindow(g: Grid, c: number, r: number, visit: (j: number, dx: 
   }
 }
 
+/** Raster D8 slots that are diagonal (NW NE SW SE). */
+const DIAGONAL_SLOT = [1, 0, 1, 0, 0, 1, 0, 1] as const;
+
 /** Whether neighbouring cells i and j are diagonal neighbours (false for i === j). */
 export function isDiagonalStep(g: Grid, i: number, j: number): boolean {
-  if (g.shape !== 'flat') throw new Error('isDiagonalStep: only flat grids exist yet');
+  if (g.shape !== 'flat') {
+    const k = (g as CubeGrid).slotOf(i, j);
+    return k >= 0 && DIAGONAL_SLOT[k] === 1;
+  }
   const d = Math.abs(j - i);
   return d !== 0 && d !== 1 && d !== g.n;
+}
+
+/** Distance between neighbouring cells i and j, metres (flat: cellM or cellM·√2, as the stages always used). */
+export function stepLength(g: Grid, i: number, j: number): number {
+  if (g.uniform) return isDiagonalStep(g, i, j) ? g.cellM * Math.SQRT2 : g.cellM;
+  const k = (g as CubeGrid).slotOf(i, j);
+  return k >= 0 ? g.dist(i, k) : g.distance(i, j);
 }
 
 /** Face-local column of cell i. */
@@ -342,12 +360,30 @@ export function onFace(g: Grid, x: number, y: number): boolean {
 }
 
 /**
- * Cell at face-local column x, row y of face `face`, or −1 when (x, y) is off the face (flat: off
- * the map). For planar per-feature walks in cell coordinates (rays, meander room, spits).
+ * Cell at face-local column x, row y of face `face`, or −1 when (x, y) is off the map (flat). For
+ * planar per-feature walks in cell coordinates (rays, meander room, spits). On the sphere (x, y) may
+ * leave the face: the walk continues on the neighbouring faces through the extended chart of
+ * `face` (CubeGrid.chartCell), so rays and stamps cross seams; −1 only where that chart ends.
  */
 export function tryCellIndex(g: Grid, x: number, y: number, face = 0): number {
   const n = g.n;
+  if (g.shape !== 'flat') return (g as CubeGrid).chartCell(face, x, y);
   return x < 0 || y < 0 || x >= n || y >= n ? -1 : face * n * n + y * n + x;
+}
+
+/**
+ * Column and row of cell j in the chart of `face` (cells, centres at integers): on flat maps and on
+ * that face its plain x, y; on the sphere, for a cell of another face, its continuous position in
+ * the extended chart (NaN where the chart ends). Pairs with `tryCellIndex(g, x, y, face)`.
+ */
+export function chartXY(g: Grid, face: number, j: number, out: Float64Array): void {
+  if (g.shape !== 'flat') {
+    if (!(g as CubeGrid).chartXY(face, j, out)) out[0] = out[1] = NaN;
+    return;
+  }
+  const x = j % g.n;
+  out[0] = x;
+  out[1] = (j - x) / g.n;
 }
 
 /**

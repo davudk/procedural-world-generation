@@ -1,5 +1,6 @@
 import { Noise2 } from '../../shared/noise';
-import { areaFactor, cellOf, DiskSet, forDisk, Outline, poisson, settleFixed, snapshot, stampRadial } from './profiles';
+import { areaFactor, cellOf, DiskSet, featureAt, forDisk, Outline, poisson, settleFixed, snapshot, stampRadial } from './profiles';
+import { spherePos } from './sphere';
 import type { LandformCtx } from './types';
 
 /** Simple-to-complex transition diameter on Earth (km; research 01 §6.1: ≈ 2–4 km, 3 km in Impact Earth). */
@@ -26,20 +27,30 @@ const SPACING_KM = 150;
 export function applyCraters(c: LandformCtx): void {
   const snap = snapshot(c);
   const { n, h } = c;
-  const N = n * n;
+  const N = c.grid.cells;
   const W = n * c.cellKm;
+  const flat = c.grid.shape === 'flat';
   const rng = c.rng('fresh-craters');
   const noise = new Noise2(rng.nextU32());
   const mask = new Uint8Array(N);
 
   let support = 0;
-  for (let i = 0; i < N; i++) if (h[i] > -200 && c.ice[i] < 0.3) support++;
-  const supportKm2 = support * c.cellKm * c.cellKm;
+  let supportM2 = 0;
+  for (let i = 0; i < N; i++) {
+    if (h[i] > -200 && c.ice[i] < 0.3) {
+      support++;
+      if (!flat) supportM2 += c.grid.area(i);
+    }
+  }
+  const supportKm2 = flat ? support * c.cellKm * c.cellKm : supportM2 / 1e6;
   const lambda = RATE * (supportKm2 / 1e5) * c.num('impactHistory') * (0.4 + 1.2 * c.num('geologicAge')) * c.num('density_relief');
   const cap = Math.round((3 + 2 * c.num('impactHistory')) * Math.max(1, areaFactor(c)));
   const want = Math.min(cap, poisson(rng, lambda));
   const [d0, d1] = c.range('craterDiameter');
-  const disk = new DiskSet(SPACING_KM);
+  const disk = new DiskSet(SPACING_KM, c.grid);
+  // Sphere: candidate sites uniform on the whole surface (no map margin).
+  const sp = flat ? null : spherePos(c.grid);
+  const dir = new Float64Array(3);
   let placed = 0;
   let complex = 0;
 
@@ -50,8 +61,20 @@ export function applyCraters(c: LandformCtx): void {
     const R = D / 2;
     let site: { x: number; y: number } | null = null;
     for (let t = 0; t < 300 && !site; t++) {
-      const x = rng.range(0.05, 0.95) * W;
-      const y = rng.range(0.05, 0.95) * W;
+      let x: number;
+      let y: number;
+      if (sp) {
+        const z = rng.range(-1, 1);
+        const lon = rng.range(0, Math.PI * 2);
+        const rho = Math.sqrt(Math.max(0, 1 - z * z));
+        dir[0] = rho * Math.cos(lon);
+        dir[1] = rho * Math.sin(lon);
+        dir[2] = z;
+        ({ x, y } = sp.enc(dir));
+      } else {
+        x = rng.range(0.05, 0.95) * W;
+        y = rng.range(0.05, 0.95) * W;
+      }
       const cell = cellOf(c, x, y);
       if (h[cell] > -200 && c.ice[cell] < 0.3 && disk.free(x, y, SPACING_KM)) site = { x, y };
     }
@@ -115,7 +138,7 @@ export function applyCraters(c: LandformCtx): void {
       if (v > mask[cell]) mask[cell] = v;
     });
     c.features.push({
-      type: 'crater', x: site.x * 1000, y: site.y * 1000, size: D * 1000,
+      type: 'crater', ...featureAt(c, site.x, site.y), size: D * 1000,
       data: { depth, diameter: D * 1000, rim, complex: isComplex ? 1 : 0, age, sea: atSea ? 1 : 0 },
     });
     placed++;

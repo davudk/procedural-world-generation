@@ -10,7 +10,7 @@ import type { StageDef } from '../pipeline';
 import type { BaseExtra } from './base';
 import type { ClimateExtra } from './climate';
 import type { GlacialExtra } from './glacial';
-import type { PlatesExtra } from './plates';
+import { shapeHeader, type PlatesExtra } from './plates';
 
 /** Terrain after the landform passes; hydrology and biomes read this. */
 export interface LandformsExtra extends GlacialExtra {
@@ -23,6 +23,9 @@ export interface LandformsExtra extends GlacialExtra {
  * the water balance): fresh volcanoes and calderas, fresh impact craters, the arid set (mesas, buttes,
  * ergs), karst, then the coastal set (barrier islands, lagoons, spits, cliffs, reefs, atolls).
  * Each pass edits the macro heights in place and keeps the ocean mask (`fixed`) consistent.
+ * On the sphere the same passes run on the cube grid: positions are chart km (landforms/sphere.ts),
+ * stamps use geodesic charts, there is no map edge (fixed is exactly the sea), and features carry a
+ * face with face-local metres.
  */
 export const landformsStage: StageDef = {
   id: 'landforms',
@@ -66,8 +69,10 @@ export const landformsStage: StageDef = {
 
     const worldKm = ctx.num('worldSize');
     const layers: Layer[] = [];
+    // Sphere: 6-face layers (faces, radiusKm, worldKm = the face width).
+    const sh = shapeHeader(c.grid);
     for (const [id, m] of c.masks) {
-      layers.push({ id, label: `Landform mask: ${id}`, stage: 'landforms', kind: 'scalar', w: g.n, h: g.n, worldKm, unit: '', min: 0, max: 255, data: m });
+      layers.push({ id, label: `Landform mask: ${id}`, stage: 'landforms', kind: 'scalar', w: g.n, h: g.n, worldKm, ...sh, unit: '', min: 0, max: 255, data: m });
     }
     const counts: Record<string, number> = {};
     for (const f of c.features) counts[`n_${f.type}`] = (counts[`n_${f.type}`] ?? 0) + 1;

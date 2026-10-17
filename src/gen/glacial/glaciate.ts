@@ -1,5 +1,5 @@
 import type { Rng } from '../../shared/rng';
-import { cellIndex, cellX, cellY, isDiagonalStep, tryCellIndex, type Grid } from '../grid/grid';
+import { cellFace, cellIndex, cellX, cellY, chartXY, isDiagonalStep, stepLength, tryCellIndex, type Grid } from '../grid/grid';
 import { boxBlur, components, smoothstep } from '../grid/ops';
 import { LAND_MIN } from '../lem/streamPower';
 import { CorridorSources, corridorCarve, softenCarve } from './corridor';
@@ -143,7 +143,7 @@ export function glaciate(inp: GlaciateInput, opt: GlaciateOptions, rng: Rng): Gl
     if (dzPast[i] < 0 || dzPast[i] > CIRQUE_BAND) continue;
     // Only on steep ground: plateau ice caps have no cirques.
     const r = rcv[i];
-    const run = isDiagonalStep(g, i, r) ? cellM * Math.SQRT2 : cellM;
+    const run = g.uniform ? (isDiagonalStep(g, i, r) ? cellM * Math.SQRT2 : cellM) : stepLength(g, i, r);
     if ((hIn[i] - hIn[r]) / run < CIRQUE_SLOPE) continue;
     const R = rng.range(1000, 2500);
     const depth = rng.range(80, 220);
@@ -248,7 +248,7 @@ function troughSources(past: IceFlux, rcv: Int32Array, fixed: Uint8Array, h: Flo
     const q = past.q[i];
     if (fixed[i] || q < Q_TROUGH) continue;
     const D = Math.min(troughDepth(q), 50 + 0.6 * Math.max(0, past.top[i] - h[i]));
-    idx[i] = src.add(cellX(g, i), cellY(g, i), Math.max(1, h[i] - D), h[i] + 0.6 * D, Math.max(MIN_HALF_CELLS, glacierWidth(q) / 2 / cellM), 1.5 * D);
+    idx[i] = src.addCell(g, i, Math.max(1, h[i] - D), h[i] + 0.6 * D, Math.max(MIN_HALF_CELLS, glacierWidth(q) / 2 / cellM), 1.5 * D);
   }
   const main = new Int32Array(src.size).fill(-1);
   const cells = new Int32Array(src.size);
@@ -262,9 +262,11 @@ function troughSources(past: IceFlux, rcv: Int32Array, fixed: Uint8Array, h: Flo
       if (main[r] < 0 || past.q[i] > past.q[cells[main[r]]]) main[r] = s;
     }
   }
+  const sphere = g.shape !== 'flat';
   for (let it = 0; it < 2; it++) {
     const x = src.x.slice();
     const y = src.y.slice();
+    const z = src.z.slice();
     for (let s = 0; s < src.size; s++) {
       const d = src.next[s];
       const down = d >= 0 && main[d] === s ? d : s;
@@ -272,10 +274,19 @@ function troughSources(past: IceFlux, rcv: Int32Array, fixed: Uint8Array, h: Flo
       if (down === s && up === s) continue;
       x[s] = 0.25 * src.x[down] + 0.5 * src.x[s] + 0.25 * src.x[up];
       y[s] = 0.25 * src.y[down] + 0.5 * src.y[s] + 0.25 * src.y[up];
+      if (sphere) {
+        // Unit vectors: smooth in 3D and project back onto the sphere.
+        z[s] = 0.25 * src.z[down] + 0.5 * src.z[s] + 0.25 * src.z[up];
+        const l = Math.hypot(x[s], y[s], z[s]);
+        x[s] /= l;
+        y[s] /= l;
+        z[s] /= l;
+      }
     }
     for (let s = 0; s < src.size; s++) {
       src.x[s] = x[s];
       src.y[s] = y[s];
+      if (sphere) src.z[s] = z[s];
     }
   }
   return src;
@@ -305,11 +316,14 @@ class Stamper {
     const inv = rc > 0 ? 1 / rc : 0;
     const span = edge - floor;
     // Plain loops rather than forWindow: tongues stamp once per glacier cell.
+    // On the sphere the window continues across seams in c's face chart (cells there may be hit
+    // twice, which the min-stamp absorbs).
     const cx = cellX(g, c);
     const cy = cellY(g, c);
+    const cf = cellFace(g, c);
     for (let dy = -r; dy <= r; dy++) {
       for (let dx = -r; dx <= r; dx++) {
-        const i = tryCellIndex(g, cx + dx, cy + dy);
+        const i = tryCellIndex(g, cx + dx, cy + dy, cf);
         if (i < 0) continue;
         const d2 = dx * dx + dy * dy;
         if (d2 > rc * rc) continue;
@@ -339,7 +353,8 @@ function fjordSources(inp: GlaciateInput, past: IceFlux, rng: Rng): { sources: C
     // A real coast: the receiver is sea (h ≤ 0), not an open continental map edge.
     if (!fixed[i] && r !== i && fixed[r] && hIn[r] <= 0 && past.q[i] >= Q_FJORD && past.top[i] >= FJORD_RELIEF) mouths.push(i);
   }
-  let budget = FJORD_BUDGET_KM * 1000 * ((n * cellM) / 1_024_000);
+  // Per 1024 km of world width; a sphere uses its equal-area size √A.
+  let budget = FJORD_BUDGET_KM * 1000 * ((g.shape === 'flat' ? n * cellM : Math.sqrt(g.totalArea)) / 1_024_000);
   mouths.sort((a, b) => past.q[b] - past.q[a] || a - b);
   const { start, list } = donorsCsr(rcv);
   const taken: number[] = [];
@@ -351,7 +366,8 @@ function fjordSources(inp: GlaciateInput, past: IceFlux, rng: Rng): { sources: C
     const my = cellY(g, m);
     let near = false;
     for (const t of taken) {
-      if (Math.hypot(cellX(g, t) - mx, cellY(g, t) - my) * cellM < FJORD_SPACING) {
+      const d = g.shape === 'flat' ? Math.hypot(cellX(g, t) - mx, cellY(g, t) - my) * cellM : g.distance(t, m);
+      if (d < FJORD_SPACING) {
         near = true;
         break;
       }
@@ -375,9 +391,11 @@ function fjordSources(inp: GlaciateInput, past: IceFlux, rng: Rng): { sources: C
         if (!fixed[d] && (best < 0 || past.q[d] > past.q[best])) best = d;
       }
       if (best < 0 || past.q[best] < 0.3 * Q_FJORD || hIn[best] > FJORD_HEAD_MAX) break;
-      const ddx = cellX(g, best) - cellX(g, c);
-      const ddy = cellY(g, best) - cellY(g, c);
-      s += Math.hypot(ddx, ddy) * cellM;
+      if (g.shape === 'flat') {
+        const ddx = cellX(g, best) - cellX(g, c);
+        const ddy = cellY(g, best) - cellY(g, c);
+        s += Math.hypot(ddx, ddy) * cellM;
+      } else s += stepLength(g, best, c);
       path.push(best);
       dist.push(s);
       c = best;
@@ -387,8 +405,20 @@ function fjordSources(inp: GlaciateInput, past: IceFlux, rng: Rng): { sources: C
     const L = Math.max(s, 2 * cellM);
     // Centreline vertices: the sea cell beyond the mouth, then the trunk, positions smoothed 1-2-1.
     const line = [rcv[m], ...path];
-    const px = smoothLine(line.map((c) => cellX(g, c)));
-    const py = smoothLine(line.map((c) => cellY(g, c)));
+    // Flat: cell coordinates; sphere: unit vectors, smoothed in 3D and renormalised.
+    const sphere = g.shape !== 'flat';
+    const pos = sphere ? line.map((c) => { const v = new Float64Array(3); g.position(c, v); return v; }) : null;
+    const px = smoothLine(pos ? pos.map((v) => v[0]) : line.map((c) => cellX(g, c)));
+    const py = smoothLine(pos ? pos.map((v) => v[1]) : line.map((c) => cellY(g, c)));
+    const pz = pos ? smoothLine(pos.map((v) => v[2])) : null;
+    if (pz) {
+      for (let k = 0; k < px.length; k++) {
+        const l = Math.hypot(px[k], py[k], pz[k]);
+        px[k] /= l;
+        py[k] /= l;
+        pz[k] /= l;
+      }
+    }
     let prev = -1;
     let prevRc = 1;
     for (let k = 0; k < line.length; k++) {
@@ -405,17 +435,33 @@ function fjordSources(inp: GlaciateInput, past: IceFlux, rng: Rng): { sources: C
       const cut = hp - floor + 300;
       const edge = hp + 0.5 * depthMax;
       const rc = Math.max(1, half / cellM);
-      const v = sources.add(px[k], py[k], floor, edge, rc, cut);
+      const v = pz ? sources.addDir(px[k], py[k], pz[k], floor, edge, rc, cut) : sources.add(px[k], py[k], floor, edge, rc, cut);
       if (prev >= 0) sources.next[v] = prev;
       // On narrow (≤ 2-cell) fjords a diagonal step also gets the shared side cell as a point source,
       // so the fjord stays 4-connected.
       if (k > 0 && rc < 2) {
         const a = line[k - 1];
         if (isDiagonalStep(g, a, p)) {
-          const s1 = cellIndex(g, cellX(g, p), cellY(g, a));
-          const s2 = cellIndex(g, cellX(g, a), cellY(g, p));
-          const side = hIn[s1] <= hIn[s2] ? s1 : s2;
-          sources.add(cellX(g, side), cellY(g, side), floor, edge, Math.min(rc, prevRc), cut);
+          let s1: number;
+          let s2: number;
+          if (!sphere) {
+            s1 = cellIndex(g, cellX(g, p), cellY(g, a));
+            s2 = cellIndex(g, cellX(g, a), cellY(g, p));
+          } else {
+            // The two cells sharing edges with both, in p's face chart (a may be across a seam).
+            const fp = cellFace(g, p);
+            const q = new Float64Array(2);
+            chartXY(g, fp, a, q);
+            s1 = tryCellIndex(g, cellX(g, p), Math.round(q[1]), fp);
+            s2 = tryCellIndex(g, Math.round(q[0]), cellY(g, p), fp);
+            if (s1 < 0) s1 = s2;
+            if (s2 < 0) s2 = s1;
+          }
+          if (s1 >= 0) {
+            const side = hIn[s1] <= hIn[s2] ? s1 : s2;
+            if (sphere) sources.addCell(g, side, floor, edge, Math.min(rc, prevRc), cut);
+            else sources.add(cellX(g, side), cellY(g, side), floor, edge, Math.min(rc, prevRc), cut);
+          }
         }
       }
       prev = v;

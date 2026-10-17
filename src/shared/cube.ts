@@ -83,3 +83,31 @@ export function latLonDir(latDeg: number, lonDeg: number, out: Float64Array): vo
   out[1] = Math.cos(la) * Math.sin(lo);
   out[2] = Math.sin(la);
 }
+
+/**
+ * Sphere positions in generator outputs (river nodes, lakes, landform features, later landmarks) are
+ * (face, u, v): the face index plus face-local metres along its columns (u) and rows (v) in the
+ * equal-angle convention of the grid's `SurfacePoint`, u = (a + π/4)·R, so cell (x, y) of an n×n face
+ * has its centre at u = (x + ½)·cellM, v = (y + ½)·cellM with cellM = (π/2)·R/n. On flat maps the
+ * same fields are map metres from the north-west corner and the face is 0 (absent).
+ */
+export function surfaceDir(face: number, u: number, v: number, radiusM: number, out: Float64Array | Float32Array, o = 0): void {
+  faceDir(face, u / radiusM - QUARTER, v / radiusM - QUARTER, out, o);
+}
+
+/** (face, u, v) of a direction (any length) on a sphere of `radiusM`: out = [face, u, v]. */
+export function dirSurface(x: number, y: number, z: number, radiusM: number, out: Float64Array): void {
+  const face = dirFace(x, y, z);
+  const f = face * 3;
+  const dc = x * FACE_C[f] + y * FACE_C[f + 1] + z * FACE_C[f + 2];
+  out[0] = face;
+  out[1] = (Math.atan((x * FACE_E[f] + y * FACE_E[f + 1] + z * FACE_E[f + 2]) / dc) + QUARTER) * radiusM;
+  out[2] = (Math.atan((x * FACE_S[f] + y * FACE_S[f + 1] + z * FACE_S[f + 2]) / dc) + QUARTER) * radiusM;
+}
+
+/** Latitude and longitude (degrees) of a surface position: out = [lat, lon]. */
+export function surfaceLatLon(face: number, u: number, v: number, radiusM: number, out: Float64Array): void {
+  surfaceDir(face, u, v, radiusM, scratch);
+  out[0] = (Math.asin(Math.max(-1, Math.min(1, scratch[2]))) * 180) / Math.PI;
+  out[1] = (Math.atan2(scratch[1], scratch[0]) * 180) / Math.PI;
+}

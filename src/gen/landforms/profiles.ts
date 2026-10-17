@@ -1,13 +1,21 @@
 import { Noise2 } from '../../shared/noise';
+import { dirToCell, faceDir } from '../../shared/cube';
+import { Noise3 } from '../../shared/noise3';
 import type { Rng } from '../../shared/rng';
-import { cellIndex, cellX, cellY, coarser } from '../grid/grid';
+import { coarseFbm } from '../climate/fields';
+import { angle, asCube, localFrame } from '../grid/cube';
+import { cellFace, cellIndex, cellX, cellY, coarser, type Grid } from '../grid/grid';
 import { components } from '../grid/ops';
+import { downsample, upsample } from '../grid/smooth';
+import { SphereCentroids, SphereDisk, spherePos } from './sphere';
 import type { LandformCtx } from './types';
 
 /**
  * Shared helpers for the M6 landform passes: physical-unit counts (Poisson), Poisson-disk spacing,
  * radial stamps with sub-cell supersampling, coarse noise fields, and the `fixed` bookkeeping that
- * every pass runs after editing heights. Positions are in km from the north-west corner.
+ * every pass runs after editing heights. Positions are in km from the north-west corner on flat maps
+ * and in the "chart km" scheme of `sphere.ts` on the sphere (decoded by every helper here, so the
+ * passes treat them as opaque (x, y) pairs plus offsets in km east and south).
  */
 
 /** Poisson draw (Knuth for small λ, rounded normal approximation above 30). */
@@ -44,14 +52,20 @@ export function shuffle<T>(rng: Rng, a: T[]): void {
 export class DiskSet {
   readonly pts: { x: number; y: number }[] = [];
   private readonly buckets = new Map<number, number[]>();
+  /** Sphere: great-circle spacing on decoded positions. */
+  private readonly sphere: SphereDisk | null;
 
-  constructor(private readonly bucketKm: number) {}
+  /** `grid` (optional): on the sphere, positions are chart km and spacing is along great circles. */
+  constructor(private readonly bucketKm: number, grid?: Grid) {
+    this.sphere = grid && grid.shape !== 'flat' ? new SphereDisk(spherePos(grid), bucketKm) : null;
+  }
 
   private key(bx: number, by: number): number {
     return (by + 1024) * 4096 + (bx + 1024);
   }
 
   free(x: number, y: number, r: number): boolean {
+    if (this.sphere) return this.sphere.free(x, y, r);
     const b = this.bucketKm;
     const span = Math.ceil(r / b);
     const bx = Math.floor(x / b);
@@ -71,6 +85,11 @@ export class DiskSet {
   }
 
   add(x: number, y: number): void {
+    if (this.sphere) {
+      this.pts.push({ x, y });
+      this.sphere.add(x, y);
+      return;
+    }
     const k = this.key(Math.floor(x / this.bucketKm), Math.floor(y / this.bucketKm));
     const list = this.buckets.get(k);
     this.pts.push({ x, y });
@@ -81,6 +100,7 @@ export class DiskSet {
 
 /** Macro cell containing (x, y) km, clamped. */
 export function cellOf(c: LandformCtx, x: number, y: number): number {
+  if (c.grid.shape !== 'flat') return spherePos(c.grid).cell(x, y, c.n);
   const n = c.n;
   const cx = Math.min(n - 1, Math.max(0, Math.floor(x / c.cellKm)));
   const cy = Math.min(n - 1, Math.max(0, Math.floor(y / c.cellKm)));
@@ -89,12 +109,14 @@ export function cellOf(c: LandformCtx, x: number, y: number): number {
 
 /** Centre of macro cell `i` in km. */
 export function centreOf(c: LandformCtx, i: number): { x: number; y: number } {
+  if (c.grid.shape !== 'flat') return spherePos(c.grid).centre(c.grid, i);
   return { x: (cellX(c.grid, i) + 0.5) * c.cellKm, y: (cellY(c.grid, i) + 0.5) * c.cellKm };
 }
 
 /** Plates-grid cell containing (x, y) km. */
 export function plateCellAt(c: LandformCtx, x: number, y: number): number {
   const P = c.plates;
+  if (c.grid.shape !== 'flat') return spherePos(c.grid).cell(x, y, P.n);
   const px = Math.min(P.n - 1, Math.max(0, Math.floor(x / P.cellKm)));
   const py = Math.min(P.n - 1, Math.max(0, Math.floor(y / P.cellKm)));
   return cellIndex(c.platesGrid, px, py);
@@ -105,8 +127,39 @@ export function aridityAt(c: LandformCtx, i: number): number {
   return c.climate.precip[i] / Math.max(1, c.climate.pet[i]);
 }
 
+/** Great-circle (sphere) or straight (flat) distance in km between two positions. */
+export function distKm(c: LandformCtx, x0: number, y0: number, x1: number, y1: number): number {
+  if (c.grid.shape !== 'flat') return spherePos(c.grid).dist(x0, y0, x1, y1);
+  return Math.hypot(x1 - x0, y1 - y0);
+}
+
+/** The position dx km east and dy km south of (x, y) (flat: x + dx, y + dy). */
+export function offsetKm(c: LandformCtx, x: number, y: number, dx: number, dy: number): { x: number; y: number } {
+  if (c.grid.shape !== 'flat') return spherePos(c.grid).offset(x, y, dx, dy);
+  return { x: x + dx, y: y + dy };
+}
+
+/** Feature position (metres) of (x, y) km: map metres on flat maps, face and face-local metres on the sphere. */
+export function featureAt(c: LandformCtx, x: number, y: number): { x: number; y: number; face?: number } {
+  if (c.grid.shape !== 'flat') return spherePos(c.grid).feature(x, y);
+  return { x: x * 1000, y: y * 1000 };
+}
+
 /** Mean height on a circle of radius r km around (x, y). */
 export function ringMean(c: LandformCtx, x: number, y: number, r: number, samples = 24): number {
+  if (c.grid.shape !== 'flat') {
+    const sp = spherePos(c.grid);
+    const p = new Float64Array(3);
+    const q = new Float64Array(3);
+    sp.dir(x, y, p);
+    let s = 0;
+    for (let k = 0; k < samples; k++) {
+      const a = (k / samples) * Math.PI * 2;
+      sp.move(p, r * Math.cos(a), r * Math.sin(a), q);
+      s += c.h[dirToCell(q[0], q[1], q[2], c.n)];
+    }
+    return s / samples;
+  }
   let s = 0;
   for (let k = 0; k < samples; k++) {
     const a = (k / samples) * Math.PI * 2;
@@ -115,8 +168,34 @@ export function ringMean(c: LandformCtx, x: number, y: number, r: number, sample
   return s / samples;
 }
 
+/**
+ * Cells within r km of (x, y) on the sphere (each once), with their east/south offsets (km) in the
+ * azimuthal-equidistant chart about that point. Collected before the caller runs, so callbacks may
+ * use other chart helpers.
+ */
+function sphereDisk(c: LandformCtx, x: number, y: number, r: number): { cells: number[]; dx: number[]; dy: number[] } {
+  const sp = spherePos(c.grid);
+  const up = new Float64Array(3);
+  sp.dir(x, y, up);
+  const cells: number[] = [];
+  const dx: number[] = [];
+  const dy: number[] = [];
+  asCube(c.grid).chartDir(up, r * 1000, (i, e, nn) => {
+    cells.push(i);
+    dx.push(e / 1000);
+    dy.push(-nn / 1000);
+  });
+  return { cells, dx, dy };
+}
+
 /** Index of the highest cell within r km of (x, y). */
 export function localMax(c: LandformCtx, x: number, y: number, r: number): number {
+  if (c.grid.shape !== 'flat') {
+    const d = sphereDisk(c, x, y, r);
+    let best = cellOf(c, x, y);
+    for (const q of d.cells) if (c.h[q] > c.h[best]) best = q;
+    return best;
+  }
   const n = c.n;
   const ck = c.cellKm;
   const x0 = Math.max(0, Math.floor((x - r) / ck));
@@ -137,19 +216,41 @@ export function localMax(c: LandformCtx, x: number, y: number, r: number): numbe
 /** h[i] minus the mean of its 8 neighbours (negative in valleys/channels). Border cells: 0. */
 export function concavity(c: LandformCtx, i: number): number {
   const { border, off8: o } = c.grid;
-  if (border[i]) return 0;
+  if (border[i]) {
+    if (c.grid.shape === 'flat') return 0;
+    // Sphere: seam cells read their neighbours from the seam table (7 at a cube corner).
+    let s = 0;
+    let k8 = 0;
+    for (let k = 0; k < 8; k++) {
+      const j = c.grid.nbr(i, k);
+      if (j < 0) continue;
+      s += c.h[j];
+      k8++;
+    }
+    return c.h[i] - s / k8;
+  }
   const h = c.h;
   // Raster offsets, summed W E N S NW NE SW SE.
   const m = (h[i + o[3]] + h[i + o[4]] + h[i + o[1]] + h[i + o[6]] + h[i + o[0]] + h[i + o[2]] + h[i + o[5]] + h[i + o[7]]) / 8;
   return h[i] - m;
 }
 
-/** True if cell i drains somewhere: it is base level, on the border, or has a strictly lower 8-neighbour. */
+/**
+ * True if cell i drains somewhere: it is base level, on the map border (flat: an open edge), or has a
+ * strictly lower 8-neighbour (on the sphere seam cells check theirs across the seam).
+ */
 export function drains(c: LandformCtx, i: number): boolean {
   if (c.fixed[i]) return true;
   const { border, off8Axial } = c.grid;
-  if (border[i]) return true;
   const z = c.h[i];
+  if (border[i]) {
+    if (c.grid.shape === 'flat') return true;
+    for (let k = 0; k < 8; k++) {
+      const j = c.grid.nbr(i, k);
+      if (j >= 0 && c.h[j] < z) return true;
+    }
+    return false;
+  }
   for (let k = 0; k < 8; k++) if (c.h[i + off8Axial[k]] < z) return true;
   return false;
 }
@@ -166,6 +267,7 @@ export function stampRadial(
   c: LandformCtx, x: number, y: number, reachKm: number, op: StampOp,
   f: (r: number, dx: number, dy: number) => number,
 ): number {
+  if (c.grid.shape !== 'flat') return stampRadialSphere(c, x, y, reachKm, op, f);
   const n = c.n;
   const ck = c.cellKm;
   const h = c.h;
@@ -215,8 +317,86 @@ export function stampRadial(
   return touched;
 }
 
-/** Visits every cell whose centre lies within `r` km of (x, y). */
+/**
+ * stampRadial on the sphere: the cells near the centre come from a geodesic chart (each once, so
+ * 'add' stamps cannot double up across seams), and every sub-sample is placed in its own cell's face
+ * chart and measured in the azimuthal-equidistant east/south frame about the centre, so the profile
+ * is continuous across seams and cube corners.
+ */
+function stampRadialSphere(
+  c: LandformCtx, x: number, y: number, reachKm: number, op: StampOp,
+  f: (r: number, dx: number, dy: number) => number,
+): number {
+  const g = asCube(c.grid);
+  const sp = spherePos(g);
+  const ck = c.cellKm;
+  const h = c.h;
+  const ss = Math.min(4, Math.max(1, Math.ceil((3 * ck) / Math.max(1e-6, reachKm))));
+  const up = new Float64Array(3);
+  sp.dir(x, y, up);
+  const east = new Float64Array(3);
+  const north = new Float64Array(3);
+  localFrame(up, east, north);
+  const cells: number[] = [];
+  // Every cell that a sub-sample within reach can fall in (cells are at most cellKm across).
+  g.chartDir(up, (reachKm + ck) * 1000, (i) => cells.push(i));
+  const q = new Float64Array(3);
+  const Rk = sp.Rk;
+  const d = g.delta;
+  const Q = Math.PI / 4;
+  let touched = 0;
+  for (const cell of cells) {
+    const face = cellFace(g, cell);
+    const cx = cellX(g, cell);
+    const cy = cellY(g, cell);
+    let sum = 0;
+    let cnt = 0;
+    for (let sy = 0; sy < ss; sy++) {
+      const b = (cy + (sy + 0.5) / ss) * d - Q;
+      for (let sx = 0; sx < ss; sx++) {
+        faceDir(face, (cx + (sx + 0.5) / ss) * d - Q, b, q);
+        const th = angle(up, q);
+        const r = th * Rk;
+        if (r > reachKm) {
+          if (op !== 'add') { sum += h[cell]; cnt++; }
+          continue;
+        }
+        const pe = q[0] * east[0] + q[1] * east[1] + q[2] * east[2];
+        const pn = q[0] * north[0] + q[1] * north[1] + q[2] * north[2];
+        const len = Math.hypot(pe, pn);
+        const k = len > 0 ? r / len : 0;
+        const v = f(r, pe * k, -pn * k);
+        if (Number.isNaN(v)) {
+          if (op !== 'add') { sum += h[cell]; cnt++; }
+          continue;
+        }
+        if (op === 'add') sum += v;
+        else if (op === 'max') sum += Math.max(h[cell], v);
+        else sum += Math.min(h[cell], v);
+        cnt++;
+      }
+    }
+    if (op === 'add') {
+      if (sum === 0) continue;
+      h[cell] += sum / (ss * ss);
+    } else {
+      if (cnt === 0) continue;
+      const v = sum / cnt;
+      if (v === h[cell]) continue;
+      h[cell] = v;
+    }
+    touched++;
+  }
+  return touched;
+}
+
+/** Visits every cell whose centre lies within `r` km of (x, y) (offsets dx east, dy south, km). */
 export function forDisk(c: LandformCtx, x: number, y: number, r: number, cb: (cell: number, rKm: number, dx: number, dy: number) => void): void {
+  if (c.grid.shape !== 'flat') {
+    const d = sphereDisk(c, x, y, r);
+    for (let k = 0; k < d.cells.length; k++) cb(d.cells[k], Math.hypot(d.dx[k], d.dy[k]), d.dx[k], d.dy[k]);
+    return;
+  }
   const n = c.n;
   const ck = c.cellKm;
   const x0 = Math.max(0, Math.floor((x - r) / ck));
@@ -246,6 +426,15 @@ export interface NoiseLayer {
  * same field at every macro resolution.
  */
 export function coarseNoise(c: LandformCtx, seed: number, layers: readonly NoiseLayer[]): Float32Array {
+  if (c.grid.shape !== 'flat') {
+    // Sphere: 3D noise at the surface position (continuous across seams), on a coarse cube lattice.
+    const out = new Float32Array(c.grid.cells);
+    for (let k = 0; k < layers.length; k++) {
+      const f = coarseFbm(new Noise3((seed + k * 0x9e3779b1) >>> 0), c.grid, layers[k].km, layers[k].octaves, 0, 4);
+      for (let i = 0; i < out.length; i++) out[i] += layers[k].weight * f[i];
+    }
+    return out;
+  }
   const noises = layers.map((_, k) => new Noise2((seed + k * 0x9e3779b1) >>> 0));
   const W = c.n * c.cellKm;
   const step = Math.max(Math.min(...layers.map((l) => l.km)) / 4, W / 256);
@@ -297,6 +486,19 @@ export function strataField(c: LandformCtx): Float32Array {
   const b = c.base;
   const n = c.n;
   if (b.n === n) return b.strata;
+  if (c.grid.shape !== 'flat') {
+    // Sphere: the same nearest-cell rule on every face (the base and macro faces coincide).
+    const out = new Float32Array(c.grid.cells);
+    for (let face = 0; face < 6; face++) {
+      for (let y = 0; y < n; y++) {
+        const by = Math.min(b.n - 1, Math.floor(((y + 0.5) * b.n) / n));
+        for (let x = 0; x < n; x++) {
+          out[cellIndex(c.grid, x, y, face)] = b.strata[cellIndex(c.baseGrid, Math.min(b.n - 1, Math.floor(((x + 0.5) * b.n) / n)), by, face)];
+        }
+      }
+    }
+    return out;
+  }
   const out = new Float32Array(n * n);
   for (let y = 0; y < n; y++) {
     const by = Math.min(b.n - 1, Math.floor(((y + 0.5) * b.n) / n));
@@ -316,6 +518,8 @@ export function coarsen(c: LandformCtx, a: Float32Array): { g: Float32Array; m: 
   while (f > 1 && n % f !== 0) f--;
   if (f === 1) return { g: a.slice(), m: n, f };
   const m = n / f;
+  // Sphere: block means per face (coarser(grid, f) tiles every face).
+  if (c.grid.shape !== 'flat') return { g: downsample(a, c.grid, f), m, f };
   const cg = coarser(c.grid, f);
   const g = new Float32Array(m * m);
   const inv = 1 / (f * f);
@@ -331,6 +535,12 @@ export function coarsen(c: LandformCtx, a: Float32Array): { g: Float32Array; m: 
 /** Bilinear upsample of a coarse field produced by `coarsen` back to the macro grid. */
 export function refineCoarse(c: LandformCtx, g: Float32Array, m: number, f: number): Float32Array {
   if (f === 1) return g;
+  if (c.grid.shape !== 'flat') {
+    // Sphere: bilinear with taps across the seams (padded faces).
+    const out = new Float32Array(c.grid.cells);
+    upsample(g, coarser(c.grid, f), f, out);
+    return out;
+  }
   // Coarse cell centres sit at (k + 0.5)·f macro cells; shift so lattice point 0 is at the corner.
   const step = f * c.cellKm;
   const cg = coarser(c.grid, f);
@@ -373,7 +583,8 @@ export function snapshot(c: LandformCtx): Snapshot {
 
 /**
  * Restores the `fixed` invariant for cells whose height changed in a pass:
- * - open map-edge base cells (fixed with h > 0 before) stay fixed;
+ * - open map-edge base cells (fixed with h > 0 before) stay fixed (flat maps only: on the sphere
+ *   border cells are seams and fixed is exactly the sea);
  * - cells at or below 0 that were sea stay sea; sea raised above 0 becomes land (not fixed);
  * - land lowered to ≤ 0 becomes sea only if it connects (4-neighbours) to base level; enclosed
  *   ones are clamped to +0.5 m so they stay land (closed basins for hydrology, not new oceans).
@@ -385,9 +596,10 @@ export function settleFixed(c: LandformCtx, s: Snapshot): number {
   // 4-neighbour k (axial order) of cell i, −1 off the map.
   const nb4 = (i: number, k: number): number => (border[i] === 0 ? i + off4[k] : g.nbr(i, axialToRaster[k]));
   const pending: number[] = [];
+  const mapEdge = g.shape === 'flat';
   for (let i = 0; i < N; i++) {
     if (h[i] === s.h[i]) continue;
-    if (s.fixed[i] && border[i] && s.h[i] > 0) {
+    if (mapEdge && s.fixed[i] && border[i] && s.h[i] > 0) {
       fixed[i] = 1;
       continue;
     }
@@ -431,8 +643,23 @@ export function settleFixed(c: LandformCtx, s: Snapshot): number {
 }
 
 /** Connected regions (4-neighbour) of `mask`, with cell count and centroid (km) per region. */
-export function regions(c: LandformCtx, mask: Uint8Array): { label: Int32Array; size: number[]; cx: number[]; cy: number[] } {
+export function regions(c: LandformCtx, mask: Uint8Array): { label: Int32Array; size: number[]; cx: number[]; cy: number[]; km2?: number[] } {
   const { label, sizes } = components(mask, c.grid);
+  if (c.grid.shape !== 'flat') {
+    // Sphere: mean direction of the cells (a region may span seams) and true area.
+    const sc = new SphereCentroids(asCube(c.grid), sizes.length);
+    for (let i = 0; i < label.length; i++) if (label[i] >= 0) sc.add(label[i], i);
+    const cx: number[] = [];
+    const cy: number[] = [];
+    const km2: number[] = [];
+    for (let l = 0; l < sizes.length; l++) {
+      const p = sc.centre(l);
+      cx.push(p.x);
+      cy.push(p.y);
+      km2.push(sc.km2(l));
+    }
+    return { label, size: sizes, cx, cy, km2 };
+  }
   const cx = new Array<number>(sizes.length).fill(0);
   const cy = new Array<number>(sizes.length).fill(0);
   for (let y = 0; y < c.n; y++) {
@@ -456,14 +683,31 @@ export function bigRegions(c: LandformCtx, mask: Uint8Array, minKm2: number, cap
   const r = regions(c, mask);
   const a = c.cellKm * c.cellKm;
   const out: { x: number; y: number; km2: number; label: number }[] = [];
-  for (let l = 0; l < r.size.length; l++) if (r.size[l] * a >= minKm2) out.push({ x: r.cx[l], y: r.cy[l], km2: r.size[l] * a, label: l });
+  for (let l = 0; l < r.size.length; l++) {
+    const km2 = r.km2 ? r.km2[l] : r.size[l] * a;
+    if (km2 >= minKm2) out.push({ x: r.cx[l], y: r.cy[l], km2, label: l });
+  }
   out.sort((p, q) => q.km2 - p.km2 || p.label - q.label);
   return { list: out.slice(0, cap), label: r.label };
 }
 
-/** World area relative to the 1024 km default (counts' caps scale with it). */
+/** World area relative to the 1024 km default (counts' caps scale with it; the sphere's whole surface). */
 export function areaFactor(c: LandformCtx): number {
+  if (c.grid.shape !== 'flat') return c.grid.totalArea / 1e6 / (1024 * 1024);
   return ((c.n * c.cellKm) / 1024) ** 2;
+}
+
+/** Mean cell area (km²): the sphere's cells average 0.85·cellKm² (flat: exactly cellKm²; flat code keeps cellKm·cellKm). */
+export function meanCellKm2(c: LandformCtx): number {
+  return c.grid.totalArea / c.grid.cells / 1e6;
+}
+
+/**
+ * Multiplier for the absolute per-world caps of rare coastal features (rias, stacks, spits, tombolos,
+ * atolls): 1 on flat maps (unchanged), the surface area in 1024² km maps on the sphere.
+ */
+export function capScale(c: LandformCtx): number {
+  return c.grid.shape === 'flat' ? 1 : Math.max(1, areaFactor(c));
 }
 
 /** Cubic smoothstep. */

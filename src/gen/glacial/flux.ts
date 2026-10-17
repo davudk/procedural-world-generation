@@ -1,5 +1,5 @@
 import { elaTemperature, LAPSE } from '../climate/tables';
-import { isDiagonalStep, type Grid } from '../grid/grid';
+import { isDiagonalStep, stepLength, type Grid } from '../grid/grid';
 
 /**
  * Glacier mass balance and ice flux along the fluvial drainage (research 01 §5, research 03 §1.5).
@@ -93,10 +93,10 @@ export function iceFlux(
     let qo: number;
     if (d > 0) {
       const pf = Math.min(2, Math.max(0.2, precip[i] / 1000));
-      qo = qin + Math.min(d, DZ_CAP) * cellA * pf;
+      qo = qin + Math.min(d, DZ_CAP) * (g.uniform ? cellA : g.area(i)) * pf;
     } else if (qin > 0) {
       const r = rcv[i];
-      const ds = isDiagonalStep(g, i, r) ? cellM * Math.SQRT2 : cellM;
+      const ds = g.uniform ? (isDiagonalStep(g, i, r) ? cellM * Math.SQRT2 : cellM) : stepLength(g, i, r);
       qo = Math.max(0, qin + ABLATION * d * glacierWidth(qin) * ds);
     } else {
       qo = 0;

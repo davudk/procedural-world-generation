@@ -53,11 +53,18 @@ export const RIVER = {
  * y from the NORTH edge (down), like the rasters. Nodes are stored reach by reach: reach r is
  * nodes [reachStart[r], reachStart[r] + reachLen[r]) from upstream to downstream; its last node's
  * `down` is a node of reach `reachDown[r]` (or −1 at a mouth / sink).
+ *
+ * Spherical worlds (research 10 §5.12) add `face`: node i lies on cube face face[i], and x/y are
+ * face-local metres (u, v) in the grid's equal-angle SurfacePoint convention (`surfaceDir` in
+ * shared/cube.ts turns them into a unit vector; cell (cx, cy) has its centre at ((cx + ½)·cellM,
+ * (cy + ½)·cellM)). Consecutive nodes may lie on different faces; they are always close in 3D.
  */
 export interface RiverGraph {
   n: number;
   x: Float32Array;
   y: Float32Array;
+  /** Spheres only: cube face of each node (x, y are then face-local metres). */
+  face?: Uint8Array;
   /** Water surface and bed elevation (m); non-increasing downstream. */
   zWater: Float32Array;
   zBed: Float32Array;
@@ -86,9 +93,11 @@ export interface LakeInfo {
   level: number;
   areaKm2: number;
   maxDepth: number;
-  /** Centroid, map metres. */
+  /** Centroid, map metres (spheres: face-local metres on `face`, as RiverGraph positions). */
   cx: number;
   cy: number;
+  /** Spheres only: cube face of the centroid. */
+  face?: number;
   /** River node that leaves the lake, −1 if terminal. */
   outletNode: number;
   /** 0 fresh, 1 brackish, 2 saline. */
@@ -148,6 +157,7 @@ export function copyVectors(v: Vectors): Vectors {
       flags: r.flags.slice(), reachStart: r.reachStart.slice(), reachLen: r.reachLen.slice(), reachDown: r.reachDown.slice(),
       reachMinArea: r.reachMinArea.slice(),
     };
+    if (r.face) out.rivers.face = r.face.slice();
   }
   if (v.lakes) out.lakes = v.lakes.map((l) => ({ ...l }));
   if (v.landmarks) out.landmarks = v.landmarks.map((l) => (l.path ? { ...l, data: { ...l.data }, path: l.path.slice() } : { ...l, data: { ...l.data } }));

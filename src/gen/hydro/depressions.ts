@@ -148,8 +148,15 @@ export function buildHierarchy(h: Float32Array, g: Grid, fixed: Uint8Array): Hie
   for (let i = 0; i < N; i++) {
     if (border[i] === 0) {
       for (const k of FORWARD) pair(i, i + off[k]);
-    } else {
+    } else if (g.seam === null) {
       for (const k of FORWARD) {
+        const j = g.nbr(i, k);
+        if (j >= 0) pair(i, j);
+      }
+    } else {
+      // Sphere seam cells: the neighbour face's axes are turned, so its forward set need not hold this
+      // pair; visit all 8 (pair keeps the lower saddle, so a pair seen twice is harmless).
+      for (let k = 0; k < 8; k++) {
         const j = g.nbr(i, k);
         if (j >= 0) pair(i, j);
       }

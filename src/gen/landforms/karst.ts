@@ -1,5 +1,6 @@
 import {
-  areaFactor, aridityAt, bigRegions, centreOf, coarseNoise, concavity, DiskSet, drains, poisson, settleFixed, snapshot, sstep,
+  areaFactor, aridityAt, bigRegions, centreOf, coarseNoise, concavity, DiskSet, drains, featureAt, meanCellKm2, poisson, settleFixed, snapshot,
+  sstep,
 } from './profiles';
 import type { LandformCtx } from './types';
 
@@ -23,7 +24,8 @@ export function applyKarst(c: LandformCtx): void {
   const { h, fixed } = c;
   const { cells: N, border, off8Axial } = c.grid;
   const ck = c.cellKm;
-  const ckm2 = ck * ck;
+  // Cell area for per-km² rates (sphere: the mean cell area, not the nominal cellKm²).
+  const ckm2 = c.grid.shape === 'flat' ? ck * ck : meanCellKm2(c);
   const af = areaFactor(c);
   const rng = c.rng('karst');
   const share = c.num('karstShare');
@@ -63,12 +65,23 @@ export function applyKarst(c: LandformCtx): void {
   }
 
   const karstAreas = karstCells === 0 ? [] : bigRegions(c, toBinary(mask, 128), 500, Math.ceil(8 * af)).list;
-  for (const k of karstAreas) c.features.push({ type: 'karst', x: k.x * 1000, y: k.y * 1000, size: Math.sqrt(k.km2) * 1000, data: { areaKm2: k.km2 } });
+  for (const k of karstAreas) c.features.push({ type: 'karst', ...featureAt(c, k.x, k.y), size: Math.sqrt(k.km2) * 1000, data: { areaKm2: k.km2 } });
   const towerAreas = karstCells === 0 ? [] : bigRegions(c, tropic, 300, Math.ceil(6 * af)).list;
-  for (const k of towerAreas) c.features.push({ type: 'tower-karst', x: k.x * 1000, y: k.y * 1000, size: Math.sqrt(k.km2) * 1000, data: { areaKm2: k.km2 } });
+  for (const k of towerAreas) c.features.push({ type: 'tower-karst', ...featureAt(c, k.x, k.y), size: Math.sqrt(k.km2) * 1000, data: { areaKm2: k.km2 } });
 
+  const flat = c.grid.shape === 'flat';
+  // Axial neighbour k of an isolated cell (interior on flat maps; across the seam on the sphere).
+  const nbAt = (i: number, k: number): number => (border[i] === 0 ? i + off8Axial[k] : c.grid.nbr(i, c.grid.axialToRaster[k]));
   const isolated = (i: number, marks: Uint8Array): boolean => {
-    if (border[i]) return false;
+    if (border[i]) {
+      // Flat: the map edge row never counts; sphere: seam cells check their neighbours across the seam.
+      if (flat) return false;
+      for (let k = 0; k < 8; k++) {
+        const j = nbAt(i, k);
+        if (j >= 0 && marks[j]) return false;
+      }
+      return true;
+    }
     for (let k = 0; k < 8; k++) if (marks[i + off8Axial[k]]) return false;
     return true;
   };
@@ -103,9 +116,13 @@ export function applyKarst(c: LandformCtx): void {
     if (!isolated(i, towersMark) || concavity(c, i) < 0) continue;
     const before = h[i];
     h[i] += trng.range(80, 220) * Math.min(1, Math.sqrt(1.5 / ck));
-    // Isolated cells are interior, so all eight neighbours exist.
+    // Isolated cells are interior on flat maps, so all eight neighbours exist (sphere: across seams; a
+    // cube corner has 7).
     let ok = true;
-    for (let k = 0; k < 8 && ok; k++) ok = drains(c, i + off8Axial[k]);
+    for (let k = 0; k < 8 && ok; k++) {
+      const j = nbAt(i, k);
+      ok = j < 0 || drains(c, j);
+    }
     if (!ok) {
       h[i] = before;
       continue;
@@ -123,7 +140,7 @@ export function applyKarst(c: LandformCtx): void {
     flatWarm.push(i);
   }
   const want = Math.min(Math.ceil(20 * af), poisson(crng, ((flatWarm.length * ckm2) / 1e4) * 2 * dens));
-  const cdisk = new DiskSet(15);
+  const cdisk = new DiskSet(15, c.grid);
   let cenotes = 0;
   for (let t = 0; t < want * 30 && cenotes < want && flatWarm.length; t++) {
     const i = flatWarm[crng.int(flatWarm.length)];
@@ -133,7 +150,7 @@ export function applyKarst(c: LandformCtx): void {
     h[i] -= d;
     pits[i] = 1;
     cdisk.add(p.x, p.y);
-    c.features.push({ type: 'cenote', x: p.x * 1000, y: p.y * 1000, size: Math.min(ck, 0.3) * 1000, data: { depth: d } });
+    c.features.push({ type: 'cenote', ...featureAt(c, p.x, p.y), size: Math.min(ck, 0.3) * 1000, data: { depth: d } });
     cenotes++;
   }
 
