@@ -17,18 +17,27 @@ import { chamferDistance } from '../grid/ops';
 export type GridSpec = Grid;
 
 /** Cell centre, map metres (spheres: encoded, geo.ts). */
-export const cellX = (g: GridSpec, c: number): number =>
-  g.faces === 1 ? (colOf(g, c) + 0.5) * g.cellM : cellFace(g, c) * Math.PI * g.radiusM + (colOf(g, c) + 0.5) * g.cellM;
+// These run per cell in the detectors: the flat expressions stay small enough to inline, the sphere
+// work lives in separate functions.
+export const cellX = (g: GridSpec, c: number): number => (g.faces === 1 ? (colOf(g, c) + 0.5) * g.cellM : cellXSphere(g, c));
 export const cellY = (g: GridSpec, c: number): number => (rowOf(g, c) + 0.5) * g.cellM;
+
+function cellXSphere(g: GridSpec, c: number): number {
+  return cellFace(g, c) * Math.PI * g.radiusM + (colOf(g, c) + 0.5) * g.cellM;
+}
 
 /** Cell containing a map position (clamped to the grid; spheres: an encoded position). */
 export function cellAtM(g: GridSpec, x: number, y: number): number {
-  let face = 0;
-  if (g.faces !== 1) {
-    const stride = Math.PI * g.radiusM;
-    face = Math.min(5, Math.max(0, Math.floor(x / stride)));
-    x -= face * stride;
-  }
+  if (g.faces !== 1) return cellAtMSphere(g, x, y);
+  const i = Math.min(g.n - 1, Math.max(0, Math.floor(x / g.cellM)));
+  const j = Math.min(g.n - 1, Math.max(0, Math.floor(y / g.cellM)));
+  return cellIndex(g, i, j);
+}
+
+function cellAtMSphere(g: GridSpec, x: number, y: number): number {
+  const stride = Math.PI * g.radiusM;
+  const face = Math.min(5, Math.max(0, Math.floor(x / stride)));
+  x -= face * stride;
   const i = Math.min(g.n - 1, Math.max(0, Math.floor(x / g.cellM)));
   const j = Math.min(g.n - 1, Math.max(0, Math.floor(y / g.cellM)));
   return cellIndex(g, i, j, face);
@@ -484,7 +493,11 @@ export function nearestWhere(g: GridSpec, cx: number, cy: number, radius: number
  * `radius` cells around the point, nearest first by great-circle distance (ties: the first visited).
  */
 export function nearestWhereM(g: GridSpec, x: number, y: number, radius: number, ok: (c: number) => boolean): number {
-  if (g.faces === 1) return nearestWhere(g, x / g.cellM, y / g.cellM, radius, ok);
+  return g.faces === 1 ? nearestWhere(g, x / g.cellM, y / g.cellM, radius, ok) : nearestOnSphere(g, x, y, radius, ok);
+}
+
+/** nearestWhereM on a sphere (its own function: the closure would otherwise cost the flat path a context). */
+function nearestOnSphere(g: GridSpec, x: number, y: number, radius: number, ok: (c: number) => boolean): number {
   const stride = Math.PI * g.radiusM;
   const face = Math.min(5, Math.max(0, Math.floor(x / stride)));
   let best = -1;

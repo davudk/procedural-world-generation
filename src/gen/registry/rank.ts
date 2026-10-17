@@ -131,7 +131,8 @@ export function rankAndName(
   const index = new Map<Candidate, number>();
   // World-band label budget (M8 baseline rec. 4): at the whole-world view only the W_LABELS most
   // important landmarks keep their label; the rest appear from the next zoom step on.
-  const wMpp = worldM / 1600;
+  // Spheres: the whole planet fitted (2.2 R with the camera margin) into a 700 px tall view.
+  const wMpp = S.sphere ? (2.2 * S.geo.R) / 700 : worldM / 1600;
   let wLabels = 0;
   const wLabelCap = S.sphere ? W_LABELS * SPHERE_W_VIEWS : W_LABELS;
   for (const c of order) {

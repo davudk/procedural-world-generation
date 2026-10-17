@@ -70,7 +70,7 @@ The world opens in **3D**. Press **V**, or the 2D/3D button, to switch to the 2D
 
 Realistic colouring comes from a biome colour table over temperature and aridity, with snow, rock, sand and marsh overlays. Palettes: Satellite, Stylised and Hypsometric. Pick **World (final, realistic)** with the Satellite palette for the finished world; the time, season and clouds controls sit below it. The layer picker also drapes any generated layer (plates, boundaries, uplift, drainage…) over the 3D terrain. The relief slider sets vertical exaggeration.
 
-On a sphere the controls are the same: dragging turns the planet so the point you grabbed stays under the cursor, and zooming in blends from a whole-planet view into the tilted orbit view near the surface. Spheres have no biome, hydrology or landmark stages yet, so the globe is coloured from temperature and precipitation, and close-zoom detail, rivers, labels and clouds are flat-only for now.
+On a sphere the controls are the same: dragging turns the planet so the point you grabbed stays under the cursor, and zooming in blends from a whole-planet view into the tilted orbit view near the surface. Spheres run every generation stage: the globe shows biomes, lakes and rivers, streamed close-zoom detail, and labels for the planet's landmarks (oceans, continents, ranges, rivers…), hidden on the far side; the Atlas flies along great circles. Clouds are flat-only for now.
 
 ## Configuration
 

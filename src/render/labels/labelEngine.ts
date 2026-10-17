@@ -31,9 +31,9 @@ const MPP_HYSTERESIS = 1.2;
  * Globe: a point shows only while the eye is this far above its tangent plane (cosine of the angle
  * between the local up and the direction to the eye). Below 0 it is on the far side or behind the
  * horizon (the sea-level sphere lies under every tangent plane above it, so nothing on the planet
- * can be seen past it); near 0 text would lie flat along the limb.
+ * can be seen past it); below ~0.3 (72° off the view) text near the limb would hang out into space.
  */
-export const GLOBE_MIN_FACING = 0.12;
+export const GLOBE_MIN_FACING = 0.3;
 
 /** What labels need of a rendered globe (GlobeGround satisfies it): planet-centred metres, +z north. */
 export interface LabelGlobe {

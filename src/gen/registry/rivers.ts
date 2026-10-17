@@ -3,7 +3,7 @@ import { cellIndex, forWindow } from '../grid/grid';
 import { MinHeap } from '../grid/heap';
 import { candidate } from './candidate';
 import { alongS, decimateS } from './geo';
-import { alongPolyline, cellAtM, cellX, cellY, decimate, labelAngle, nearestWhereM } from './grid';
+import { alongPolyline, cellAtM, cellX, cellY, decimate, labelAngle, nearestWhereM, type GridSpec } from './grid';
 import type { Candidate, RegistryInput, Shared } from './types';
 
 /** A traced main stem: reaches from the mouth (or confluence) upstream along the largest discharge. */
@@ -351,6 +351,33 @@ const GORGE_MAX_KM = 12;
 const GORGE_SPACING_KM = 40;
 const GORGE_PER_KM2 = 50000;
 
+/** Highest value of `h` within r cells of column cx, row cy (flat maps; the disc clipped to the map). */
+function discMax(g: GridSpec, h: Float32Array, cx: number, cy: number, r: number): number {
+  const n = g.n;
+  let mx = -Infinity;
+  const xb = Math.min(n - 1, cx + r);
+  const yb = Math.min(n - 1, cy + r);
+  for (let y = Math.max(0, cy - r); y <= yb; y++) {
+    const dy = y - cy;
+    const row = cellIndex(g, 0, y);
+    for (let x = Math.max(0, cx - r); x <= xb; x++) {
+      const dx = x - cx;
+      if (dx * dx + dy * dy > r * r) continue;
+      if (h[row + x] > mx) mx = h[row + x];
+    }
+  }
+  return mx;
+}
+
+/** Highest value of `h` within r cells of cell c (disc in the window's chart), across seams. */
+function windowMax(g: GridSpec, c: number, r: number, h: Float32Array): number {
+  let mx = -Infinity;
+  forWindow(g, c, r, (j, dx, dy) => {
+    if (dx * dx + dy * dy <= r * r + 0.5 && h[j] > mx) mx = h[j];
+  });
+  return mx;
+}
+
 function detectGorges(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const g = I.rivers;
   const X = S.rivX;
@@ -359,31 +386,15 @@ function detectGorges(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const fine = I.fine;
   const { n, cellM } = fine;
   const r = Math.max(1, Math.round(GORGE_RADIUS_M / cellM));
+  const sph = S.sphere;
   const depth = new Float32Array(g.n);
   const deep = new Uint8Array(g.n);
   for (let i = 0; i < g.n; i++) {
     if (g.strahler[i] < 2 || g.flags[i] & RIVER.DISTRIBUTARY) continue;
-    let mx = -Infinity;
-    if (S.sphere) {
-      forWindow(fine, cellAtM(fine, X[i], Y[i]), r, (j, dx, dy) => {
-        if (dx * dx + dy * dy <= r * r + 0.5 && I.h[j] > mx) mx = I.h[j];
-      });
-    } else {
-      const cx = Math.min(n - 1, Math.floor(X[i] / cellM));
-      const cy = Math.min(n - 1, Math.floor(Y[i] / cellM));
-      const xb = Math.min(n - 1, cx + r);
-      const yb = Math.min(n - 1, cy + r);
-      for (let y = Math.max(0, cy - r); y <= yb; y++) {
-        const dy = y - cy;
-        const row = cellIndex(fine, 0, y);
-        for (let x = Math.max(0, cx - r); x <= xb; x++) {
-          const dx = x - cx;
-          if (dx * dx + dy * dy > r * r) continue;
-          const h = I.h[row + x];
-          if (h > mx) mx = h;
-        }
-      }
-    }
+    // The window maxima live in helpers: kept out of this loop, the flat one stays as fast as before.
+    const mx = sph
+      ? windowMax(fine, cellAtM(fine, X[i], Y[i]), r, I.h)
+      : discMax(fine, I.h, Math.min(n - 1, Math.floor(g.x[i] / cellM)), Math.min(n - 1, Math.floor(g.y[i] / cellM)), r);
     depth[i] = mx - g.zWater[i];
     if (depth[i] >= GORGE_DEPTH_M) deep[i] = 1;
   }

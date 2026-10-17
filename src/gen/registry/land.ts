@@ -105,27 +105,15 @@ function detectArchipelagos(I: RegistryInput, S: Shared, out: Candidate[]): void
       for (let a = 0; a < 3; a++) D[3 * i + a] = M.dir[3 * k + a] / l;
     }
   }
-  const sep = (i: number, j: number): number => {
-    if (!D) return Math.hypot(cx[i] - cx[j], cy[i] - cy[j]);
-    const c = D[3 * i] * D[3 * j] + D[3 * i + 1] * D[3 * j + 1] + D[3 * i + 2] * D[3 * j + 2];
-    return (Math.acos(Math.max(-1, Math.min(1, c))) * geo.R) / cellM;
-  };
   const gap = 25 / cellKm;
   const uf = Int32Array.from({ length: L }, (_, i) => i);
   const find = (a: number): number => {
     while (uf[a] !== a) a = uf[a] = uf[uf[a]];
     return a;
   };
-  for (let i = 0; i < L; i++) {
-    for (let j = i + 1; j < L; j++) {
-      const d = sep(i, j) - rr[i] - rr[j];
-      if (d <= gap) {
-        const a = find(i);
-        const b = find(j);
-        if (a !== b) uf[Math.max(a, b)] = Math.min(a, b);
-      }
-    }
-  }
+  // The pair loop is the hot part: a small function per shape keeps the flat one as fast as before.
+  if (D) linkSphere(D, rr, gap, geo.R / cellM, uf);
+  else linkFlat(cx, cy, rr, gap, uf);
   const groups = new Map<number, number[]>();
   for (let i = 0; i < L; i++) {
     const r = find(i);
@@ -183,6 +171,45 @@ function detectArchipelagos(I: RegistryInput, S: Shared, out: Candidate[]): void
   }
   found.sort((a, b) => b.data.islands - a.data.islands || b.extentM - a.extentM);
   for (const c of found.slice(0, 8)) out.push(c);
+}
+
+/** Single-linkage of islands whose gap (centroid distance minus radii, cells) is ≤ gap, into a union-find. */
+function linkFlat(cx: Float64Array, cy: Float64Array, rr: Float64Array, gap: number, uf: Int32Array): void {
+  const L = cx.length;
+  const find = (a: number): number => {
+    while (uf[a] !== a) a = uf[a] = uf[uf[a]];
+    return a;
+  };
+  for (let i = 0; i < L; i++) {
+    for (let j = i + 1; j < L; j++) {
+      const d = Math.hypot(cx[i] - cx[j], cy[i] - cy[j]) - rr[i] - rr[j];
+      if (d <= gap) {
+        const a = find(i);
+        const b = find(j);
+        if (a !== b) uf[Math.max(a, b)] = Math.min(a, b);
+      }
+    }
+  }
+}
+
+/** linkFlat on a sphere: centroid unit vectors D, great-circle distances in cells (k = R / cellM). */
+function linkSphere(D: Float64Array, rr: Float64Array, gap: number, k: number, uf: Int32Array): void {
+  const L = rr.length;
+  const find = (a: number): number => {
+    while (uf[a] !== a) a = uf[a] = uf[uf[a]];
+    return a;
+  };
+  for (let i = 0; i < L; i++) {
+    for (let j = i + 1; j < L; j++) {
+      const c = D[3 * i] * D[3 * j] + D[3 * i + 1] * D[3 * j + 1] + D[3 * i + 2] * D[3 * j + 2];
+      const d = Math.acos(Math.max(-1, Math.min(1, c))) * k - rr[i] - rr[j];
+      if (d <= gap) {
+        const a = find(i);
+        const b = find(j);
+        if (a !== b) uf[Math.max(a, b)] = Math.min(a, b);
+      }
+    }
+  }
 }
 
 /** Peninsulas at three opening radii, largest first; capes at the tips of the long ones. */

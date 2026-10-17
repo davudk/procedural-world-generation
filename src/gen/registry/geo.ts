@@ -60,19 +60,20 @@ export class Geo {
     return [face * this.stride + a * this.R, b * this.R];
   }
 
-  /** Distance between two positions (m): planar on flat maps, great circle on spheres. */
+  /** Distance between two positions (m): planar on flat maps, great circle on spheres. Small, so it inlines in flat loops. */
   dist(ax: number, ay: number, bx: number, by: number): number {
-    if (!this.sphere) return Math.hypot(ax - bx, ay - by);
-    this.dir(ax, ay, this.p);
-    this.dir(bx, by, this.q);
-    return this.R * arc(this.p, this.q);
+    return this.sphere ? this.arcDist(ax, ay, bx, by) : Math.hypot(ax - bx, ay - by);
   }
 
   /** Squared distance (flat: exactly (ax − bx)² + (ay − by)²). */
   d2(ax: number, ay: number, bx: number, by: number): number {
-    if (!this.sphere) return (ax - bx) ** 2 + (ay - by) ** 2;
-    const d = this.dist(ax, ay, bx, by);
-    return d * d;
+    return this.sphere ? this.arcDist(ax, ay, bx, by) ** 2 : (ax - bx) ** 2 + (ay - by) ** 2;
+  }
+
+  private arcDist(ax: number, ay: number, bx: number, by: number): number {
+    this.dir(ax, ay, this.p);
+    this.dir(bx, by, this.q);
+    return this.R * arc(this.p, this.q);
   }
 
   /**

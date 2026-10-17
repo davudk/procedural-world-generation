@@ -162,6 +162,19 @@ function fillBand(I: RegistryInput, S: Shared, out: Candidate[], relief: ReliefR
   return added;
 }
 
+/** Land share and cover shares (added to `sum`) of the regional cells within rad cells of cell c (spheres). */
+function chartCover(S: Shared, c: number, rad: number, covers: [string, string, number[]][], sum: Float64Array): number {
+  const R = S.reg;
+  let landSum = 0;
+  R.chart(R.point(c), rad * R.cellM, (q) => {
+    landSum += S.landShare[q];
+    covers.forEach(([, , gs], k) => {
+      for (const gg of gs) sum[k] += S.groupShare[gg][q];
+    });
+  });
+  return landSum;
+}
+
 /** Positions on a sphere with a "any point closer than d?" query, hashed on a 3D lattice of d cubes. */
 class NearSet {
   private readonly cells = new Map<string, number[]>();
@@ -308,13 +321,8 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number
     const r = Math.ceil(rad);
     const sum = new Float64Array(covers.length);
     let landSum = 0;
-    const visit = (c: number): void => {
-      landSum += S.landShare[c];
-      covers.forEach(([, , gs], k) => {
-        for (const gg of gs) sum[k] += S.groupShare[gg][c];
-      });
-    };
-    if (geo.sphere) R.chart(R.point(best), rad * R.cellM, visit);
+    // Spheres: the geodesic disc in a helper (a closure here would slow the flat loop below).
+    if (geo.sphere) landSum = chartCover(S, best, rad, covers, sum);
     else {
       const xb = Math.min(R.n - 1, bx + r);
       const yb = Math.min(R.n - 1, by + r);
@@ -323,7 +331,11 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number
           const dx = x - bx;
           const dy = y - by;
           if (dx * dx + dy * dy > rad * rad) continue;
-          visit(cellIndex(R, x, y));
+          const c = cellIndex(R, x, y);
+          landSum += S.landShare[c];
+          covers.forEach(([, , gs], k) => {
+            for (const gg of gs) sum[k] += S.groupShare[gg][c];
+          });
         }
       }
     }
