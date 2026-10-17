@@ -5,7 +5,7 @@ import type { LandmarkKind } from '../../shared/landmarks';
 import { BIOME } from '../../shared/biomes';
 import { wBand } from './budget';
 import { candidate } from './candidate';
-import { cellAtM, cellCountKm2, cellX, cellY, compKm2, label, nearestWhere, nearestWhereM } from './grid';
+import { cellAtM, cellCountKm2, cellX, cellY, compKm2, label, nearestWhere, nearestWhereM, type GridSpec } from './grid';
 import { G, groupOf } from './shared';
 import type { ReliefResult } from './relief';
 import type { Geo } from './geo';
@@ -333,8 +333,11 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[], scale?:
   ];
   let added = 0;
   const tried = new Uint8Array(MM);
+  // Spheres: the geodesic field once, then lowered around each new mark (a full Dijkstra per pass was
+  // most of the sphere registry's time); flat maps recompute the chamfer field per pass as before.
+  const sphereDist = geo.sphere ? chamferDistance(covered, R) : null;
   for (let guard = 0; guard < 64; guard++) {
-    const dist = chamferDistance(covered, R);
+    const dist = sphereDist ?? chamferDistance(covered, R);
     let best = -1;
     for (let i = 0; i < MM; i++) if (S.land[i] && !tried[i] && dist[i] > need && (best < 0 || dist[i] > dist[best])) best = i;
     if (best < 0) break;
@@ -367,6 +370,7 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[], scale?:
     if (k < 0 || landSum <= 0 || sum[k] < W_FILL_MIN_SHARE * landSum) {
       // Nothing dominant here: leave it (and its neighbourhood) quiet.
       covered[best] = 1;
+      if (sphereDist) lowerAround(R, sphereDist, best, 2 * need);
       continue;
     }
     const [kind, v] = covers[k];
@@ -389,7 +393,17 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[], scale?:
       landmass: fc >= 0 ? S.masses.label[fc] : -1,
     }));
     mark(x, y);
+    if (sphereDist) lowerAround(R, sphereDist, cellAtM(R, x, y), 2 * need);
     added++;
   }
   return added;
+}
+
+/** Spheres: lowers a distance field (nominal cells) to the great-circle distance from cell c, within radiusCells of it. */
+function lowerAround(g: GridSpec, dist: Float32Array, c: number, radiusCells: number): void {
+  dist[c] = 0;
+  g.chart(g.point(c), radiusCells * g.cellM, (i) => {
+    const d = g.distance(c, i) / g.cellM;
+    if (d < dist[i]) dist[i] = d;
+  });
 }
