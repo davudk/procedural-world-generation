@@ -3,12 +3,16 @@
  * rates, 🎯 target satisfaction, the per-band interest budget over random viewports, Clark–Evans,
  * contrast rules, geomorphic realism and the boring / cluttered detectors. The result is plain JSON.
  */
+import { cubeGrid, type CubeGrid } from '../src/gen/grid/cube';
+import { distanceField } from '../src/gen/grid/distance';
+import { components as gridComponents } from '../src/gen/grid/ops';
 import { Pipeline } from '../src/gen/pipeline';
 import { STAGES } from '../src/gen/stages';
 import type { BiomeExtra } from '../src/gen/stages/biome';
 import { WATER, type HydroExtra } from '../src/gen/stages/hydro';
 import type { LandformsExtra } from '../src/gen/stages/landforms';
 import { BIOMES } from '../src/shared/biomes';
+import { dirSurface, dirToCell, surfaceDir } from '../src/shared/cube';
 import { resolve } from '../src/shared/config/resolve';
 import type { Pins, Range } from '../src/shared/config/types';
 import { specToQuery } from '../src/shared/config/url';
@@ -19,8 +23,11 @@ import {
   quantileSorted, rasterDisk, rasterLine,
 } from './lib/math';
 import {
-  BANDS, BORING, CLUTTER_W_MAX, COUNT_TARGETS, CONTRAST, contrastFor, CV_GRID, DISK_CLUSTER_CAP, LABEL_CAP, OCEAN_VIEW_LAND, QUIET, SCREEN_PX, VIEW_ASPECT,
-  WINDOW_HI, WINDOW_LO, type BandDef, type BandId,
+  boxCountDimensionFaces, capView, clarkEvansSphere, geodesic, globeView, maxInDisk, pickWeighted, randomDir, type ViewProj,
+} from './lib/sphere';
+import {
+  bandsFor, BORING, sphereCountRange, CLUTTER_W_MAX, COUNT_TARGETS, CONTRAST, contrastFor, CV_GRID, DISK_CLUSTER_CAP, GLOBE_MIN_FACING, globeMpp, LABEL_CAP,
+  OCEAN_VIEW_LAND, QUIET, SCREEN_PX, VIEW_ASPECT, WINDOW_HI, WINDOW_LO, type BandDef, type BandId,
 } from './targets';
 
 export interface WorldJob {
@@ -75,7 +82,12 @@ export interface WorldMetrics {
   group: string;
   query: string;
   ms: number;
+  shape: 'flat' | 'sphere';
+  /** Flat: map width. Sphere: the equal-area size √(4πR²) (research 10 §3.1), so per-world rows compare with flat. */
   worldKm: number;
+  /** Sphere only: circumference (km); 0 on flat maps. */
+  planetKm: number;
+  /** Nominal cell size (km); spheres: (π/2)·R/n at face centres. */
   cellKm: number;
   landKm2: number;
   coastKm: number;
@@ -84,6 +96,8 @@ export interface WorldMetrics {
   counts: Record<string, number>;
   /** Values in the unit of each COUNT_TARGETS row (per 10⁵ km² land, per 1000 km coast, per world …). */
   rates: Record<string, number>;
+  /** Target range of each COUNT_TARGETS row for this world (flat: the row's range; spheres: `sphereCountRange`). */
+  countRanges: Record<string, [number, number]>;
   /** Normalised feature table: per 10⁵ km² land (`land`) or per 1000 km coast (`coast`). */
   features: Record<string, { count: number; per: 'land' | 'coast' | 'warm'; rate: number }>;
   kinds: Record<string, number>;
@@ -95,7 +109,14 @@ export interface WorldMetrics {
   clarkEvans: Record<string, number>;
   clusterDisk: Record<string, number>;
   quietShare: number;
+  /** Share of land under perennial snow or ice (biome snow ≥ 0.5; area-weighted on spheres). */
+  iceShare: number;
+  /** Highest summit (m). */
+  peakMaxM: number;
+  /** The World traits headline. */
+  traitsLead: string;
   biome: { maxShare: number; maxName: string; distinct: number };
+  /** Bands of the world's shape: W, R, A, L on flat maps; G, W, R, A, L on spheres. */
   bands: Record<BandId, BandResult>;
   boring: string[];
   cluttered: string[];
@@ -181,6 +202,64 @@ function bbox(f: Omit<Feat, 'bx0' | 'by0' | 'bx1' | 'by1'>): Feat {
   return { ...f, bx0, by0, bx1, by1 };
 }
 
+/**
+ * Strahler streams on a sphere: as `streams`, with lengths as 3D chords between consecutive nodes and
+ * the polyline as unit vectors (`p3`, 3 per point). `pts` is left empty.
+ */
+export function streamsSphere(g: RiverGraph, R: number): (Stream & { p3: Float64Array })[] {
+  const face = g.face!;
+  const dir = new Float64Array(3 * g.n);
+  for (let i = 0; i < g.n; i++) surfaceDir(face[i], g.x[i], g.y[i], R, dir, 3 * i);
+  const maxIn = new Uint8Array(g.n);
+  for (let i = 0; i < g.n; i++) {
+    const d = g.down[i];
+    if (d >= 0 && !(g.flags[i] & RIVER.DISTRIBUTARY)) maxIn[d] = Math.max(maxIn[d], g.strahler[i]);
+  }
+  const out: (Stream & { p3: Float64Array })[] = [];
+  const empty = new Float32Array(0);
+  for (let i = 0; i < g.n; i++) {
+    if (g.flags[i] & RIVER.DISTRIBUTARY) continue;
+    const s = g.strahler[i];
+    if (s === 0 || maxIn[i] >= s) continue;
+    const pts: number[] = [dir[3 * i], dir[3 * i + 1], dir[3 * i + 2]];
+    let len = 0;
+    let c = i;
+    for (let guard = 0; guard < g.n; guard++) {
+      const d = g.down[c];
+      if (d < 0) break;
+      len += R * Math.hypot(dir[3 * d] - dir[3 * c], dir[3 * d + 1] - dir[3 * c + 1], dir[3 * d + 2] - dir[3 * c + 2]);
+      pts.push(dir[3 * d], dir[3 * d + 1], dir[3 * d + 2]);
+      if (g.strahler[d] !== s || g.flags[d] & RIVER.DISTRIBUTARY) break;
+      c = d;
+    }
+    out.push({ order: s, lengthM: len, pts: empty, p3: Float64Array.from(pts) });
+  }
+  return out;
+}
+
+/** A feature on the sphere: as Feat, with an anchor unit vector, an optional unit-vector polyline and its angular reach. */
+interface SFeat {
+  cls: string;
+  ext: number;
+  r: number;
+  order: number;
+  d: Float64Array;
+  p3?: Float64Array;
+  /** Largest angle (rad) from the anchor to a path point. */
+  reach: number;
+}
+
+function sfeat(f: Omit<SFeat, 'reach'>): SFeat {
+  let reach = 0;
+  if (f.p3) {
+    for (let k = 0; k < f.p3.length; k += 3) {
+      const c = f.d[0] * f.p3[k] + f.d[1] * f.p3[k + 1] + f.d[2] * f.p3[k + 2];
+      reach = Math.max(reach, Math.acos(Math.max(-1, Math.min(1, c))));
+    }
+  }
+  return { ...f, reach };
+}
+
 const PRESENT_SHARE = 0.1;
 
 /** Runs one world and measures it. */
@@ -213,22 +292,42 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
   const hs = hydroOut.stats;
   const ls = lf.stats;
 
-  const worldKm = resolved.values.worldSize as number;
-  const worldM = worldKm * 1000;
+  const sphere = resolved.values.worldShape === 'sphere';
   const { n, cellKm } = hy;
   const cellM = cellKm * 1000;
-  const N = n * n;
+  const planetKm = sphere ? (resolved.values.planetSize as number) : 0;
+  const R = sphere ? (planetKm * 1000) / (2 * Math.PI) : Infinity;
+  const grid: CubeGrid | null = sphere ? cubeGrid(n, R) : null;
+  // Spheres report the equal-area size (research 10 §3.1), so per-world rows and spacing fractions compare with flat.
+  const worldKm = sphere ? (Math.sqrt(4 * Math.PI) * R) / 1000 : (resolved.values.worldSize as number);
+  const worldM = worldKm * 1000;
+  const N = sphere ? 6 * n * n : n * n;
+  /** True cell area (km²). */
+  const areaKm2 = (i: number): number => (grid ? grid.area(i) / 1e6 : cellKm * cellKm);
   const isLand = new Uint8Array(N);
   let landCells = 0;
+  let landAreaSum = 0;
   for (let i = 0; i < N; i++) {
     if (hy.waterClass[i] !== WATER.OCEAN) {
       isLand[i] = 1;
       landCells++;
+      if (grid) landAreaSum += areaKm2(i);
     }
   }
-  const landKm2 = landCells * cellKm * cellKm;
+  const landKm2 = grid ? landAreaSum : landCells * cellKm * cellKm;
   const coastKm = ls.coastKm ?? 0;
   const warmOceanKm2 = ls.warmOceanKm2 ?? 0;
+  /** Unit vector of a sphere position (face, face-local metres). */
+  const dirOf = (face: number | undefined, x: number, y: number): Float64Array => {
+    const d = new Float64Array(3);
+    surfaceDir(face ?? 0, x, y, R, d);
+    return d;
+  };
+  const dirsOf = (pts: readonly { face?: number; x: number; y: number }[]): Float64Array => {
+    const out = new Float64Array(3 * pts.length);
+    pts.forEach((q, k) => surfaceDir(q.face ?? 0, q.x, q.y, R, out, 3 * k));
+    return out;
+  };
 
   // ── Counts ────────────────────────────────────────────────────────────────────────────────
   const kinds: Record<string, number> = {};
@@ -238,7 +337,8 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
     tiers[l.tier] = (tiers[l.tier] ?? 0) + 1;
   }
   const featCount = (t: string): number => lfx.features.filter((f) => f.type === t).length;
-  const strs = streams(rivers);
+  const sStrs = sphere ? streamsSphere(rivers, R) : [];
+  const strs: Stream[] = sphere ? sStrs : streams(rivers);
   let maxOrder = 0;
   for (const s of strs) maxOrder = Math.max(maxOrder, s.order);
   let riversToSea = 0;
@@ -250,9 +350,18 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
   const between = (a: readonly number[], lo: number, hi: number): number => a.filter((v) => v >= lo && v < hi).length;
 
   // Land masses: continents are ≥ 5 % of land (as in the refine stage); the rest are islands.
-  const comp = components(isLand, n, n);
-  const massKm2 = comp.sizes.map((s) => s * cellKm * cellKm);
-  const isContinent = comp.sizes.map((s) => s >= 0.05 * landCells);
+  let massKm2: number[];
+  let isContinent: boolean[];
+  if (grid) {
+    const comp = gridComponents(isLand, grid);
+    massKm2 = new Array<number>(comp.sizes.length).fill(0);
+    for (let i = 0; i < N; i++) if (comp.label[i] >= 0) massKm2[comp.label[i]] += areaKm2(i);
+    isContinent = massKm2.map((a) => a >= 0.05 * landKm2);
+  } else {
+    const comp = components(isLand, n, n);
+    massKm2 = comp.sizes.map((s) => s * cellKm * cellKm);
+    isContinent = comp.sizes.map((s) => s >= 0.05 * landCells);
+  }
   const islandKm2 = massKm2.filter((_, k) => !isContinent[k]);
 
   const peaks = landmarks.filter((l) => l.kind === 'peak');
@@ -318,7 +427,13 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
   const per100k = (c: number): number => (landKm2 > 0 ? (c / landKm2) * 1e5 : NaN);
   const per1000Coast = (c: number): number => (coastKm > 0 ? (c / coastKm) * 1000 : NaN);
   const rates: Record<string, number> = {};
+  const countRanges: Record<string, [number, number]> = {};
+  const resolvedRange = (id: string): [number, number] => {
+    const v = resolved.values[id] as Range;
+    return [Math.min(v[0], v[1]), Math.max(v[0], v[1])];
+  };
   for (const t of COUNT_TARGETS) {
+    countRanges[t.key] = sphere ? sphereCountRange(t, worldKm, resolvedRange) : t.range;
     const c = counts[t.key];
     rates[t.key] = t.per === 'land' ? per100k(c) : t.per === 'coast' ? per1000Coast(c) : t.per === 'warm' ? (warmOceanKm2 > 0 ? (c / warmOceanKm2) * 1e5 : NaN) : c;
   }
@@ -331,9 +446,13 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
 
   // ── Heroes ────────────────────────────────────────────────────────────────────────────────
   const heroLms = landmarks.filter((l) => l.hero);
+  const heroDirs = sphere ? dirsOf(heroLms) : null;
   let minSp = Infinity;
   for (let i = 0; i < heroLms.length; i++) {
-    for (let j = i + 1; j < heroLms.length; j++) minSp = Math.min(minSp, Math.hypot(heroLms[i].x - heroLms[j].x, heroLms[i].y - heroLms[j].y));
+    for (let j = i + 1; j < heroLms.length; j++) {
+      const d = heroDirs ? geodesic(heroDirs, 3 * i, heroDirs, 3 * j, R) : Math.hypot(heroLms[i].x - heroLms[j].x, heroLms[i].y - heroLms[j].y);
+      minSp = Math.min(minSp, d);
+    }
   }
   const heroes = {
     count: heroLms.length, target: resolved.drawn.heroCount ?? NaN,
@@ -363,26 +482,41 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
     wetlandShare: { got: outcomes.wetlandShare, value: wsValue, ok: Math.abs(outcomes.wetlandShare - wsValue) <= 0.1 * wsValue, okAlt: outcomes.wetlandShare >= 0.04 && outcomes.wetlandShare <= 0.1 },
   };
 
-  // ── Contrast (research 05 §3.6) ───────────────────────────────────────────────────────────
+  // ── Contrast (research 05 §3.6), area-weighted on spheres ─────────────────────────────────
   let low = 0;
   let high = 0;
+  let ice = 0;
   for (let i = 0; i < N; i++) {
     if (!isLand[i]) continue;
-    if (hy.elevation[i] < CONTRAST.lowM) low++;
-    if (hy.elevation[i] > CONTRAST.highM) high++;
+    const a = grid ? areaKm2(i) : 1;
+    if (hy.elevation[i] < CONTRAST.lowM) low += a;
+    if (hy.elevation[i] > CONTRAST.highM) high += a;
+    if (bio.snow[i] >= 0.5) ice += a;
   }
+  const landW = grid ? landKm2 : Math.max(1, landCells);
   const heights = peaks.map((l) => l.data.heightM ?? 0).sort((a, b) => a - b);
   const kingM = Math.max(0, ...summits.map((l) => l.data.heightM ?? 0));
   const p95Peak = quantileSorted(heights, 0.95);
   const contrast = {
-    lowShare: low / Math.max(1, landCells), highShare: high / Math.max(1, landCells),
+    lowShare: low / landW, highShare: high / landW,
     kingRatio: p95Peak > 0 ? kingM / p95Peak : NaN, kingM, wViewOk: NaN,
   };
+  const iceShare = ice / landW;
 
   // ── Geomorphic realism ────────────────────────────────────────────────────────────────────
   const coast = new Uint8Array(N);
   for (let i = 0; i < N; i++) {
     if (!isLand[i]) continue;
+    if (grid) {
+      for (let k = 0; k < 4; k++) {
+        const j = grid.border[i] ? grid.nbr(i, grid.axialToRaster[k]) : i + grid.off4[k];
+        if (j >= 0 && !isLand[j]) {
+          coast[i] = 1;
+          break;
+        }
+      }
+      continue;
+    }
     const x = i % n;
     const y = (i - x) / n;
     if ((x > 0 && !isLand[i - 1]) || (x < n - 1 && !isLand[i + 1]) || (y > 0 && !isLand[i - n]) || (y < n - 1 && !isLand[i + n])) coast[i] = 1;
@@ -391,17 +525,19 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
   const islandFit = ccdfExponent(islandKm2, 2 * cellKm * cellKm);
   const geomorph = {
     hortonRb: hs.hortonRb ?? NaN, hackExponent: hs.hackExponent ?? NaN, lakeParetoB: lakeFit.b, lakeN: lakeFit.n,
-    korcakB: islandFit.b, islandN: islandFit.n, coastD: boxCountDimension(coast, n, 8),
+    korcakB: islandFit.b, islandN: islandFit.n, coastD: grid ? boxCountDimensionFaces(coast, n, 8) : boxCountDimension(coast, n, 8),
   };
 
-  // ── Clark–Evans and cluster disks (research 05 §3.3, §5.3) ────────────────────────────────
+  // ── Clark–Evans and cluster disks (research 05 §3.3, §5.3), great-circle on spheres ────────
   const landM2 = landKm2 * 1e6;
-  const ce = (pts: { x: number; y: number }[]): number => clarkEvans(pts.map((q) => q.x), pts.map((q) => q.y), landM2);
-  const lakePts = lakes.map((l) => ({ x: l.cx, y: l.cy }));
+  const lakePts = lakes.map((l) => ({ x: l.cx, y: l.cy, ...(l.face !== undefined ? { face: l.face } : {}) }));
+  const ce = (pts: { face?: number; x: number; y: number }[]): number =>
+    sphere ? clarkEvansSphere(dirsOf(pts), landM2, R) : clarkEvans(pts.map((q) => q.x), pts.map((q) => q.y), landM2);
   const clarkEvansR: Record<string, number> = {
     volcano: ce(volcanoFeats), lake: ce(lakePts), peak: ce(peaks), crater: ce(craterFeats),
   };
-  const diskMax = (pts: { x: number; y: number }[]): number => {
+  const diskMax = (pts: { face?: number; x: number; y: number }[]): number => {
+    if (sphere) return maxInDisk(dirsOf(pts), 1e5, R);
     let best = 0;
     for (const a of pts) {
       let k = 0;
@@ -425,54 +561,112 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
   const biome = { maxShare, maxName, distinct: biomeOut.stats.distinctBiomes ?? 0 };
 
   // ── Features for the interest budget ──────────────────────────────────────────────────────
-  const all: Feat[] = [];
-  for (const l of landmarks) {
-    if (SKIP_KINDS.has(l.kind)) continue;
-    const base = { cls: l.kind, x: l.x, y: l.y, ext: l.extentM, r: SEA_OR_MASS.has(l.kind) ? -1 : 0.25 * l.extentM, order: 0 };
-    all.push(bbox(l.path ? { ...base, pts: l.path } : base));
-  }
-  for (const s of strs) {
-    const mid = Math.floor(s.pts.length / 4) * 2;
-    all.push(bbox({ cls: 'river', x: s.pts[mid], y: s.pts[mid + 1], ext: s.lengthM, pts: s.pts, r: 0, order: s.order }));
-  }
-  for (const l of lakes) {
-    const ext = Math.sqrt(l.areaKm2) * 1000;
-    all.push(bbox({ cls: 'lake', x: l.cx, y: l.cy, ext, r: Math.sqrt(l.areaKm2 / Math.PI) * 1000, order: 0 }));
-  }
-  for (const f of lfx.features) {
-    if (!EXTRA_FEATURES.has(f.type)) continue;
-    all.push(bbox({ cls: f.type, x: f.x, y: f.y, ext: f.size, r: 0.25 * f.size, order: 0 }));
-  }
-
-  // Quiet land: farther than QUIET.radiusKm from any feature of band R or A size (research 05 §3.3).
-  const quietMask = new Uint8Array(N);
-  for (const f of all) {
-    if (f.r < 0 || (f.cls === 'river' && f.order < QUIET.minOrder)) continue;
-    paint(quietMask, n, n, f, 0, 0, cellM);
-  }
-  const quietD2 = edtSquared(quietMask, n, n);
-  let quiet = 0;
-  for (let i = 0; i < N; i++) if (isLand[i] && quietD2[i] > (QUIET.radiusKm / cellKm) ** 2) quiet++;
-  const quietShare = quiet / Math.max(1, landCells);
-
-  // ── Viewports per band ────────────────────────────────────────────────────────────────────
   const views = job.views ?? { land: 64, uniform: 32 };
-  const landList: number[] = [];
-  for (let i = 0; i < N; i++) if (isLand[i]) landList.push(i);
+  const bandDefs = bandsFor(sphere ? 'sphere' : 'flat');
   const bands = {} as Record<BandId, BandResult>;
-  for (const band of BANDS) {
-    bands[band.id] = sampleBand(band, {
-      worldM, n, cellM, isLand, landList, all, landmarks, lakes, hy, bio, seed: job.seed, views,
-    });
+  let quietShare: number;
+  if (grid) {
+    const all: SFeat[] = [];
+    const pathDirs = (l: Landmark): Float64Array | undefined => {
+      if (!l.path) return undefined;
+      const k = l.path.length / 2;
+      const out = new Float64Array(3 * k);
+      for (let q = 0; q < k; q++) surfaceDir(l.pathFace ? l.pathFace[q] : (l.face ?? 0), l.path[2 * q], l.path[2 * q + 1], R, out, 3 * q);
+      return out;
+    };
+    for (const l of landmarks) {
+      if (SKIP_KINDS.has(l.kind)) continue;
+      const p3 = pathDirs(l);
+      all.push(sfeat({ cls: l.kind, d: dirOf(l.face, l.x, l.y), ext: l.extentM, r: SEA_OR_MASS.has(l.kind) ? -1 : 0.25 * l.extentM, order: 0, ...(p3 ? { p3 } : {}) }));
+    }
+    for (const s of sStrs) {
+      const mid = Math.floor(s.p3.length / 6) * 3;
+      all.push(sfeat({ cls: 'river', d: s.p3.slice(mid, mid + 3), ext: s.lengthM, p3: s.p3, r: 0, order: s.order }));
+    }
+    for (const l of lakes) {
+      all.push(sfeat({ cls: 'lake', d: dirOf(l.face, l.cx, l.cy), ext: Math.sqrt(l.areaKm2) * 1000, r: Math.sqrt(l.areaKm2 / Math.PI) * 1000, order: 0 }));
+    }
+    for (const f of lfx.features) {
+      if (!EXTRA_FEATURES.has(f.type)) continue;
+      all.push(sfeat({ cls: f.type, d: dirOf(f.face, f.x, f.y), ext: f.size, r: 0.25 * f.size, order: 0 }));
+    }
+    // Quiet land: farther than QUIET.radiusKm (geodesic) from any feature of band R or A size.
+    const quietMask = new Uint8Array(N);
+    for (const f of all) {
+      if (f.r < 0 || (f.cls === 'river' && f.order < QUIET.minOrder)) continue;
+      paintSphere(quietMask, grid, f);
+    }
+    const qd = distanceField(quietMask, grid).dist;
+    let quiet = 0;
+    for (let i = 0; i < N; i++) if (isLand[i] && qd[i] * cellKm > QUIET.radiusKm) quiet += areaKm2(i);
+    quietShare = quiet / Math.max(1e-9, landKm2);
+
+    const landList: number[] = [];
+    let maxArea = 0;
+    for (let i = 0; i < N; i++) {
+      if (!isLand[i]) continue;
+      landList.push(i);
+      maxArea = Math.max(maxArea, grid.area(i));
+    }
+    const ctx: SphereBandCtx = {
+      R, grid, isLand, landList, maxArea, all, hy, bio, seed: job.seed, views,
+      labelled: landmarks.map((l) => ({ maxMpp: l.maxMpp, d: dirOf(l.face, l.x, l.y) })),
+      bigLakes: lakes.filter((l) => l.areaKm2 >= 100).map((l) => dirOf(l.face, l.cx, l.cy)),
+    };
+    for (const band of bandDefs) bands[band.id] = sampleBandSphere(band, ctx);
+  } else {
+    const all: Feat[] = [];
+    for (const l of landmarks) {
+      if (SKIP_KINDS.has(l.kind)) continue;
+      const base = { cls: l.kind, x: l.x, y: l.y, ext: l.extentM, r: SEA_OR_MASS.has(l.kind) ? -1 : 0.25 * l.extentM, order: 0 };
+      all.push(bbox(l.path ? { ...base, pts: l.path } : base));
+    }
+    for (const s of strs) {
+      const mid = Math.floor(s.pts.length / 4) * 2;
+      all.push(bbox({ cls: 'river', x: s.pts[mid], y: s.pts[mid + 1], ext: s.lengthM, pts: s.pts, r: 0, order: s.order }));
+    }
+    for (const l of lakes) {
+      const ext = Math.sqrt(l.areaKm2) * 1000;
+      all.push(bbox({ cls: 'lake', x: l.cx, y: l.cy, ext, r: Math.sqrt(l.areaKm2 / Math.PI) * 1000, order: 0 }));
+    }
+    for (const f of lfx.features) {
+      if (!EXTRA_FEATURES.has(f.type)) continue;
+      all.push(bbox({ cls: f.type, x: f.x, y: f.y, ext: f.size, r: 0.25 * f.size, order: 0 }));
+    }
+
+    // Quiet land: farther than QUIET.radiusKm from any feature of band R or A size (research 05 §3.3).
+    const quietMask = new Uint8Array(N);
+    for (const f of all) {
+      if (f.r < 0 || (f.cls === 'river' && f.order < QUIET.minOrder)) continue;
+      paint(quietMask, n, n, f, 0, 0, cellM);
+    }
+    const quietD2 = edtSquared(quietMask, n, n);
+    let quiet = 0;
+    for (let i = 0; i < N; i++) if (isLand[i] && quietD2[i] > (QUIET.radiusKm / cellKm) ** 2) quiet++;
+    quietShare = quiet / Math.max(1, landCells);
+
+    // ── Viewports per band ──────────────────────────────────────────────────────────────────
+    const landList: number[] = [];
+    for (let i = 0; i < N; i++) if (isLand[i]) landList.push(i);
+    for (const band of bandDefs) {
+      bands[band.id] = sampleBand(band, {
+        worldM, n, cellM, isLand, landList, all, landmarks, lakes, hy, bio, seed: job.seed, views,
+      });
+    }
   }
   const wv = bands.W.land.contrast;
   contrast.wViewOk = wv.length ? wv.filter((c) => c >= 2).length / wv.length : NaN;
 
   // ── Detectors (research 05 §5.3) ──────────────────────────────────────────────────────────
-  const W = BANDS[0];
+  const W = bandDefs.find((b) => b.id === 'W')!;
   const wCounts = [...bands.W.land.counts].sort((a, b) => a - b);
   const boring: string[] = [];
   if (quantileSorted(wCounts, 0.5) < W.lo) boring.push(`W view p50 ${quantileSorted(wCounts, 0.5).toFixed(0)} < ${W.lo}`);
+  if (sphere) {
+    const gCounts = [...bands.G.land.counts].sort((a, b) => a - b);
+    const G = bandDefs[0];
+    if (quantileSorted(gCounts, 0.5) < G.lo) boring.push(`G view p50 ${quantileSorted(gCounts, 0.5).toFixed(0)} < ${G.lo}`);
+  }
   if (heroes.count === 0) boring.push('no hero');
   if (contrast.lowShare < CONTRAST.lowShare) boring.push(`only ${(contrast.lowShare * 100).toFixed(0)} % of land < 300 m`);
   if (contrast.highShare < contrastFor(job.archetype).highShare) boring.push(`only ${(contrast.highShare * 100).toFixed(1)} % of land > 2000 m`);
@@ -481,7 +675,7 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
   const cluttered: string[] = [];
   const wMax = wCounts.length ? wCounts[wCounts.length - 1] : 0;
   if (wMax > CLUTTER_W_MAX) cluttered.push(`W view with ${wMax} features > ${CLUTTER_W_MAX}`);
-  for (const band of BANDS) {
+  for (const band of bandDefs) {
     const lab = [...bands[band.id].land.labels].sort((a, b) => a - b);
     const p95 = quantileSorted(lab, 0.95);
     if (p95 > LABEL_CAP) cluttered.push(`${band.id} labels/screen p95 ${p95.toFixed(0)} > ${LABEL_CAP}`);
@@ -494,9 +688,9 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
 
   return {
     archetype: job.archetype, seed: job.seed, mode: job.mode, group: job.group, query: specToQuery(spec),
-    ms: Math.round(performance.now() - t0), worldKm, cellKm, landKm2, coastKm, warmOceanKm2,
-    counts, rates, features, kinds, tiers, heroes, targets, contrast, geomorph, clarkEvans: clarkEvansR, clusterDisk,
-    quietShare, biome, bands, boring, cluttered,
+    ms: Math.round(performance.now() - t0), shape: sphere ? 'sphere' : 'flat', worldKm, planetKm, cellKm, landKm2, coastKm, warmOceanKm2,
+    counts, rates, countRanges, features, kinds, tiers, heroes, targets, contrast, geomorph, clarkEvans: clarkEvansR, clusterDisk,
+    quietShare, iceShare, peakMaxM: kingM, traitsLead: traits.headline, biome, bands, boring, cluttered,
   };
 }
 
@@ -509,6 +703,33 @@ function paint(mask: Uint8Array, w: number, h: number, f: Feat, ox: number, oy: 
     if (f.pts.length === 2) rasterDisk(mask, w, h, (f.pts[0] - ox) / px, (f.pts[1] - oy) / px, 0);
   } else {
     rasterDisk(mask, w, h, (f.x - ox) / px, (f.y - oy) / px, f.r / px);
+  }
+}
+
+/** Paints a sphere feature into a cube-grid mask: polylines along their great-circle chords, disks through the grid's chart. */
+function paintSphere(mask: Uint8Array, g: CubeGrid, f: SFeat): void {
+  const n = g.n;
+  if (f.p3) {
+    const p = f.p3;
+    const half = g.cellM / 2 / g.radiusM;
+    for (let k = 3; k < p.length; k += 3) {
+      const ch = Math.hypot(p[k] - p[k - 3], p[k + 1] - p[k - 2], p[k + 2] - p[k - 1]);
+      const steps = Math.max(1, Math.ceil(ch / half));
+      for (let s = 0; s <= steps; s++) {
+        const t = s / steps;
+        mask[dirToCell(p[k - 3] + (p[k] - p[k - 3]) * t, p[k - 2] + (p[k + 1] - p[k - 2]) * t, p[k - 1] + (p[k + 2] - p[k - 1]) * t, n)] = 1;
+      }
+    }
+    if (p.length === 3) mask[dirToCell(p[0], p[1], p[2], n)] = 1;
+    return;
+  }
+  mask[dirToCell(f.d[0], f.d[1], f.d[2], n)] = 1;
+  if (f.r > 0) {
+    const sp = new Float64Array(3);
+    dirSurface(f.d[0], f.d[1], f.d[2], g.radiusM, sp);
+    g.chart({ face: sp[0], u: sp[1], v: sp[2] }, f.r, (i) => {
+      mask[i] = 1;
+    });
   }
 }
 
@@ -534,6 +755,112 @@ function emptySample(): BandSample {
   return { counts: [], entropy: [], cv: [], emptyKm: [], labels: [], landShare: [], contrast: [] };
 }
 
+/**
+ * One viewport, shape-independent: features, label anchors and big lakes are given in view metres
+ * (the view is the rectangle [x0, x0 + viewW) × [y0, y0 + viewH)); `cells` visits the grid cells of the
+ * view (land share, W contrast) and `landAt` says whether a view point is land (−1 off the map).
+ */
+interface ViewInput {
+  band: BandDef;
+  viewW: number;
+  viewH: number;
+  x0: number;
+  y0: number;
+  feats: readonly Feat[];
+  labelInView: () => number;
+  bigLakeInView: () => boolean;
+  cells: (visit: (i: number) => void) => void;
+  landAt: (mx: number, my: number) => number;
+  isLand: Uint8Array;
+  hy: HydroExtra;
+  bio: BiomeExtra;
+}
+
+function measureView(v: ViewInput, into: BandSample, uniform: boolean, ocean: number[] | null, classes?: Map<string, number>): void {
+  const { band, viewW, viewH, x0, y0, isLand } = v;
+  const x1 = x0 + viewW;
+  const y1 = y0 + viewH;
+  const inView = (x: number, y: number): boolean => x >= x0 && x < x1 && y >= y0 && y < y1;
+  let tot = 0;
+  let land = 0;
+  let maxH = -Infinity;
+  const biomeCount = new Map<number, number>();
+  v.cells((i) => {
+    tot++;
+    if (!isLand[i]) return;
+    land++;
+    maxH = Math.max(maxH, v.hy.elevation[i]);
+    const b = v.bio.biome[i];
+    if (b) biomeCount.set(b, (biomeCount.get(b) ?? 0) + 1);
+  });
+  const landShare = tot ? land / tot : 0;
+  // Features in view: anchor (or first in-view path point) inside the rectangle.
+  const cls = new Map<string, number>();
+  const grid = new Array<number>(CV_GRID * CV_GRID).fill(0);
+  let count = 0;
+  for (const f of v.feats) {
+    if (f.bx1 < x0 || f.bx0 >= x1 || f.by1 < y0 || f.by0 >= y1) continue;
+    let px = NaN;
+    let py = NaN;
+    if (inView(f.x, f.y)) {
+      px = f.x;
+      py = f.y;
+    } else if (f.pts) {
+      for (let i = 0; i < f.pts.length; i += 2) {
+        if (inView(f.pts[i], f.pts[i + 1])) {
+          px = f.pts[i];
+          py = f.pts[i + 1];
+          break;
+        }
+      }
+    }
+    if (Number.isNaN(px)) continue;
+    count++;
+    cls.set(f.cls, (cls.get(f.cls) ?? 0) + 1);
+    const gx = Math.min(CV_GRID - 1, Math.floor(((px - x0) / viewW) * CV_GRID));
+    const gy = Math.min(CV_GRID - 1, Math.floor(((py - y0) / viewH) * CV_GRID));
+    grid[gy * CV_GRID + gx]++;
+  }
+  if (uniform && ocean && landShare < OCEAN_VIEW_LAND) ocean.push(count);
+  // Largest empty disk on land (research 05 §3.2): EDT of the rasterised feature mask.
+  const px = viewW / EMPTY_PX;
+  const w = EMPTY_PX + 2 * EMPTY_MARGIN;
+  const h = Math.round(viewH / px) + 2 * EMPTY_MARGIN;
+  const ox = x0 - EMPTY_MARGIN * px;
+  const oy = y0 - EMPTY_MARGIN * px;
+  const mask = new Uint8Array(w * h);
+  const valid = new Uint8Array(w * h);
+  for (const f of v.feats) {
+    if (f.r < 0 || f.bx1 < ox || f.bx0 >= ox + w * px || f.by1 < oy || f.by0 >= oy + h * px) continue;
+    paint(mask, w, h, f, ox, oy, px);
+  }
+  for (let j = EMPTY_MARGIN; j < h - EMPTY_MARGIN; j++) {
+    const my = oy + (j + 0.5) * px;
+    for (let i = EMPTY_MARGIN; i < w - EMPTY_MARGIN; i++) {
+      const c = v.landAt(ox + (i + 0.5) * px, my);
+      if (c >= 0 && isLand[c]) valid[j * w + i] = 1;
+    }
+  }
+  const emptyKm = (largestEmptyDisk(mask, valid, w, h) * px) / 1000;
+  const labels = v.labelInView();
+  let contrastItems = 0;
+  if (band.id === 'W' || band.id === 'G') {
+    const highRelief = maxH >= CONTRAST.highM;
+    const openWater = 1 - landShare >= 0.05 || v.bigLakeInView();
+    let present = 0;
+    for (const n of biomeCount.values()) if (n >= PRESENT_SHARE * land) present++;
+    contrastItems = (highRelief ? 1 : 0) + (openWater ? 1 : 0) + (present >= 2 ? 1 : 0);
+  }
+  if (classes) for (const [k, n] of cls) classes.set(k, (classes.get(k) ?? 0) + n);
+  into.counts.push(count);
+  into.entropy.push(entropy(cls.values()));
+  into.cv.push(count >= 4 ? coefVar(grid) : NaN);
+  into.emptyKm.push(land > 0 ? emptyKm : NaN);
+  into.labels.push(labels);
+  into.landShare.push(landShare);
+  into.contrast.push(contrastItems);
+}
+
 function sampleBand(band: BandDef, c: BandCtx): BandResult {
   const { worldM, n, cellM, isLand } = c;
   const viewW = Math.min(worldM, (band.scalesWithWorld ? band.nominalKm * (worldM / 1024000) : band.nominalKm) * 1000);
@@ -551,101 +878,29 @@ function sampleBand(band: BandDef, c: BandCtx): BandResult {
   const nLand = Math.max(4, Math.round(c.views.land * scale));
   const nUni = Math.max(2, Math.round(c.views.uniform * scale));
 
-  const measure = (x0: number, y0: number, into: BandSample, uniform: boolean, classes?: Map<string, number>): void => {
+  const view = (x0: number, y0: number): ViewInput => {
     const x1 = x0 + viewW;
     const y1 = y0 + viewH;
     const inView = (x: number, y: number): boolean => x >= x0 && x < x1 && y >= y0 && y < y1;
-    // Land share and (W) contrast from the hydro grid.
-    const cx0 = Math.floor(x0 / cellM);
-    const cy0 = Math.floor(y0 / cellM);
-    const cx1 = Math.min(n - 1, Math.ceil(x1 / cellM) - 1);
-    const cy1 = Math.min(n - 1, Math.ceil(y1 / cellM) - 1);
-    const step = Math.max(1, Math.floor((cx1 - cx0 + 1) / 128));
-    let tot = 0;
-    let land = 0;
-    let maxH = -Infinity;
-    const biomeCount = new Map<number, number>();
-    for (let y = cy0; y <= cy1; y += step) {
-      for (let x = cx0; x <= cx1; x += step) {
-        const i = y * n + x;
-        tot++;
-        if (!isLand[i]) continue;
-        land++;
-        maxH = Math.max(maxH, c.hy.elevation[i]);
-        const b = c.bio.biome[i];
-        if (b) biomeCount.set(b, (biomeCount.get(b) ?? 0) + 1);
-      }
-    }
-    const landShare = tot ? land / tot : 0;
-    // Features in view: anchor (or first in-view path point) inside the rectangle.
-    const cls = new Map<string, number>();
-    const grid = new Array<number>(CV_GRID * CV_GRID).fill(0);
-    let count = 0;
-    for (const f of feats) {
-      if (f.bx1 < x0 || f.bx0 >= x1 || f.by1 < y0 || f.by0 >= y1) continue;
-      let px = NaN;
-      let py = NaN;
-      if (inView(f.x, f.y)) {
-        px = f.x;
-        py = f.y;
-      } else if (f.pts) {
-        for (let i = 0; i < f.pts.length; i += 2) {
-          if (inView(f.pts[i], f.pts[i + 1])) {
-            px = f.pts[i];
-            py = f.pts[i + 1];
-            break;
-          }
-        }
-      }
-      if (Number.isNaN(px)) continue;
-      count++;
-      cls.set(f.cls, (cls.get(f.cls) ?? 0) + 1);
-      const gx = Math.min(CV_GRID - 1, Math.floor(((px - x0) / viewW) * CV_GRID));
-      const gy = Math.min(CV_GRID - 1, Math.floor(((py - y0) / viewH) * CV_GRID));
-      grid[gy * CV_GRID + gx]++;
-    }
-    if (uniform && landShare < OCEAN_VIEW_LAND) res.ocean.push(count);
-    // Largest empty disk on land (research 05 §3.2): EDT of the rasterised feature mask.
-    const px = viewW / EMPTY_PX;
-    const w = EMPTY_PX + 2 * EMPTY_MARGIN;
-    const h = Math.round(viewH / px) + 2 * EMPTY_MARGIN;
-    const ox = x0 - EMPTY_MARGIN * px;
-    const oy = y0 - EMPTY_MARGIN * px;
-    const mask = new Uint8Array(w * h);
-    const valid = new Uint8Array(w * h);
-    for (const f of feats) {
-      if (f.r < 0 || f.bx1 < ox || f.bx0 >= ox + w * px || f.by1 < oy || f.by0 >= oy + h * px) continue;
-      paint(mask, w, h, f, ox, oy, px);
-    }
-    for (let j = EMPTY_MARGIN; j < h - EMPTY_MARGIN; j++) {
-      const my = oy + (j + 0.5) * px;
-      if (my < 0 || my >= worldM) continue;
-      for (let i = EMPTY_MARGIN; i < w - EMPTY_MARGIN; i++) {
-        const mx = ox + (i + 0.5) * px;
-        if (mx < 0 || mx >= worldM) continue;
-        if (isLand[Math.min(n - 1, Math.floor(my / cellM)) * n + Math.min(n - 1, Math.floor(mx / cellM))]) valid[j * w + i] = 1;
-      }
-    }
-    const emptyKm = (largestEmptyDisk(mask, valid, w, h) * px) / 1000;
-    let labels = 0;
-    for (const l of labelled) if (inView(l.x, l.y)) labels++;
-    let contrastItems = 0;
-    if (band.id === 'W') {
-      const highRelief = maxH >= CONTRAST.highM;
-      const bigLake = c.lakes.some((l) => l.areaKm2 >= 100 && inView(l.cx, l.cy));
-      const openWater = 1 - landShare >= 0.05 || bigLake;
-      let present = 0;
-      for (const v of biomeCount.values()) if (v >= PRESENT_SHARE * land) present++;
-      contrastItems = (highRelief ? 1 : 0) + (openWater ? 1 : 0) + (present >= 2 ? 1 : 0);
-    }
-    if (classes) for (const [k, v] of cls) classes.set(k, (classes.get(k) ?? 0) + v);
-    into.counts.push(count);
-    into.entropy.push(entropy(cls.values()));
-    into.cv.push(count >= 4 ? coefVar(grid) : NaN);
-    into.emptyKm.push(land > 0 ? emptyKm : NaN);
-    into.labels.push(labels);
-    into.landShare.push(landShare);
-    into.contrast.push(contrastItems);
+    return {
+      band, viewW, viewH, x0, y0, feats, isLand, hy: c.hy, bio: c.bio,
+      labelInView: () => {
+        let k = 0;
+        for (const l of labelled) if (inView(l.x, l.y)) k++;
+        return k;
+      },
+      bigLakeInView: () => c.lakes.some((l) => l.areaKm2 >= 100 && inView(l.cx, l.cy)),
+      cells: (visit) => {
+        // Land share and (W) contrast from the hydro grid.
+        const cx0 = Math.floor(x0 / cellM);
+        const cy0 = Math.floor(y0 / cellM);
+        const cx1 = Math.min(n - 1, Math.ceil(x1 / cellM) - 1);
+        const cy1 = Math.min(n - 1, Math.ceil(y1 / cellM) - 1);
+        const step = Math.max(1, Math.floor((cx1 - cx0 + 1) / 128));
+        for (let y = cy0; y <= cy1; y += step) for (let x = cx0; x <= cx1; x += step) visit(y * n + x);
+      },
+      landAt: (mx, my) => (my < 0 || my >= worldM || mx < 0 || mx >= worldM ? -1 : Math.min(n - 1, Math.floor(my / cellM)) * n + Math.min(n - 1, Math.floor(mx / cellM))),
+    };
   };
 
   const clampX = (x: number): number => Math.min(Math.max(0, x), worldM - viewW);
@@ -659,13 +914,158 @@ function sampleBand(band: BandDef, c: BandCtx): BandResult {
     const cy = (Math.floor(cell / n) + rnd()) * cellM;
     const tmp = emptySample();
     const tmpCls = new Map<string, number>();
-    measure(clampX(cx - viewW / 2), clampY(cy - viewH / 2), tmp, false, tmpCls);
+    measureView(view(clampX(cx - viewW / 2), clampY(cy - viewH / 2)), tmp, false, null, tmpCls);
     if (tmp.landShare[0] < OCEAN_VIEW_LAND) continue;
     for (const [k, v] of tmpCls) classSum.set(k, (classSum.get(k) ?? 0) + v);
     for (const k of Object.keys(tmp) as (keyof BandSample)[]) res.land[k].push(tmp[k][0]);
   }
-  for (let k = 0; k < nUni; k++) measure(clampX(rnd() * worldM - viewW / 2), clampY(rnd() * worldM - viewH / 2), res.uniform, true);
+  for (let k = 0; k < nUni; k++) measureView(view(clampX(rnd() * worldM - viewW / 2), clampY(rnd() * worldM - viewH / 2)), res.uniform, true, res.ocean);
   const nl = Math.max(1, res.land.counts.length);
   for (const [k, v] of classSum) res.classMean[k] = Math.round((v / nl) * 100) / 100;
   return res;
+}
+
+interface SphereBandCtx {
+  R: number;
+  grid: CubeGrid;
+  isLand: Uint8Array;
+  landList: number[];
+  /** Largest land cell area (m²), for area-weighted centres. */
+  maxArea: number;
+  all: SFeat[];
+  labelled: { maxMpp: number; d: Float64Array }[];
+  bigLakes: Float64Array[];
+  hy: HydroExtra;
+  bio: BiomeExtra;
+  seed: number;
+  views: { land: number; uniform: number };
+}
+
+/**
+ * Band viewports on a sphere (research 10 §7): spherical caps (azimuthal equidistant, `capView`) for
+ * W, R, A, L and the orthographic disc for G (`globeView`), centred on area-weighted land cells or
+ * area-uniform directions; no clamping. Features are projected into the view and measured as on flat maps.
+ */
+function sampleBandSphere(band: BandDef, c: SphereBandCtx): BandResult {
+  const { R, grid, isLand } = c;
+  const n = grid.n;
+  const globe = band.globe === true;
+  const viewW = globe ? 2 * R : band.nominalKm * 1000;
+  const viewH = globe ? 2 * R : viewW * VIEW_ASPECT;
+  const capKm = globe ? (band.emptyCapKm * (2 * R)) / 1024000 : band.emptyCapKm;
+  const lo = viewW * WINDOW_LO;
+  const hi = viewW * WINDOW_HI;
+  const feats = c.all.filter((f) => f.ext >= lo && f.ext <= hi && (f.cls !== 'river' || f.order >= band.minOrder));
+  const mpp = globe ? globeMpp(R) : viewW / SCREEN_PX;
+  const labelled = c.labelled.filter((l) => l.maxMpp >= mpp);
+  const rnd = prng((c.seed * 2654435761) ^ band.id.charCodeAt(0));
+  const res: BandResult = { viewKm: viewW / 1000, capKm, land: emptySample(), uniform: emptySample(), ocean: [], classMean: {} };
+  const classSum = new Map<string, number>();
+  const scale = globe || band.id === 'W' ? 0.25 : 1;
+  const nLand = Math.max(4, Math.round(c.views.land * scale));
+  const nUni = Math.max(2, Math.round(c.views.uniform * scale));
+  // Angular reach of the view from its centre, including the empty-disk raster's margin.
+  const marginM = (EMPTY_MARGIN * viewW) / EMPTY_PX;
+  const reach = globe ? Math.acos(GLOBE_MIN_FACING) : Math.min(Math.PI / 2, Math.hypot(viewW / 2 + marginM, viewH / 2 + marginM) / R);
+  const tmp = new Float64Array(3);
+  const q = new Float64Array(2);
+
+  const view = (proj: ViewProj): ViewInput => {
+    const cc = proj.c;
+    const near = (d: ArrayLike<number>, extra: number): boolean => {
+      const co = d[0] * cc[0] + d[1] * cc[1] + d[2] * cc[2];
+      return co >= Math.cos(Math.min(Math.PI, reach + extra));
+    };
+    const local: Feat[] = [];
+    for (const f of feats) {
+      if (!near(f.d, f.reach)) continue;
+      const ok = proj.project(f.d[0], f.d[1], f.d[2], q);
+      const x = ok ? q[0] : NaN;
+      const y = ok ? q[1] : NaN;
+      let pts: Float32Array | undefined;
+      if (f.p3) {
+        pts = new Float32Array((f.p3.length / 3) * 2);
+        for (let k = 0, o = 0; k < f.p3.length; k += 3, o += 2) {
+          if (proj.project(f.p3[k], f.p3[k + 1], f.p3[k + 2], q)) {
+            pts[o] = q[0];
+            pts[o + 1] = q[1];
+          } else {
+            pts[o] = NaN;
+            pts[o + 1] = NaN;
+          }
+        }
+      }
+      if (!ok && !pts) continue;
+      local.push(bboxFinite({ cls: f.cls, x, y, ext: f.ext, r: f.r, order: f.order, ...(pts ? { pts } : {}) }));
+    }
+    const inView = (d: ArrayLike<number>): boolean =>
+      near(d, 0) && proj.project(d[0], d[1], d[2], q) && q[0] >= 0 && q[0] < viewW && q[1] >= 0 && q[1] < viewH;
+    return {
+      band, viewW, viewH, x0: 0, y0: 0, feats: local, isLand, hy: c.hy, bio: c.bio,
+      labelInView: () => {
+        let k = 0;
+        for (const l of labelled) if (inView(l.d)) k++;
+        return k;
+      },
+      bigLakeInView: () => c.bigLakes.some(inView),
+      cells: (visit) => {
+        // A lattice of view points at about the cell size (≤ 128 per row), each looked up in the grid.
+        const s = Math.max(viewW / 128, grid.cellM * 0.7);
+        for (let y = s / 2; y < viewH; y += s) {
+          for (let x = s / 2; x < viewW; x += s) if (proj.unproject(x, y, tmp)) visit(dirToCell(tmp[0], tmp[1], tmp[2], n));
+        }
+      },
+      landAt: (mx, my) => (proj.unproject(mx, my, tmp) ? dirToCell(tmp[0], tmp[1], tmp[2], n) : -1),
+    };
+  };
+  const make = (d: ArrayLike<number>): ViewProj => (globe ? globeView(d, R, GLOBE_MIN_FACING) : capView(d, R, viewW, viewH));
+
+  // Land-weighted: centred on a land cell drawn ∝ its area, jittered inside it; resampled if < 10 % land.
+  const centre = new Float64Array(3);
+  const east = new Float64Array(3);
+  const north = new Float64Array(3);
+  const up = new Float64Array(3);
+  let tries = 0;
+  while (res.land.counts.length < nLand && tries < nLand * 4 && c.landList.length) {
+    tries++;
+    const cell = pickWeighted(c.landList, (i) => grid.area(i), c.maxArea, rnd);
+    grid.frame(cell, east, north, up);
+    const s = grid.cellM / R;
+    const a = (rnd() - 0.5) * s;
+    const b = (rnd() - 0.5) * s;
+    for (let k = 0; k < 3; k++) centre[k] = up[k] + a * east[k] + b * north[k];
+    const len = Math.hypot(centre[0], centre[1], centre[2]);
+    for (let k = 0; k < 3; k++) centre[k] /= len;
+    const one = emptySample();
+    const oneCls = new Map<string, number>();
+    measureView(view(make(centre)), one, false, null, oneCls);
+    if (one.landShare[0] < OCEAN_VIEW_LAND) continue;
+    for (const [k, v] of oneCls) classSum.set(k, (classSum.get(k) ?? 0) + v);
+    for (const k of Object.keys(one) as (keyof BandSample)[]) res.land[k].push(one[k][0]);
+  }
+  for (let k = 0; k < nUni; k++) {
+    randomDir(rnd, centre);
+    measureView(view(make(centre)), res.uniform, true, res.ocean);
+  }
+  const nl = Math.max(1, res.land.counts.length);
+  for (const [k, v] of classSum) res.classMean[k] = Math.round((v / nl) * 100) / 100;
+  return res;
+}
+
+/** bbox over the finite coordinates (projected polylines carry NaN where a point is off the view's sheet). */
+function bboxFinite(f: Omit<Feat, 'bx0' | 'by0' | 'bx1' | 'by1'>): Feat {
+  let bx0 = Infinity;
+  let by0 = Infinity;
+  let bx1 = -Infinity;
+  let by1 = -Infinity;
+  const add = (x: number, y: number): void => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    bx0 = Math.min(bx0, x);
+    bx1 = Math.max(bx1, x);
+    by0 = Math.min(by0, y);
+    by1 = Math.max(by1, y);
+  };
+  add(f.x, f.y);
+  if (f.pts) for (let i = 0; i < f.pts.length; i += 2) add(f.pts[i], f.pts[i + 1]);
+  return { ...f, bx0, by0, bx1, by1 };
 }

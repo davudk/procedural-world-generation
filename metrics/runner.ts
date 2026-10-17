@@ -6,11 +6,14 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ARCHETYPES } from '../src/shared/config/archetypes';
-import { aggregateArch, sizeInvariance, type ArchAgg, type SizeRow } from './aggregate';
+import type { Pins } from '../src/shared/config/types';
+import { aggregateArch, shapeComparison, sizeInvariance, type ArchAgg, type ShapeRow, type SizeRow } from './aggregate';
 import { renderHtml, renderMarkdown } from './report';
 import { measureWorld, type WorldJob, type WorldMetrics } from './world';
 
 export interface SuiteOptions {
+  /** Shape of the preview and build suites (spheres: the default small planet unless an archetype biases it). */
+  shape: 'flat' | 'sphere';
   archetypes: string[];
   seeds: number;
   seedStart: number;
@@ -18,19 +21,26 @@ export interface SuiteOptions {
   buildSeeds: number;
   sizeArchetype: string;
   sizes: number[];
+  /** Sphere sweep: planet circumferences (km), compared with the 4,096 km small planet. */
+  planetSizes: number[];
   sizeSeeds: number;
+  /** Sphere sweep: also run flat worlds of equal area (width √(4πR²), where that fits the flat 4,096 km maximum). */
+  equalArea: boolean;
   /** 'preview' (fixed 256² grid, cell size grows with the world) or 'build-const' (build mode, grids pinned to 1 km cells). */
   sizeMode: 'preview' | 'build-const';
   views: { land: number; uniform: number };
   /** 0 = run in this thread. */
   workers: number;
   outDir: string;
+  /** Extra pins for every world of the run (experiments: `--pins peakHeight=3000:6000,glaciation=1`). */
+  pins: Pins;
   /** Prefix for seed links in the report (the dev server by default). */
   baseUrl: string;
   quiet: boolean;
 }
 
 export const DEFAULT_OPTIONS: SuiteOptions = {
+  shape: 'flat',
   archetypes: ARCHETYPES.map((a) => a.id),
   seeds: 40,
   seedStart: 1,
@@ -38,11 +48,14 @@ export const DEFAULT_OPTIONS: SuiteOptions = {
   buildSeeds: 4,
   sizeArchetype: 'earth',
   sizes: [512, 1024, 2048],
+  planetSizes: [2048, 4096, 8192, 12000],
   sizeSeeds: 12,
+  equalArea: true,
   sizeMode: 'preview',
   views: { land: 64, uniform: 32 },
   workers: -1,
   outDir: 'metrics/out',
+  pins: {},
   baseUrl: 'http://localhost:5174/',
   quiet: false,
 };
@@ -51,15 +64,32 @@ export interface SuiteResult {
   meta: { startedAt: string; seconds: number; workers: number; worlds: number; failures: string[]; options: SuiteOptions };
   archetypes: ArchAgg[];
   size: SizeRow[];
+  /** Sphere sweeps: sphere vs equal-area flat worlds. */
+  shape: ShapeRow[];
   worlds: WorldMetrics[];
 }
 
 export function buildJobs(o: SuiteOptions): WorldJob[] {
   const jobs: WorldJob[] = [];
   const seeds = (k: number): number[] => Array.from({ length: k }, (_, i) => o.seedStart + i);
-  for (const a of o.archetypes) for (const seed of seeds(o.seeds)) jobs.push({ archetype: a, seed, mode: 'preview', group: 'preview', views: o.views });
-  for (const a of o.buildArchetypes) for (const seed of seeds(o.buildSeeds)) jobs.push({ archetype: a, seed, mode: 'build', group: 'build', views: o.views });
-  if (o.sizes.length > 1) {
+  const sphere = o.shape === 'sphere';
+  const base = { pins: { ...o.pins, ...(sphere ? { worldShape: 'sphere' } : {}) } };
+  for (const a of o.archetypes) for (const seed of seeds(o.seeds)) jobs.push({ archetype: a, seed, mode: 'preview', group: 'preview', views: o.views, ...base });
+  for (const a of o.buildArchetypes) for (const seed of seeds(o.buildSeeds)) jobs.push({ archetype: a, seed, mode: 'build', group: 'build', views: o.views, ...base });
+  if (sphere) {
+    if (o.planetSizes.length > 1 && o.sizeSeeds > 0) {
+      for (const c of o.planetSizes) {
+        for (const seed of seeds(o.sizeSeeds)) {
+          jobs.push({ archetype: o.sizeArchetype, seed, mode: 'preview', group: `size-${c}`, pins: { ...o.pins, worldShape: 'sphere', planetSize: c }, views: o.views });
+        }
+        // Equal-area flat world: width √(4πR²) = C / √π.
+        const km = Math.round(c / Math.sqrt(Math.PI));
+        if (o.equalArea && km <= 4096) {
+          for (const seed of seeds(o.sizeSeeds)) jobs.push({ archetype: o.sizeArchetype, seed, mode: 'preview', group: `flat-${km}`, pins: { ...o.pins, worldSize: km }, views: o.views });
+        }
+      }
+    }
+  } else if (o.sizes.length > 1) {
     for (const s of o.sizes) {
       for (const seed of seeds(o.sizeSeeds)) {
         const build = o.sizeMode === 'build-const';
@@ -154,18 +184,20 @@ export async function runSuite(partial: Partial<SuiteOptions> = {}): Promise<Sui
     else groups.set(k, [w]);
   }
   const archetypes = [...groups.values()].map(aggregateArch);
-  const groupRank = (g: string): number => (g === 'preview' ? 0 : g === 'build' ? 1 : 2);
+  const groupRank = (g: string): number => (g === 'preview' ? 0 : g === 'build' ? 1 : g.startsWith('size-') ? 2 : 3);
   const archRank = (a: string): number => o.archetypes.indexOf(a);
   archetypes.sort((a, b) => groupRank(a.group) - groupRank(b.group) || archRank(a.archetype) - archRank(b.archetype) || a.worldKm - b.worldKm);
-  const size = sizeInvariance(worlds.filter((w) => w.group.startsWith('size-')));
+  const sized = worlds.filter((w) => w.group.startsWith('size-'));
+  const size = sizeInvariance(sized);
+  const shape = shapeComparison(sized.filter((w) => w.shape === 'sphere'), worlds.filter((w) => w.group.startsWith('flat-')));
   const result: SuiteResult = {
     meta: { startedAt: new Date().toISOString(), seconds: (performance.now() - t0) / 1000, workers, worlds: worlds.length, failures, options: o },
-    archetypes, size, worlds,
+    archetypes, size, shape, worlds,
   };
 
   mkdirSync(o.outDir, { recursive: true });
   writeFileSync(join(o.outDir, 'metrics.json'), JSON.stringify(result, compact));
-  writeFileSync(join(o.outDir, 'summary.json'), JSON.stringify({ meta: result.meta, archetypes, size }, compact, 1));
+  writeFileSync(join(o.outDir, 'summary.json'), JSON.stringify({ meta: result.meta, archetypes, size, shape }, compact, 1));
   writeFileSync(join(o.outDir, 'report.html'), renderHtml(result));
   writeFileSync(join(o.outDir, 'summary.md'), renderMarkdown(result));
   return result;

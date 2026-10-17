@@ -3,14 +3,16 @@
  * density-landmarks.md) or PLAN.md §4; "(est.)" marks thresholds this harness had to choose.
  */
 
-export type BandId = 'W' | 'R' | 'A' | 'L';
+export type BandId = 'G' | 'W' | 'R' | 'A' | 'L';
 
 export interface BandDef {
   id: BandId;
   /** Nominal view width (km) at the default 1024 km world (research 05 §3.2). */
   nominalKm: number;
-  /** W follows the world size ("W ≈ full world"); R, A and L are fixed physical widths. */
+  /** W follows the world size on flat maps ("W ≈ full world"); R, A and L (and W on spheres) are fixed physical widths. */
   scalesWithWorld: boolean;
+  /** Band G only: the whole-planet view, an orthographic disc 2R across (nominalKm is unused). */
+  globe?: true;
   /** Target distinct scale-appropriate features per view. */
   lo: number;
   hi: number;
@@ -28,6 +30,31 @@ export const BANDS: readonly BandDef[] = [
   { id: 'A', nominalKm: 60, scalesWithWorld: false, lo: 8, hi: 20, emptyCapKm: 12, entropyMin: 0.8, minOrder: 2 },
   { id: 'L', nominalKm: 16, scalesWithWorld: false, lo: 6, hi: 20, emptyCapKm: 3, entropyMin: 0.8, minOrder: 1 },
 ];
+
+/**
+ * Bands on spheres (research 10 §7): a globe band G (the whole disc when the planet fills the screen:
+ * continents, oceans, ranges, great rivers, deserts, ice caps; 15–40 distinct features), then W at a
+ * fixed 1,024 km cap and R, A, L as on flat maps. G's empty-disk cap is W's 200 km scaled to the disc
+ * width (2R / 1024 km, est.).
+ */
+export const SPHERE_BANDS: readonly BandDef[] = [
+  { id: 'G', nominalKm: 0, scalesWithWorld: false, globe: true, lo: 15, hi: 40, emptyCapKm: 200, entropyMin: 1.2, minOrder: 6 },
+  { ...BANDS[0], scalesWithWorld: false },
+  ...BANDS.slice(1),
+];
+
+/** Every band id in display order. */
+export const ALL_BAND_IDS: readonly BandId[] = ['G', 'W', 'R', 'A', 'L'];
+
+export const bandsFor = (shape: 'flat' | 'sphere'): readonly BandDef[] => (shape === 'sphere' ? SPHERE_BANDS : BANDS);
+
+/**
+ * Band G: a point is in the globe view while its surface faces the eye by at least this cosine, the
+ * labels' GLOBE_MIN_FACING (src/render/labels/labelEngine.ts; names nearer the limb are not drawn).
+ */
+export const GLOBE_MIN_FACING = 0.3;
+/** Band G metres per pixel: the registry's world-band scale, the planet fitted into 700 px (src/gen/registry/rank.ts). */
+export const globeMpp = (radiusM: number): number => (2.2 * radiusM) / 700;
 
 /** Screen assumed by research 05 §3.2: ~1600 px wide; height at a 16:10 aspect. */
 export const SCREEN_PX = 1600;
@@ -118,6 +145,26 @@ export interface CountTarget {
  * (src/gen/stages/hydro.ts GREAT_RIVER_KM must match).
  */
 export const GREAT_RIVER_KM = 400;
+
+/**
+ * Per-world rows of COUNT_TARGETS on a sphere (research 10 §7: counts per land / coast area). The §4
+ * per-world numbers are for the 1024 km default world, so on a planet they scale with its area
+ * k = (S_eff / 1024 km)², fjord coast with √k (coast length grows like a length). Rows that are an
+ * outcome or AUTO range use the world's own resolved range: major ranges (🎯 mountainRangeCount) and
+ * heroes ([5, 8] on spheres, research 10 §3.3). Great rivers stay 1–3: their length threshold already
+ * scales with the size, and the number of basins of a size ∝ the world does not grow.
+ */
+export function sphereCountRange(t: CountTarget, worldKm: number, resolved: (id: string) => [number, number]): [number, number] {
+  if (t.per !== 'world') return t.range;
+  const k = (worldKm / 1024) ** 2;
+  switch (t.key) {
+    case 'majorRanges': return resolved('mountainRangeCount');
+    case 'heroes': return resolved('heroCount');
+    case 'greatRivers': return t.range;
+    case 'fjordCoastKm': return [t.range[0] * Math.sqrt(k), t.range[1] * Math.sqrt(k)];
+    default: return [t.range[0] * k, t.range[1] * k];
+  }
+}
 
 export const COUNT_TARGETS: readonly CountTarget[] = [
   { key: 'majorRanges', label: 'Major ranges (🎯 outcome)', per: 'world', range: [1, 3], row: '#3' },

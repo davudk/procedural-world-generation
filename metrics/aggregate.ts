@@ -4,7 +4,7 @@
  */
 import { summarize, type Summary } from './lib/math';
 import {
-  BANDS, CLARK_EVANS, CONTRAST, contrastFor, COUNT_TARGETS, CV_HI, CV_LO, EMPTY_OK_SHARE, ENTROPY_OK_SHARE, GEOMORPH, P95_SLACK,
+  bandsFor, CLARK_EVANS, CONTRAST, contrastFor, COUNT_TARGETS, CV_HI, CV_LO, EMPTY_OK_SHARE, ENTROPY_OK_SHARE, GEOMORPH, P95_SLACK,
   QUIET, type BandId,
 } from './targets';
 import type { WorldMetrics } from './world';
@@ -54,7 +54,10 @@ export interface ArchAgg {
   group: string;
   archetype: string;
   mode: string;
+  shape: 'flat' | 'sphere';
   worldKm: number;
+  /** Sphere circumference (km); 0 on flat maps. */
+  planetKm: number;
   seeds: number;
   msMean: number;
   landKm2: Summary;
@@ -70,6 +73,9 @@ export interface ArchAgg {
   clarkEvans: Record<string, RateAgg>;
   quiet: RateAgg;
   biomeMax: Summary;
+  /** Land share under perennial snow / ice, and the highest summit (m). */
+  iceShare: Summary;
+  peakMax: Summary;
   boringRate: number;
   clutteredRate: number;
   boring: Flag[];
@@ -85,6 +91,18 @@ const pct = (xs: number[], q: number): number => {
   return summarize(s)[q === 5 ? 'p5' : q === 95 ? 'p95' : 'p50'];
 };
 
+/** As rateAgg, with a range per world (sphere count rows scale with the planet). */
+function rateAggPer(values: number[], ranges: [number, number][], zeroOk = false): RateAgg {
+  let n = 0;
+  let ok = 0;
+  values.forEach((v, i) => {
+    if (!Number.isFinite(v)) return;
+    n++;
+    if ((zeroOk && v === 0) || (v >= ranges[i][0] && v <= ranges[i][1])) ok++;
+  });
+  return { summary: summarize(values), range: ranges[0], passRate: n ? ok / n : NaN };
+}
+
 function rateAgg(values: number[], range: [number, number], zeroOk = false): RateAgg {
   const fin = values.filter(Number.isFinite);
   return {
@@ -99,7 +117,7 @@ const reasonKey = (r: string): string => r.replace(/[\d.]+/g, '#').replace(/\s+/
 export function aggregateArch(ws: WorldMetrics[]): ArchAgg {
   const w0 = ws[0];
   const bands = {} as Record<BandId, BandAgg>;
-  for (const b of BANDS) {
+  for (const b of bandsFor(w0.shape)) {
     const pooledCounts = ws.flatMap((w) => w.bands[b.id].land.counts);
     const capKm = w0.bands[b.id].capKm;
     const empties = ws.flatMap((w) => w.bands[b.id].land.emptyKm).filter(Number.isFinite);
@@ -150,7 +168,7 @@ export function aggregateArch(ws: WorldMetrics[]): ArchAgg {
   }
 
   const counts: Record<string, RateAgg> = {};
-  for (const t of COUNT_TARGETS) counts[t.key] = rateAgg(ws.map((w) => w.rates[t.key]), t.range, t.zeroOk);
+  for (const t of COUNT_TARGETS) counts[t.key] = rateAggPer(ws.map((w) => w.rates[t.key]), ws.map((w) => w.countRanges?.[t.key] ?? t.range), t.zeroOk);
 
   const features: ArchAgg['features'] = {};
   for (const [k, f] of Object.entries(w0.features)) {
@@ -173,7 +191,7 @@ export function aggregateArch(ws: WorldMetrics[]): ArchAgg {
   };
 
   return {
-    group: w0.group, archetype: w0.archetype, mode: w0.mode, worldKm: w0.worldKm, seeds: ws.length,
+    group: w0.group, archetype: w0.archetype, mode: w0.mode, shape: w0.shape, worldKm: w0.worldKm, planetKm: w0.planetKm, seeds: ws.length,
     msMean: summarize(ws.map((w) => w.ms)).mean, landKm2: summarize(ws.map((w) => w.landKm2)),
     bands, targets, counts, features, tiers,
     rareAtLeastOne: share(ws.map((w) => (w.tiers.rare ?? 0) >= 1)),
@@ -193,6 +211,7 @@ export function aggregateArch(ws: WorldMetrics[]): ArchAgg {
     geomorph, clarkEvans,
     quiet: rateAgg(ws.map((w) => w.quietShare), QUIET.share),
     biomeMax: summarize(ws.map((w) => w.biome.maxShare)),
+    iceShare: summarize(ws.map((w) => w.iceShare)), peakMax: summarize(ws.map((w) => w.peakMaxM)),
     boringRate: boring.length / ws.length, clutteredRate: cluttered.length / ws.length,
     boring, cluttered, boringReasons: tally(boring), clutteredReasons: tally(cluttered),
   };
@@ -208,15 +227,22 @@ export interface SizeRow {
   ok: boolean;
 }
 
-/** Size invariance (research 05 §5.5): per-10⁵ km² rates within ±20 %, same-band viewport metrics within ±15 %. */
+/**
+ * Size invariance (research 05 §5.5): per-10⁵ km² rates within ±20 %, same-band viewport metrics within
+ * ±15 %. Flat sweeps compare world widths against 1024 km; sphere sweeps compare circumferences against
+ * the 4,096 km small planet.
+ */
 export function sizeInvariance(ws: WorldMetrics[]): SizeRow[] {
-  const sizes = [...new Set(ws.map((w) => w.worldKm))].sort((a, b) => a - b);
+  const sphere = ws.length > 0 && ws[0].shape === 'sphere';
+  const sizeOf = (w: WorldMetrics): number => (sphere ? w.planetKm : w.worldKm);
+  const sizes = [...new Set(ws.map(sizeOf))].sort((a, b) => a - b);
   if (sizes.length < 2) return [];
-  const ref = sizes.includes(1024) ? 1024 : sizes[Math.floor(sizes.length / 2)];
+  const pref = sphere ? 4096 : 1024;
+  const ref = sizes.includes(pref) ? pref : sizes[Math.floor(sizes.length / 2)];
   const rows: SizeRow[] = [];
   const add = (key: string, kind: SizeRow['kind'], tol: number, f: (w: WorldMetrics) => number): void => {
     const values: Record<number, number> = {};
-    for (const s of sizes) values[s] = summarize(ws.filter((w) => w.worldKm === s).map(f)).mean;
+    for (const s of sizes) values[s] = summarize(ws.filter((w) => sizeOf(w) === s).map(f)).mean;
     let maxDev = 0;
     for (const s of sizes) if (s !== ref) maxDev = Math.max(maxDev, Math.abs(values[s] / values[ref] - 1));
     if (!Number.isFinite(maxDev)) maxDev = NaN;
@@ -228,9 +254,66 @@ export function sizeInvariance(ws: WorldMetrics[]): SizeRow[] {
   for (const k of ['riversToSea', 'deltas', 'peninsulas', 'seaStacks', 'barrierIslands']) add(`${k} /1000 km coast`, 'rate', 0.2, (w) => w.features[k]?.rate ?? NaN);
   add('wetland share', 'rate', 0.2, (w) => w.counts.wetland);
   add('land share < 300 m', 'rate', 0.2, (w) => w.contrast.lowShare);
-  for (const b of ['R', 'A', 'L'] as BandId[]) {
+  for (const b of (sphere ? ['W', 'R', 'A', 'L'] : ['R', 'A', 'L']) as BandId[]) {
     add(`${b} view count p50`, 'band', 0.15, (w) => pct(w.bands[b].land.counts, 50));
     add(`${b} empty disk p50 (km)`, 'band', 0.15, (w) => pct(w.bands[b].land.emptyKm, 50));
+  }
+  return rows;
+}
+
+/** One row of the sphere-vs-flat comparison at equal area: mean per planet size for both shapes. */
+export interface ShapeRow {
+  key: string;
+  /** Planet circumference → [sphere mean, flat mean at the equal-area width]. */
+  values: Record<number, [number, number]>;
+  /** max |sphere / flat − 1| over the sizes. */
+  maxDev: number;
+  tol: number;
+  ok: boolean;
+}
+
+/**
+ * Sphere vs an equal-area flat world (research 10 §7): the question is "does the sphere generate the
+ * same densities as a flat world of the same area". Worlds pair by worldKm (the sphere's equal-area
+ * size √(4πR²) = the flat width). Same tolerances as the size sweep.
+ */
+export function shapeComparison(spheres: WorldMetrics[], flats: WorldMetrics[]): ShapeRow[] {
+  const sizes = [...new Set(spheres.map((w) => w.planetKm))].sort((a, b) => a - b);
+  const pairs = sizes
+    .map((c) => {
+      const s = spheres.filter((w) => w.planetKm === c);
+      const km = Math.round(s[0].worldKm);
+      return { c, s, f: flats.filter((w) => Math.abs(w.worldKm - km) <= 1) };
+    })
+    .filter((p) => p.f.length > 0);
+  if (!pairs.length) return [];
+  const rows: ShapeRow[] = [];
+  const add = (key: string, tol: number, f: (w: WorldMetrics) => number): void => {
+    const values: Record<number, [number, number]> = {};
+    let maxDev = 0;
+    for (const p of pairs) {
+      const a = summarize(p.s.map(f)).mean;
+      const b = summarize(p.f.map(f)).mean;
+      values[p.c] = [a, b];
+      maxDev = Math.max(maxDev, Math.abs(a / b - 1));
+    }
+    if (!Number.isFinite(maxDev)) maxDev = NaN;
+    rows.push({ key, values, maxDev, tol, ok: maxDev <= tol });
+  };
+  for (const k of ['peaks', 'peaks3k', 'volcanoes', 'lakes', 'lakes10', 'lakes100', 'islands', 'islands100', 'waterfalls', 'canyons', 'rivers56', 'glaciers', 'dolines']) {
+    add(`${k} /10⁵ km²`, 0.2, (w) => w.features[k]?.rate ?? NaN);
+  }
+  for (const k of ['riversToSea', 'deltas', 'peninsulas', 'seaStacks', 'barrierIslands']) add(`${k} /1000 km coast`, 0.2, (w) => w.features[k]?.rate ?? NaN);
+  add('land km²', 0.2, (w) => w.landKm2);
+  add('wetland share', 0.2, (w) => w.counts.wetland);
+  add('ice share of land', 0.2, (w) => w.iceShare);
+  add('land share < 300 m', 0.2, (w) => w.contrast.lowShare);
+  add('land share > 2000 m', 0.2, (w) => w.contrast.highShare);
+  add('highest summit (m)', 0.2, (w) => w.peakMaxM);
+  // W is left out: it is a fixed 1,024 km cap on spheres but the whole map on flat worlds.
+  for (const b of ['R', 'A', 'L'] as BandId[]) {
+    add(`${b} view count p50`, 0.15, (w) => pct(w.bands[b].land.counts, 50));
+    add(`${b} empty disk p50 (km)`, 0.15, (w) => pct(w.bands[b].land.emptyKm, 50));
   }
   return rows;
 }
