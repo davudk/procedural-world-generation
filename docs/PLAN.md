@@ -1238,3 +1238,67 @@ Spherical worlds are being added as an option, with flat staying the default ([r
 - Preview canyons use the 8 km regional cells' 3 × 3 relief, so some are long (hundreds of km).
 - Registry grids use nominal cell areas for merge-tree thresholds (≈ 15 % high on average); reported areas are exact.
 - Labels on the 2D sphere map (equirectangular / cube net) are not drawn; the 2D inspector names the nearest place.
+
+### Sphere phase 4d — Metrics on spheres and tuning (2026-10-17)
+
+Full write-up, with baseline and tuned tables per archetype and band: [research 11](research/11-sphere-metrics.md).
+
+**What landed:**
+- **The metrics harness runs on spheres** (`metrics/world.ts`, `metrics/lib/sphere.ts`, `npm run metrics -- --shape sphere`):
+  - Viewports are spherical caps: azimuthal equidistant about centres drawn ∝ true cell area on land, or area-uniform; no clamping.
+  - W is a fixed 1,024 km cap. A new band **G** is the whole planet: an orthographic disc, features facing the eye by ≥ 0.3, "distinct" = 20 px at the registry's globe scale, target 15–40, empty cap 2R/5.
+  - True cell areas, great-circle Clark–Evans, cluster disks, hero spacing and quiet land, components across seams, coast box counts per face.
+  - Per-world count rows scale with the planet's area (fjord coast with its square root; ranges and heroes use their resolved ranges).
+  - New options: `--planet-sizes` (sweep against 4,096 km), `--equal-area` (each planet against a flat world of the same area) and `--pins`.
+  - Flat output is unchanged (checked field by field against the old harness).
+- **Tuning, all sphere-only:**
+  - Relief: uplift calibrated with its first cell capped at 2.5 km (less beyond 8 km cells), and no peakHeight size bonus.
+  - Glaciation reads the Earth-like 65° reach.
+  - Precipitation: a one-cell storm blur minimum and area-aware upwind weights.
+  - Lake density scales with max(0.5, min(1, 4 km / cell)).
+  - Plates: 64 motion candidates, then excess long rifts and ranges become transforms.
+  - Registry: the world budget, fill and a local label tier at the 1,024 km W cap, with a local cap of 40 W-scale features within 512 km; a globe-scale fill and a globe label cap of 36.
+  - Preview canyons search their rims within 6 km.
+  - Also true coast edge lengths, mean cell areas for merge-tree thresholds, and a sphere drainage-density coefficient.
+- **Globe labels near the limb:** a point label whose boxes would reach past the planet's disc on screen is not drawn (`LabelEngine.insideDisc`).
+
+**Measurements** (seeds 1–20, small-planet previews; baseline = Phase 4c on this harness):
+- **Band W:** 0–55 % → **70–100 %** of seeds (flat 80–100 %). Build subset 33–67 % → **100 %**.
+- **🎯 targets:**
+  - Ranges 45–100 % → **100 %**, rifts 5–100 % → **100 %**, everywhere.
+  - King summit 0–40 % → 85–100 % on 8 archetypes (rift 25 %, volcanic 40 %; flat 60 %).
+  - Land above 2 km 85–100 %, except desert at 65 % (flat 90 %).
+- **Relief:**
+  - p95 peak 7.1–8.1 km → **4.9–6.0 km** (flat 4.6–5.3). The highest summit is 8.5–8.6 km (craton 6.3).
+  - Land above 2 km 0.14–0.23 → 0.06–0.12 (flat 0.07–0.13).
+- **Ice share of land:** earth 0.20 → **0.08**, fjordland 0.11, iceage 0.19, hothouse 0.02. "A world of ice" headlines 25–100 % → 0 % (1 ice-age seed in 20).
+- **Labels:** W labels per screen p95 82–134 → **44–52**, G 55–96 → **28–42**. Cluttered seeds 100 % → 0 % on 7 archetypes (20–40 % on archipelago, fjordland and volcanic, from W views over 60 features).
+- **Precipitation on land, earth, max:** 12,500 → **9,600 mm/yr** on the small planet; 33,000 → 12,400 at 8,192 km; 35,000 → 10,100 at 12,000 km. The water world's zonal spread is ±15 % (was ±17 %).
+- **Timing:**
+  - Flat `npm run bench` against main, interleaved: preview −0.5 %, build −0.4 %.
+  - Sphere bench: preview 3.59 → 3.65 s (seeds 7 + 11), build 33.8 → 33.5 s. The sphere registry is a little faster: its fill now updates the distance field around each mark.
+- **Flat goldens** (`tests/golden.json`) are byte-identical. Only `tests/golden-sphere.json` was re-recorded.
+
+**Tests:**
+- `tests/metrics.test.ts`:
+  - cap views keep ground distances and round-trip, poles included;
+  - the globe view's facing cut;
+  - area-uniform directions and area-weighted cell picks;
+  - great-circle nearest neighbours against brute force, and Clark–Evans for random (≈ 1), lattice and clustered points;
+  - box counting over faces;
+  - band lists and sphere count ranges;
+  - a sphere run with bands G–L and true areas.
+- `tests/labels.test.ts`: a long name near the limb is hidden while it still faces the eye, and a short one shows.
+- `tests/sphere.test.ts`: the water world's precipitation bound tightened to 35 %.
+
+**Known gaps:**
+- **Band G passes on 0–40 % of seeds.**
+  - A hemisphere holds ~2.4 W views of land, so G sees too many W-scale features: p50 39–53, p95 53–67.
+  - Interiors keep 250–450 km disks with no globe-scale feature.
+  - Passing it needs fewer, larger features at globe scale, not more W-scale ones.
+- **R, A and L in previews are 0 %.** The 8 km preview cells under-resolve rivers, lakes and summits. Builds behave like flat builds (R empty disks pass; R counts fail on p95 on both shapes).
+- **W on volcanic (70 %)** is limited by unbudgeted lakes on glaciated land.
+- **Size invariance** fails by construction with the fixed 6 × 128² preview grid (4–23 km cells over the sweep).
+- **Equal-area flat comparison:** spheres now match the default flat world, not flat worlds of 1,155–2,311 km, whose untuned AUTO formulas over-build relief at 9 km cells.
+- **Remaining zonal spread:** precipitation on a water world still varies by ±15 % between longitudes. This is first-order upwind transport.
+- **Flat registry:** the +12 % on builds since 4c (≈ 45 ms) is unchanged. It is spread over the rivers and naming sub-laps.

@@ -12,7 +12,7 @@ A configurable procedural world generator in the browser. It builds a finite reg
 
 The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 
-**Status: milestone M9 (polish & ship), plus spherical worlds in progress** ([research 10](docs/research/10-spherical-worlds.md)): set the world shape to Sphere for a cube-sphere planet with plates, erosion and climate, shown as a 3D globe or a 2D map (phases 1–3 of 4). It includes:
+**Status: milestone M9 (polish & ship), with spherical worlds complete as an option** ([research 10](docs/research/10-spherical-worlds.md), [research 11](docs/research/11-sphere-metrics.md)). Set the world shape to Sphere for a cube-sphere planet that runs every stage of the flat pipeline and is shown as a labelled 3D globe or a 2D map. Spheres are scored by the same metrics harness as flat worlds (`npm run metrics -- --shape sphere`) and tuned to the same bars where they apply. It includes:
 - the hierarchical config system and the staged generation pipeline;
 - tectonic plates with motion and boundary classes;
 - continents grown to a target count;
@@ -26,7 +26,7 @@ The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 - a landmark registry: about 250 named places per world (peaks ranked by prominence, ranges, rivers, lakes, seas, gulfs, bays, straits, peninsulas, capes, islands, archipelagos, fjords, canyons, deserts, forests, volcanoes, craters…), named in procedural regional languages, with 3–5 hero landmarks and a World-traits summary;
 - SDF map labels with cartographic styles, priority placement and labels along rivers and ranges; an Atlas panel (A) that flies to any place;
 - a 2D raster debug viewer;
-- a metrics harness (`npm run metrics`) that scores density, targets and boring/cluttered worlds over many seeds, archetypes and sizes;
+- a metrics harness (`npm run metrics`) that scores density, targets and boring/cluttered worlds over many seeds, archetypes and sizes, on flat maps and on spheres (spherical-cap viewports, a whole-globe band, planet-size sweeps and equal-area flat comparisons);
 - time of day, seasons, drifting clouds with shadows, valley fog and shader tree crowns;
 - quality tiers for phones, recovery after a lost graphics context, and export (screenshot, 16-bit heightmap, colour map, world JSON, share link).
 - a 3D globe for sphere worlds: six-root CDLOD terrain without seams, an atmosphere with a limb glow and a day/night terminator, and a globe camera that grab-pans the planet under the cursor and zooms from the whole planet down to the surface.
