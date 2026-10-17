@@ -164,7 +164,7 @@ function sphereHitsAabb(c: Vec3, r: number, x0: number, y0: number, z0: number, 
 }
 
 /** Planes are (a, b, c, d) with inside where a·x + b·y + c·z + d ≥ 0. */
-function boxInFrustum(p: Float64Array, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): boolean {
+export function boxInFrustum(p: Float64Array, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): boolean {
   for (let i = 0; i < 6; i++) {
     const a = p[i * 4];
     const b = p[i * 4 + 1];

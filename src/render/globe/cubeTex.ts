@@ -87,8 +87,15 @@ export function acrossCell(n: number, f: number, side: number, t: number, depth:
 export function padFaces(src: ArrayLike<number>, n: number, p = PAD, ch = 1): Float32Array {
   const m = n + 2 * p;
   const out = new Float32Array(6 * m * m * ch);
+  for (let f = 0; f < 6; f++) padFaceInto(src, n, f, p, ch, out);
+  return out;
+}
+
+/** One face of `padFaces` into `out` (6 · (n + 2p)² · ch), so callers can slice the work per face. */
+export function padFaceInto(src: ArrayLike<number>, n: number, f: number, p: number, ch: number, out: Float32Array): void {
+  const m = n + 2 * p;
   const n2 = n * n;
-  for (let f = 0; f < 6; f++) {
+  {
     const base = f * m * m;
     const put = (x: number, y: number, cell: number): void => {
       const o = (base + y * m + x) * ch;
@@ -126,7 +133,6 @@ export function padFaces(src: ArrayLike<number>, n: number, p = PAD, ch = 1): Fl
       }
     }
   }
-  return out;
 }
 
 /** Face, continuous face-angle coordinates (a, b ∈ [−π/4, π/4]) of a direction. */

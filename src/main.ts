@@ -485,12 +485,23 @@ function showSphere(l: Layer): void {
   const wl = layers.get('waterLevel');
   const water = wl && wl.faces === 6 && wl.stage === elev?.stage ? wl : null;
   if (elev && elev.faces === 6 && (elev !== globeShown.elev || water !== globeShown.water)) {
-    if (!globeShown.elev && mode === '3d') notice('Globe view: no close-zoom detail or clouds on spheres yet');
+    if (!globeShown.elev && mode === '3d') notice('Globe view: no clouds on spheres yet');
     globeShown.elev = elev;
     globeShown.water = water;
     const wc = layers.get('waterClass');
     world.setGlobe(elev, water, wc && wc.stage === elev.stage ? wc : null);
     globeMinimap.setTerrain(elev);
+  }
+  if (elev && elev.faces === 6) {
+    // Close-zoom detail tiles: the hydro stage's discharge and the biome stage's classes refine the
+    // amplitude; the view adds its prepared water and the sphere river graph (carved channels). The
+    // tiles rebuild when any of these arrive.
+    const face6 = (id: string): Layer | null => {
+      const x = layers.get(id);
+      return x && x.faces === 6 && x.w === elev.w ? x : null;
+    };
+    const dis = face6('discharge');
+    world.setGlobeDetail({ seed: spec.seed, discharge: dis && dis.stage === elev.stage ? dis.data : null, biome: face6('biome')?.data ?? null });
   }
   const temp = layers.get('temperature');
   const sphereLayer = (id: string): Layer | null => {

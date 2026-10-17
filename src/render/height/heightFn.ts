@@ -580,13 +580,23 @@ export class DetailGround implements GroundQuery {
   /** Rendered height (water lid, exaggeration applied). */
   heightAt(x: number, y: number, pxFoot = this.pxFoot): number {
     const s = this.hf.size;
-    return this.fn.terrainSurface(clamp(x, 0, s), clamp(y, 0, s), pxFoot) * this.hf.exaggeration;
+    return this.fn.terrainSurface(clamp(x, 0, s), clamp(y, 0, s), this.foot(pxFoot)) * this.hf.exaggeration;
   }
 
   /** Raw detailed elevation (m, no lid, no exaggeration). */
   detailHeightAt(x: number, y: number, pxFoot = this.pxFoot): number {
     const s = this.hf.size;
-    return this.fn.terrainHeight(clamp(x, 0, s), clamp(y, 0, s), pxFoot);
+    return this.fn.terrainHeight(clamp(x, 0, s), clamp(y, 0, s), this.foot(pxFoot));
+  }
+
+  /**
+   * A usable footprint: NaN, zero or negative (e.g. from a camera whose view had a zero side) falls
+   * back to `pxFoot`, then to 100 m; infinite is capped (macro only). NaN would otherwise pass every
+   * fade test as "not faded" and turn the height into NaN.
+   */
+  private foot(p: number): number {
+    if (!(p > 0)) p = this.pxFoot > 0 ? this.pxFoot : 100;
+    return Math.min(p, 1e9);
   }
 
   /**
@@ -594,6 +604,7 @@ export class DetailGround implements GroundQuery {
    * surface whose slope ≤ maxSlope), then bisection.
    */
   raycast(o: Vec3, d: Vec3, pxFoot = this.pxFoot): Vec3 | null {
+    pxFoot = this.foot(pxFoot);
     const s = this.hf.size;
     const ex = this.hf.exaggeration;
     const top = this.hf.maxHeight + this.pad * ex + 1;

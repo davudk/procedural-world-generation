@@ -87,8 +87,8 @@ export const DEFAULT_DETAIL_OPTIONS: DetailOptions = {
 export const SEG_FLOATS = 12;
 
 /** Depth mapping for the MIN composite of carve heights. */
-const Z_LO = -12000;
-const Z_HI = 12000;
+export const Z_LO = -12000;
+export const Z_HI = 12000;
 
 // ---- CPU preparation (pure; exported for tests) -------------------------------------------------
 
@@ -108,8 +108,9 @@ export interface PreparedDetail {
   segCount: number;
 }
 
-const ROUGH_MUL = new Float32Array(32).fill(1);
-const ROCK_B = new Float32Array(32);
+/** Per-biome roughness multiplier and rock / dune weights of the control texture (shared with the globe tiles). */
+export const ROUGH_MUL = new Float32Array(32).fill(1);
+export const ROCK_B = new Float32Array(32);
 const DUNE_B = new Float32Array(32);
 ROUGH_MUL[BIOME.WATER] = 0.3;
 ROUGH_MUL[BIOME.ICE] = 0.35;
@@ -452,7 +453,8 @@ export function thermalRowCpu(src: Float32Array, dst: Float32Array, lo: Float32A
   }
 }
 
-function carveSegmentCpu(prep: PreparedDetail, s: number, lo: Float32Array, cap: Float32Array): void {
+/** Rasterises segment s's carve profile into `cap` (min), as the GPU carve pass. */
+export function carveSegmentCpu(prep: Pick<PreparedDetail, 'params' | 'segs'>, s: number, lo: Float32Array, cap: Float32Array): void {
   const p = prep.params;
   const D = p.detailN;
   const tx = p.texel;
@@ -535,13 +537,13 @@ vec2 bBounds(vec2 pm) {
 float bDepth(float z) { return clamp((z - (${Z_LO}.0)) / (${Z_HI - Z_LO}.0), 0.0, 1.0); }
 `;
 
-const QUAD_VS = /* glsl */ `#version 300 es
+export const QUAD_VS = /* glsl */ `#version 300 es
 void main() {
   vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
   gl_Position = vec4(p * 2.0 - 1.0, 0.5, 1.0);
 }`;
 
-const CAP_FS = `${HEAD}
+const CAP_FS = (head: string): string => `${head}
 out float o;
 void main() {
   vec2 b = bBounds(gl_FragCoord.xy * bTexel());
@@ -574,7 +576,7 @@ void main() {
 }`;
 
 // Mirrors heightFn.carveProfile.
-const CARVE_FS = `${HEAD}
+const CARVE_FS = (head: string): string => `${head}
 flat in vec4 v_seg;
 flat in vec4 v_z;
 flat in vec4 v_w;
@@ -603,7 +605,7 @@ void main() {
   gl_FragDepth = bDepth(z);
 }`;
 
-const BASE_FS = `${HEAD}
+const BASE_FS = (head: string): string => `${head}
 uniform sampler2D u_cap;
 uniform sampler2D u_ctl;
 uniform uint u_seed;
@@ -623,7 +625,7 @@ void main() {
   o = min(max(m.x + nz.x, b.x), texelFetch(u_cap, ivec2(gl_FragCoord.xy), 0).r);
 }`;
 
-const THERMAL_FS = `${HEAD}
+const THERMAL_FS = (head: string): string => `${head}
 uniform sampler2D u_h;
 uniform sampler2D u_cap;
 uniform float u_talus;
@@ -645,12 +647,12 @@ void main() {
   o = min(max(h + u_rate * 0.125 * acc, b.x), texelFetch(u_cap, c, 0).r);
 }`;
 
-const COPY_FS = `${HEAD}
+const COPY_FS = (head: string): string => `${head}
 uniform sampler2D u_h;
 out float o;
 void main() { o = texelFetch(u_h, ivec2(gl_FragCoord.xy), 0).r; }`;
 
-const TILE_HEAD = `${HEAD}
+const TILE_HEAD = (head: string): string => `${head}
 uniform sampler2D u_A;   // RGBA32F: terrain b (texel units), water d, sediment s
 uniform sampler2D u_F;   // RGBA32F: outflow L, R, T (row-1, north), B (row+1)
 uniform int u_T;
@@ -662,13 +664,13 @@ vec4 tA(ivec2 c) { return texelFetch(u_A, clamp(c, ivec2(0), ivec2(u_T - 1)), 0)
 vec4 tF(ivec2 c) { return texelFetch(u_F, clamp(c, ivec2(0), ivec2(u_T - 1)), 0); }
 `;
 
-const HINIT_FS = `${HEAD}
+const HINIT_FS = (head: string): string => `${head}
 uniform sampler2D u_h;
 uniform ivec2 u_org;
 out vec4 o;
 void main() { o = vec4(dnFetch(u_h, u_D, ivec2(gl_FragCoord.xy) + u_org) / bTexel(), 0.0, 0.0, 0.0); }`;
 
-const HFLUX_FS = `${TILE_HEAD}
+const HFLUX_FS = (head: string): string => `${TILE_HEAD(head)}
 out vec4 o;
 void main() {
   ivec2 c = ivec2(gl_FragCoord.xy);
@@ -687,7 +689,7 @@ void main() {
   o = sum > 0.0 ? nf * min(1.0, dr / (sum * u_dt)) : vec4(0.0);
 }`;
 
-const HWATER_FS = `${TILE_HEAD}
+const HWATER_FS = (head: string): string => `${TILE_HEAD(head)}
 uniform float u_Kc;
 uniform float u_Ks;
 uniform float u_Kd;
@@ -718,7 +720,7 @@ void main() {
   oV = vec4(v, 0.0, 0.0);
 }`;
 
-const HADVECT_FS = `${TILE_HEAD}
+const HADVECT_FS = (head: string): string => `${TILE_HEAD(head)}
 uniform sampler2D u_V;
 uniform sampler2D u_h;
 uniform sampler2D u_cap;
@@ -747,13 +749,13 @@ void main() {
   o = vec4(b / cell, d, max(sed, 0.0), 0.0);
 }`;
 
-const HWRITE_FS = `${HEAD}
+const HWRITE_FS = (head: string): string => `${head}
 uniform sampler2D u_A;
 uniform ivec2 u_org;
 out float o;
 void main() { o = texelFetch(u_A, ivec2(gl_FragCoord.xy) - u_org, 0).x * bTexel(); }`;
 
-const ADOWN_FS = `${HEAD}
+const ADOWN_FS = (head: string): string => `${head}
 uniform sampler2D u_h;
 out float o;
 void main() {
@@ -775,7 +777,7 @@ void main() {
   o = sum / cnt;
 }`;
 
-const ABLUR_FS = `${HEAD}
+const ABLUR_FS = (head: string): string => `${head}
 uniform sampler2D u_src;
 uniform ivec2 u_dir;
 out float o;
@@ -790,7 +792,7 @@ void main() {
   o = s / w;
 }`;
 
-const AFINAL_FS = `${HEAD}
+const AFINAL_FS = (head: string): string => `${head}
 uniform sampler2D u_h;
 uniform sampler2D u_low;
 uniform sampler2D u_cap;
@@ -805,7 +807,7 @@ void main() {
   o = min(max(h, b.x), texelFetch(u_cap, c, 0).r);
 }`;
 
-const PACK_FS = `${HEAD}
+const PACK_FS = (head: string): string => `${head}
 uniform sampler2D u_h;
 out vec4 o;
 void main() {
@@ -813,24 +815,33 @@ void main() {
   o = vec4(texelFetch(u_h, b, 0).r, texelFetch(u_h, b + ivec2(1, 0), 0).r, texelFetch(u_h, b + ivec2(2, 0), 0).r, texelFetch(u_h, b + ivec2(3, 0), 0).r);
 }`;
 
-type ProgName = 'cap' | 'carve' | 'base' | 'thermal' | 'copy' | 'hinit' | 'hflux' | 'hwater' | 'hadvect' | 'hwrite' | 'adown' | 'ablur' | 'afinal' | 'pack';
+export type ProgName = 'cap' | 'carve' | 'base' | 'thermal' | 'copy' | 'hinit' | 'hflux' | 'hwater' | 'hadvect' | 'hwrite' | 'adown' | 'ablur' | 'afinal' | 'pack';
 
-const SOURCES: Record<ProgName, [string, string]> = {
-  cap: [QUAD_VS, CAP_FS],
-  carve: [CARVE_VS, CARVE_FS],
-  base: [QUAD_VS, BASE_FS],
-  thermal: [QUAD_VS, THERMAL_FS],
-  copy: [QUAD_VS, COPY_FS],
-  hinit: [QUAD_VS, HINIT_FS],
-  hflux: [QUAD_VS, HFLUX_FS],
-  hwater: [QUAD_VS, HWATER_FS],
-  hadvect: [QUAD_VS, HADVECT_FS],
-  hwrite: [QUAD_VS, HWRITE_FS],
-  adown: [QUAD_VS, ADOWN_FS],
-  ablur: [QUAD_VS, ABLUR_FS],
-  afinal: [QUAD_VS, AFINAL_FS],
-  pack: [QUAD_VS, PACK_FS],
-};
+/**
+ * The build programs over a given HEAD (which defines bTexel, bCell, bMacroQ, bBounds, bDepth and the
+ * shared macro uniforms). The flat map uses HEAD; the globe's detail tiles (globe/detailTiles.ts)
+ * reuse every pass with their own head (tile-local raster, coastal band).
+ */
+export function detailBuildSources(head: string): Record<ProgName, [string, string]> {
+  return {
+    cap: [QUAD_VS, CAP_FS(head)],
+    carve: [CARVE_VS, CARVE_FS(head)],
+    base: [QUAD_VS, BASE_FS(head)],
+    thermal: [QUAD_VS, THERMAL_FS(head)],
+    copy: [QUAD_VS, COPY_FS(head)],
+    hinit: [QUAD_VS, HINIT_FS(head)],
+    hflux: [QUAD_VS, HFLUX_FS(head)],
+    hwater: [QUAD_VS, HWATER_FS(head)],
+    hadvect: [QUAD_VS, HADVECT_FS(head)],
+    hwrite: [QUAD_VS, HWRITE_FS(head)],
+    adown: [QUAD_VS, ADOWN_FS(head)],
+    ablur: [QUAD_VS, ABLUR_FS(head)],
+    afinal: [QUAD_VS, AFINAL_FS(head)],
+    pack: [QUAD_VS, PACK_FS(head)],
+  };
+}
+
+const SOURCES: Record<ProgName, [string, string]> = detailBuildSources(HEAD);
 
 /** Exposed for tests/tools: the build shaders' sources. */
 export const DETAIL_BUILD_SOURCES: Readonly<Record<string, readonly [string, string]>> = SOURCES;

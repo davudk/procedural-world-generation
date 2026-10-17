@@ -6,6 +6,11 @@ import { buildBiomeLut, LUT_SIZE, type Palette } from '../terrain/biomeLut';
 import { GRID } from '../terrain/cdlod';
 import { SPHERE_INSTANCE_FLOATS, SPHERE_MAX_NODES } from '../terrain/cdlodSphere';
 import { bindGlobeAtmos, GLOBE_ATMOS_GLSL, type GlobeAtmosFrame } from './atmosphere';
+import { GLOBE_DETAIL_GLSL, type GlobeDetailUniforms } from '../glsl/globeDetail';
+import { DG } from '../height/globeHeightFn';
+
+const f1 = (x: number): string => (Number.isInteger(x) ? `${x}.0` : `${x}`);
+import type { Vec3 } from '../camera/ground';
 import { FACE_C, FACE_E, FACE_S, faceDir } from '../../shared/cube';
 import { acrossCell, arrayTexture, PAD, padFaces, SIDE_E, SIDE_N, SIDE_S, SIDE_W, uploadArray } from './cubeTex';
 import type { GlobeHeightField } from './globeGround';
@@ -45,6 +50,53 @@ vec2 heightAt(int f, vec2 ang) {
   float sd = texelFetch(u_surf, ivec3(i + ivec2(1, 1), f), 0).r;
   float s = mix(mix(sa, sb, fr.x), mix(sc, sd, fr.x), fr.y);
   return vec2(raw, s);
+}
+
+uniform highp sampler2DArray u_wlevel;  // R32F padded water level (m, < −9000 dry), spread 2 rings past the shore
+uniform highp sampler2DArray u_wclass;  // R32F padded water class (0 land, 1 ocean, 2 lake, 3 river, 4 wetland, 5 playa, 6 salt lake)
+uniform int u_hasWater;
+// Water level (bilinear, as the flat terrain's waterLevelAt) and class (nearest) on the height grid.
+float waterLevelAt(int f, vec2 ang) {
+  float delta = 1.5707963267948966 / float(u_hn);
+  int m = u_hn + 2 * PAD;
+  vec2 p = clamp((ang + QUARTER) / delta - 0.5 + float(PAD), vec2(0.0), vec2(float(m) - 1.001));
+  ivec2 i = ivec2(floor(p));
+  vec2 fr = p - vec2(i);
+  float a = texelFetch(u_wlevel, ivec3(i, f), 0).r;
+  float b = texelFetch(u_wlevel, ivec3(i + ivec2(1, 0), f), 0).r;
+  float c = texelFetch(u_wlevel, ivec3(i + ivec2(0, 1), f), 0).r;
+  float d = texelFetch(u_wlevel, ivec3(i + ivec2(1, 1), f), 0).r;
+  return mix(mix(a, b, fr.x), mix(c, d, fr.x), fr.y);
+}
+float waterClassAt(int f, vec2 ang) {
+  float delta = 1.5707963267948966 / float(u_hn);
+  ivec2 t = ivec2(floor((ang + QUARTER) / delta)) + PAD;
+  return texelFetch(u_wclass, ivec3(clamp(t, ivec2(0), ivec2(u_hn + 2 * PAD - 1)), f), 0).r;
+}
+// Water level the close-zoom detail respects (globeDetail.ts): the prepared levels without river cells
+// (rivers are ribbons over carved channels; their levels would flood the detailed valley floors), or the
+// sea at 0. Same addressing as waterLevelAt.
+uniform highp sampler2DArray u_wlevelD;
+uniform highp sampler2DArray u_wetD;   // R32F padded real-water mask (cells with their own level, not rivers)
+float gWaterLevel(int f, vec2 ang) {
+  if (u_hasWater == 0) return 0.0;
+  float delta = 1.5707963267948966 / float(u_hn);
+  int m = u_hn + 2 * PAD;
+  vec2 p = clamp((ang + QUARTER) / delta - 0.5 + float(PAD), vec2(0.0), vec2(float(m) - 1.001));
+  ivec2 i = ivec2(floor(p));
+  vec2 fr = p - vec2(i);
+  float a = texelFetch(u_wlevelD, ivec3(i, f), 0).r;
+  float b = texelFetch(u_wlevelD, ivec3(i + ivec2(1, 0), f), 0).r;
+  float c = texelFetch(u_wlevelD, ivec3(i + ivec2(0, 1), f), 0).r;
+  float d = texelFetch(u_wlevelD, ivec3(i + ivec2(1, 1), f), 0).r;
+  float wl = mix(mix(a, b, fr.x), mix(c, d, fr.x), fr.y);
+  if (wl <= -9000.0) return wl;
+  a = texelFetch(u_wetD, ivec3(i, f), 0).r;
+  b = texelFetch(u_wetD, ivec3(i + ivec2(1, 0), f), 0).r;
+  c = texelFetch(u_wetD, ivec3(i + ivec2(0, 1), f), 0).r;
+  d = texelFetch(u_wetD, ivec3(i + ivec2(1, 1), f), 0).r;
+  float wet = mix(mix(a, b, fr.x), mix(c, d, fr.x), fr.y);
+  return wl - ${f1(DG.WET_DROP)} * (1.0 - clamp(wet / ${f1(DG.WET_FADE)}, 0.0, 1.0));   // = globeHeightFn.wetLevel
 }`;
 
 const VS = /* glsl */ `#version 300 es
@@ -57,11 +109,14 @@ layout(location = 3) in vec3 a_lod;      // level, morph start, morph end (m)
 uniform mat4 u_viewProj;
 uniform float u_radius;
 uniform float u_exag;
+uniform float u_pxScale;   // 2·tan(fovY/2) / viewport height: metres per pixel per metre of distance
 ${CUBE_GLSL}
+${GLOBE_DETAIL_GLSL}
 ${GLOBE_ATMOS_GLSL}
 out vec2 v_ang;
 flat out int v_face;
 out vec3 v_rel;
+out vec3 v_relSea;   // the sea-level point dir·R relative to the eye (noise argument, precise)
 out vec3 v_air;     // aerial perspective: in-scattered light and transmittance, per vertex (smooth)
 out vec3 v_trans;
 
@@ -94,11 +149,16 @@ void main() {
   vec2 off = (g / ${GRID}.0 - 0.5) * S;
   vec3 dd = dirOffset(f, c0, off, F0, L0);
   vec2 ang = c0 + off;
-  float h = heightAt(f, ang).y * u_exag;
-  vec3 rel = a_centre + u_radius * dd + h * (dir0 + dd);
+  vec3 relSea = a_centre + u_radius * dd;
+  // Geometry can't hold wavelengths under ~2 vertex spacings: the footprint is at least the spacing and
+  // grows with the morph, so detail octaves fade together with vertex snapping (as on flat maps).
+  float foot = max(d0 * u_pxScale, S * u_radius / ${GRID}.0 * (1.0 + k));
+  float h = (u_gOn == 1 ? globeSurface(f, ang, relSea, foot) : heightAt(f, ang).y) * u_exag;
+  vec3 rel = relSea + h * (dir0 + dd);
   v_ang = ang;
   v_face = f;
   v_rel = rel;
+  v_relSea = relSea;
   vec3 trans;
   v_air = atmosphere(u_eyeP, normalize(rel), length(rel), 8, trans);
   v_trans = trans;
@@ -112,6 +172,7 @@ precision highp sampler2DArray;
 in vec2 v_ang;
 flat in int v_face;
 in vec3 v_rel;
+in vec3 v_relSea;
 in vec3 v_air;
 in vec3 v_trans;
 uniform float u_radius;
@@ -123,9 +184,6 @@ uniform int u_cn;                  // climate cells per face side
 uniform int u_hasClimate;
 uniform sampler2DArray u_cover;    // RGBA8 padded (climate grid): snow/ice, bare rock, sand (beach, salt flat, erg), marsh/bog/mangrove
 uniform int u_hasCover;            // 1 once the biome stage exists (else the climate proxy colours)
-uniform highp sampler2DArray u_wlevel;  // R32F padded water level (m, < −9000 dry), spread 2 rings past the shore
-uniform highp sampler2DArray u_wclass;  // R32F padded water class (0 land, 1 ocean, 2 lake, 3 river, 4 wetland, 5 playa, 6 salt lake)
-uniform int u_hasWater;
 uniform sampler2D u_lut;
 uniform int u_palette;             // 0 biome LUT colours, 1 hypsometric
 uniform sampler2DArray u_layer;    // padded draped layer
@@ -141,6 +199,7 @@ uniform int u_realistic;
 uniform vec2 u_season;             // seasonal phase (cos, sin); (1, 0) at the warm peak
 uniform float u_time;
 ${CUBE_GLSL}
+${GLOBE_DETAIL_GLSL}
 ${COLORMAPS_GLSL}
 out vec4 o;
 
@@ -197,25 +256,6 @@ vec4 coverAt(int f, vec2 ang) {
   vec2 p = ((ang + QUARTER) / delta + float(PAD)) / m;
   return texture(u_cover, vec3(p, float(f)));
 }
-// Water level (bilinear, as the flat terrain's waterLevelAt) and class (nearest) on the height grid.
-float waterLevelAt(int f, vec2 ang) {
-  float delta = 1.5707963267948966 / float(u_hn);
-  int m = u_hn + 2 * PAD;
-  vec2 p = clamp((ang + QUARTER) / delta - 0.5 + float(PAD), vec2(0.0), vec2(float(m) - 1.001));
-  ivec2 i = ivec2(floor(p));
-  vec2 fr = p - vec2(i);
-  float a = texelFetch(u_wlevel, ivec3(i, f), 0).r;
-  float b = texelFetch(u_wlevel, ivec3(i + ivec2(1, 0), f), 0).r;
-  float c = texelFetch(u_wlevel, ivec3(i + ivec2(0, 1), f), 0).r;
-  float d = texelFetch(u_wlevel, ivec3(i + ivec2(1, 1), f), 0).r;
-  return mix(mix(a, b, fr.x), mix(c, d, fr.x), fr.y);
-}
-float waterClassAt(int f, vec2 ang) {
-  float delta = 1.5707963267948966 / float(u_hn);
-  ivec2 t = ivec2(floor((ang + QUARTER) / delta)) + PAD;
-  return texelFetch(u_wclass, ivec3(clamp(t, ivec2(0), ivec2(u_hn + 2 * PAD - 1)), f), 0).r;
-}
-
 float layerFetch(ivec2 t, int f) { return texelFetch(u_layer, ivec3(clamp(t, ivec2(0), ivec2(u_ln + 2 * PAD - 1)), f), 0).r; }
 float layerAt(int f, vec2 ang, bool nearest) {
   float delta = 1.5707963267948966 / float(u_ln);
@@ -246,9 +286,14 @@ void main() {
   float texelsPerPx = length(fwidth(ang)) / delta;
   // Close up, smooth the cell structure of the coast (bilinear far out, where cells are a few px).
   float smoothK = 1.0 - smoothstep(0.08, 0.25, texelsPerPx);
-  float h = smoothK > 0.0 ? mix(hs.x, heightSmooth(f, ang), smoothK) : hs.x;
+  float pxFoot = length(fwidth(v_rel));
+  // Close-zoom detail (streamed tiles + 3D octaves) replaces the B-spline rounding when it exists.
+  float tD = gDetailWeight(pxFoot);
+  vec4 ds = tD > 0.0 ? globeSample(f, ang, v_relSea, pxFoot) : vec4(hs.x, 0.0, 0.0, 0.0);
+  float h = u_gOn == 1 ? ds.x : smoothK > 0.0 ? mix(hs.x, heightSmooth(f, ang), smoothK) : hs.x;
   // Water: the sea, plus lakes from the hydrology stage's levels (as the flat terrain's water lid).
-  float wl = u_hasWater == 1 ? waterLevelAt(f, ang) : -10000.0;
+  // With detail the level fades to the riverless one the detailed surface was built against.
+  float wl = u_hasWater == 1 ? mix(waterLevelAt(f, ang), gWaterLevel(f, ang), tD) : -10000.0;
   float cls = u_hasWater == 1 ? waterClassAt(f, ang) : 0.0;
   // Lakes by class, or by a level above the sea where the spread rings meet other classes.
   bool lake = cls > 1.5 && cls < 2.5 || cls > 5.5 || wl > 0.05;
@@ -258,6 +303,7 @@ void main() {
   // Mipmapped gradient: smooth normals, no aliasing when cells are smaller than a pixel.
   vec3 grad = textureLod(u_grad, vec3((ang + QUARTER) / 1.5707963267948966, float(f)), max(0.0, log2(max(texelsPerPx, 1e-6)) - 0.5)).xyz;
   grad -= dot(grad, up) * up;
+  if (tD > 0.0) grad = mix(grad, ds.yzw, tD);
   vec3 n = normalize(up - grad * u_normalExag);
 
   // Light: the screen-relative cartographic sun in every pixel's own tangent frame, blended to the real sun.
@@ -274,7 +320,6 @@ void main() {
   }
 
   vec3 V = normalize(-v_rel);
-  float pxFoot = length(fwidth(v_rel));
   vec3 P = up * (u_radius + hs.y * u_exag);
   vec4 cl = u_hasClimate == 1 ? climateAt(f, ang) : vec4(15.0, 1.0, 0.5, 10.0);
   float tNow = cl.r + cl.a * u_season.x;
@@ -358,6 +403,10 @@ export interface GlobeFrame {
   season: readonly [number, number];
   time: number;
   atmos: GlobeAtmosFrame;
+  /** Close-zoom detail (uniforms and textures), the eye (planet-centred, float64) and 2·tan(fovY/2)/viewH. */
+  detail: GlobeDetailUniforms;
+  eye: Vec3;
+  pxScale: number;
 }
 
 /**
@@ -397,6 +446,8 @@ export class GlobePass {
   private readonly coverTex: WebGLTexture;
   private readonly surfTex: WebGLTexture;
   private readonly wlevelTex: WebGLTexture;
+  private readonly wlevelDTex: WebGLTexture;
+  private readonly wetDTex: WebGLTexture;
   private readonly wclassTex: WebGLTexture;
   private hasCover = 0;
   private hasWater = 0;
@@ -419,7 +470,7 @@ export class GlobePass {
       'u_viewProj', 'u_radius', 'u_exag', 'u_normalExag', 'u_faceC', 'u_faceE', 'u_faceS', 'u_height', 'u_hn', 'u_grad',
       'u_climate', 'u_cn', 'u_hasClimate', 'u_lut', 'u_palette', 'u_layer', 'u_ln', 'u_layerMode', 'u_layerMin', 'u_layerMax',
       'u_sunCarto', 'u_camRight', 'u_camUp', 'u_sunReal', 'u_realK', 'u_lightCol', 'u_ambient', 'u_realistic', 'u_season', 'u_time',
-      'u_surf', 'u_cover', 'u_hasCover', 'u_wlevel', 'u_wclass', 'u_hasWater',
+      'u_surf', 'u_cover', 'u_hasCover', 'u_wlevel', 'u_wclass', 'u_hasWater', 'u_pxScale', 'u_wlevelD', 'u_wetD',
     ] as const);
 
     const verts = new Float32Array((GRID + 1) * (GRID + 1) * 2);
@@ -466,6 +517,8 @@ export class GlobePass {
     this.coverTex = arrayTexture(gl, 'rgba8');
     this.surfTex = arrayTexture(gl, 'r32f');
     this.wlevelTex = arrayTexture(gl, 'r32f');
+    this.wlevelDTex = arrayTexture(gl, 'r32f');
+    this.wetDTex = arrayTexture(gl, 'r32f');
     this.wclassTex = arrayTexture(gl, 'r32f');
     this.layerTex = arrayTexture(gl, 'r32f');
     this.lutTex = gl.createTexture();
@@ -480,9 +533,14 @@ export class GlobePass {
   /**
    * Elevation (six faces), its CPU-built 3D gradients and the rendered surface of the CPU height field
    * (`hf.padded`: the water lid). `water`: prepared levels and classes (prepareWaterSphere) on the
-   * same grid, or null (the sea only).
+   * same grid, or null (the sea only). `detailLevel`: the same levels prepared without river cells, which
+   * the close-zoom detail uses, and `detailWet` its padded real-water mask (PreparedGlobe.wetPad).
+   * Defaults: `water.level`, and 1 everywhere.
    */
-  setTerrain(layer: Layer, hf: GlobeHeightField, water: { level: Float32Array; cls: Float32Array } | null = null): void {
+  setTerrain(
+    layer: Layer, hf: GlobeHeightField, water: { level: Float32Array; cls: Float32Array } | null = null,
+    detailLevel: Float32Array | null = null, detailWet: Float32Array | null = null,
+  ): void {
     const gl = this.gl;
     const n = layer.w;
     const radiusM = hf.radius;
@@ -493,6 +551,8 @@ export class GlobePass {
     this.hasWater = water ? 1 : 0;
     if (water) {
       uploadArray(gl, this.wlevelTex, padFaces(water.level, n), n + 2 * PAD, 'r32f');
+      uploadArray(gl, this.wlevelDTex, padFaces(detailLevel ?? water.level, n), n + 2 * PAD, 'r32f');
+      uploadArray(gl, this.wetDTex, detailWet ?? padFaces(new Float32Array(6 * n * n).fill(1), n), n + 2 * PAD, 'r32f');
       uploadArray(gl, this.wclassTex, padFaces(water.cls, n), n + 2 * PAD, 'r32f');
     }
     // Gradient mips per layer (a texture array's levels must all hold 6 layers).
@@ -612,6 +672,7 @@ export class GlobePass {
     gl.uniform1i(u.u_realistic, f.realistic ? 1 : 0);
     gl.uniform2f(u.u_season, f.season[0], f.season[1]);
     gl.uniform1f(u.u_time, f.time);
+    gl.uniform1f(u.u_pxScale, f.pxScale);
     const bindArr = (unit: number, tex: WebGLTexture, loc: WebGLUniformLocation | null): void => {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
@@ -624,12 +685,15 @@ export class GlobePass {
     bindArr(5, this.surfTex, u.u_surf);
     bindArr(6, this.coverTex, u.u_cover);
     bindArr(7, this.wlevelTex, u.u_wlevel);
+    bindArr(12, this.wlevelDTex, u.u_wlevelD);
+    bindArr(13, this.wetDTex, u.u_wetD);
     bindArr(8, this.wclassTex, u.u_wclass);
     gl.uniform1i(u.u_hasCover, this.hasCover);
     gl.uniform1i(u.u_hasWater, this.hasWater);
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
     gl.uniform1i(u.u_lut, 4);
+    f.detail.bind(gl, this.prog, 9, f.eye);
     bindGlobeAtmos(gl, this.prog, f.atmos);
     gl.bindVertexArray(this.vao);
     gl.drawElementsInstanced(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_SHORT, 0, f.count);

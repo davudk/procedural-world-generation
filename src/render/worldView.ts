@@ -3,10 +3,16 @@ import type { Layer, RiverGraph } from '../shared/protocol';
 import type { GroundQuery, Vec3 } from './camera/ground';
 import { OrbitCamera } from './camera/orbitCamera';
 import { GlobeCamera } from './camera/globeCamera';
-import type { ViewCamera } from './camera/viewCamera';
+import { applyViewSize, type ViewCamera } from './camera/viewCamera';
 import { GlobeSkyPass, type GlobeAtmosFrame } from './globe/atmosphere';
 import { GlobeHeightField, prepareWaterSphere, SphereGround } from './globe/globeGround';
 import { GlobePass, type GlobeSurface } from './globe/globePass';
+import { GlobeDetail, globeDetailOptions } from './globe/globeDetail';
+import type { GlobeDetailWorld, SphereRivers } from './globe/detailTiles';
+import { surfaceDir } from '../shared/cube';
+import { padFaces } from './globe/cubeTex';
+import { GlobeDetailUniforms } from './glsl/globeDetail';
+import { GlobeDetailGround } from './height/globeHeightFn';
 import { SphereCdlodSelector } from './terrain/cdlodSphere';
 import { HeightField, prepareWater } from './heightField';
 import { CdlodSelector, GRID } from './terrain/cdlod';
@@ -96,6 +102,13 @@ export class WorldView {
   private detailU!: DetailUniforms;
   private detailSeen = -1;
   private ground: DetailGround | null = null;
+  /** Streamed close-zoom detail tiles of the sphere world (Sphere phase 4b). */
+  globeDetail!: GlobeDetail;
+  private globeDetailU!: GlobeDetailUniforms;
+  private globeDetailSeen = -1;
+  private globeGround: GlobeDetailGround | null = null;
+  private globeDetailTier = '';
+  private lastGlobeTime = -1;
   labels!: LabelLayer;
   private creekWorld: CreekWorld | null = null;
   // CPU copies of everything uploaded, replayed after a context loss.
@@ -111,11 +124,17 @@ export class WorldView {
     globe: Layer | null;
     /** Prepared water rasters of the globe (prepareWaterSphere), or null. */
     globeWater: { level: Float32Array; cls: Float32Array } | null;
+    /** The same levels prepared without river cells, for the close-zoom detail (or null), and the raw levels. */
+    globeWaterD: Float32Array | null;
+    globeWaterRaw: ArrayLike<number> | null;
+    globeWetPad: Float32Array | null;
     globeSurface: GlobeSurface | null;
     globeDrape: Layer | null;
+    globeDetail: GlobeDetailWorld | null;
+    globeDetailOpts: GlobeDetailOpts | null;
   } = {
     terrain: null, surface: null, masks: null, rivers: null, landmarks: [], highlight: null, drape: null, detail: null,
-    globe: null, globeWater: null, globeSurface: null, globeDrape: null,
+    globe: null, globeWater: null, globeWaterD: null, globeWaterRaw: null, globeWetPad: null, globeSurface: null, globeDrape: null, globeDetail: null, globeDetailOpts: null,
   };
   /** Camera and viewport state of the last drawn frame (to skip redraws when nothing changed). */
   private drawnKey = '';
@@ -181,6 +200,7 @@ export class WorldView {
     this.detail = new DetailMap(gl);
     this.detailU = new DetailUniforms(this.detail);
     this.detailSeen = -1;
+    this.newGlobeDetail();
     this.labels = new LabelLayer(gl);
     // The cloud pass holds no data of its own: its climate texture is TerrainPass.climate2 (rebuilt
     // by setSurface, which restore() replays) and everything else is per-frame uniforms.
@@ -208,8 +228,9 @@ export class WorldView {
     this.labels.highlight(s.highlight);
     this.setCreekWorld(this.creekWorld);
     if (s.detail) this.detail.build(s.detail);
-    if (s.globe && this.globeHf) this.globe.setTerrain(s.globe, this.globeHf, s.globeWater);
+    if (s.globe && this.globeHf) this.globe.setTerrain(s.globe, this.globeHf, s.globeWater, s.globeWaterD, s.globeWetPad);
     this.globeRivers.setRivers(s.rivers?.face ? s.rivers : null, this.globeHf?.radius ?? 1);
+    this.globeDetail.setWorld(s.globeDetail);
     this.globe.setSurface(s.globeSurface);
     this.globe.setDrape(s.globeDrape);
     this.dirty = true;
@@ -219,6 +240,22 @@ export class WorldView {
   setQuality(q: QualitySettings): void {
     this.quality = q;
     this.dirty = true;
+    // Tile size and the LRU budget follow the tier: rebuild the tile set when it changes.
+    if (this.globeDetail && q.tier !== this.globeDetailTier && !this.contextLost) {
+      this.globeDetail.dispose();
+      this.newGlobeDetail();
+      this.globeDetail.setWorld(this.src.globeDetail);
+    }
+  }
+
+  /** A fresh tile set for the current quality tier (no world yet). */
+  private newGlobeDetail(): void {
+    this.globeDetail = new GlobeDetail(this.gl, globeDetailOptions(this.quality.tier));
+    this.globeDetailTier = this.quality.tier;
+    this.globeDetailU ??= new GlobeDetailUniforms();
+    this.globeDetailU.src = this.globeDetail;
+    this.globeDetailSeen = -1;
+    this.globeGround = null;
   }
 
   /** Starts building the close-zoom detail map (time-sliced in draw()). */
@@ -236,7 +273,7 @@ export class WorldView {
    */
   get needsFrame(): boolean {
     if (this.contextLost) return false;
-    if (this.sphere) return this.dirty || this.globeCam.moving || this.labels.animating || this.viewKey() !== this.drawnKey;
+    if (this.sphere) return this.dirty || this.globeCam.moving || this.globeDetail.busy || this.labels.animating || this.viewKey() !== this.drawnKey;
     return this.dirty || this.cam.moving || this.labels.animating || this.detail.building || this.viewKey() !== this.drawnKey;
   }
 
@@ -305,10 +342,17 @@ export class WorldView {
     this.src.globe = layer;
     const prepared = water && water.faces === 6 && water.w === layer.w ? prepareWaterSphere(water, wclass) : null;
     this.src.globeWater = prepared;
+    // Rivers are ribbons over carved channels at close zoom: the detail's levels leave river cells out
+    // (spread again from the lakes and the sea), so their levels don't flood the detailed valley floors.
+    this.src.globeWaterD = prepared && water && wclass ? prepareWaterSphere(riverLess(water, wclass), wclass).level : null;
+    this.src.globeWaterRaw = prepared && water ? water.data : null;
+    this.src.globeWetPad = prepared && water ? padFaces(realWater(water, wclass), layer.w) : null;
     const hf = new GlobeHeightField(layer, prepared?.level ?? null);
     hf.exaggeration = this.exaggeration;
     this.globeHf = hf;
+    this.globeGround = null;
     this.globeCam.setGround(hf);
+    this.globeCam.minMetresPerPixel = 40;
     if (this.fittedRadius !== hf.radius) {
       this.fittedRadius = hf.radius;
       this.globeCam.fitWorld();
@@ -316,17 +360,52 @@ export class WorldView {
     }
     this.dirty = true;
     if (!this.contextLost) {
-      this.globe.setTerrain(layer, hf, prepared);
+      this.globe.setTerrain(layer, hf, prepared, this.src.globeWaterD, this.src.globeWetPad);
       this.globeRivers.setRivers(this.src.rivers?.face ? this.src.rivers : null, hf.radius);
     }
+    this.rebuildGlobeDetail();
+  }
+
+  /**
+   * Inputs of the globe's close-zoom detail beyond the elevation, water and rivers the view already
+   * has: the seed and the hydro / biome rasters (6-face, elevation grid). The tiles are rebuilt when
+   * any of them changes (they arrive stage by stage), and on new elevation, water or rivers.
+   */
+  setGlobeDetail(opts: GlobeDetailOpts | null): void {
+    const o = this.src.globeDetailOpts;
+    if (o === opts || (o && opts && o.seed === opts.seed && o.discharge === opts.discharge && o.biome === opts.biome)) return;
+    this.src.globeDetailOpts = opts;
+    this.rebuildGlobeDetail();
+  }
+
+  /** Restarts the detail tiles from the current sphere world (elevation, prepared water, rivers, options). */
+  private rebuildGlobeDetail(): void {
+    const hf = this.globeHf;
+    const o = this.src.globeDetailOpts;
+    const water = this.src.globeWater;
+    const g = this.src.rivers;
+    const fit = (d: ArrayLike<number> | null | undefined): ArrayLike<number> | null => (d && hf && d.length === hf.data.length ? d : null);
+    this.src.globeDetail = hf && o
+      ? {
+        n: hf.n, radius: hf.radius, elevation: hf.data, surfacePad: hf.padded, seed: o.seed,
+        waterLevel: this.src.globeWaterD ?? water?.level ?? null, waterClass: water?.cls ?? null, waterRaw: this.src.globeWaterRaw,
+        discharge: fit(o.discharge), biome: fit(o.biome),
+        rivers: g?.face ? sphereRivers(g, g.face, hf.radius) : null,
+      }
+      : null;
+    this.dirty = true;
+    if (!this.contextLost) this.globeDetail.setWorld(this.src.globeDetail);
   }
 
   /** Forgets the sphere world (the next world is flat): the view draws flat terrain again. */
   clearGlobe(): void {
     this.sphere = false;
     this.globeHf = null;
+    this.globeGround = null;
     this.src.globe = this.src.globeSurface = this.src.globeDrape = null;
-    this.src.globeWater = null;
+    this.src.globeWater = this.src.globeWaterD = this.src.globeWaterRaw = this.src.globeWetPad = null;
+    this.src.globeDetail = null;
+    if (!this.contextLost) this.globeDetail.setWorld(null);
     this.dirty = true;
   }
 
@@ -429,11 +508,14 @@ export class WorldView {
 
   /** River graph of the world on show: flat ribbons, or globe ribbons for a sphere graph (`face` set). */
   setRivers(graph: RiverGraph | null): void {
+    const prev = this.src.rivers;
     this.src.rivers = graph;
     this.dirty = true;
     if (this.contextLost) return;
     this.rivers.setRivers(graph?.face ? null : graph, this.hf?.size ?? 0);
     this.globeRivers.setRivers(graph?.face && this.globeHf ? graph : null, this.globeHf?.radius ?? 1);
+    // Sphere rivers carve the detail tiles' channels and valleys.
+    if (graph !== prev && this.sphere && this.globeHf && (graph?.face || this.src.globeDetail?.rivers)) this.rebuildGlobeDetail();
   }
 
   setDrape(layer: Layer | null): void {
@@ -447,8 +529,8 @@ export class WorldView {
     this.dpr = pixelRatio(this.quality, window.devicePixelRatio || 1);
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
-    this.cam.viewW = this.globeCam.viewW = w;
-    this.cam.viewH = this.globeCam.viewH = h;
+    // A hidden page reports 0 × 0: keep the last real size (a zero side makes the cameras NaN).
+    if (!applyViewSize([this.cam, this.globeCam], w, h)) return;
     const bw = Math.max(1, Math.round(w * this.dpr));
     const bh = Math.max(1, Math.round(h * this.dpr));
     if (this.canvas.width !== bw || this.canvas.height !== bh) {
@@ -594,8 +676,8 @@ export class WorldView {
    * follows research 10 §6.5: the screen-relative cartographic sun near the surface, blending to the
    * real sun (fixed in the planet frame, so the night side shows) as the view rises to globe zoom.
    * The view's time is the solar time at longitude 0; the sun model's colours use the target's own
-   * local time and latitude. Labels come last, placed on the globe (far side hidden). Detail maps,
-   * creeks and clouds are flat-only for now.
+   * local time and latitude. Labels come last, placed on the globe (far side hidden). Creeks and
+   * clouds are flat-only for now.
    */
   private drawGlobe(timeSec: number): void {
     const gl = this.gl;
@@ -615,9 +697,25 @@ export class WorldView {
       cam.viewProjRelative(this.viewProj, eye);
       cam.frustumPlanesRelative(this.planes, eye);
       const pxPerRad = cam.viewH / (2 * Math.tan(cam.fovY / 2));
+      const pxScale = (2 * Math.tan(cam.fovY / 2)) / Math.max(1, cam.viewH);
+      const gd = this.globeDetail;
+      const dt = this.lastGlobeTime < 0 ? 0 : Math.min(0.1, Math.max(0, timeSec - this.lastGlobeTime));
+      this.lastGlobeTime = timeSec;
+      const detailOn = gd.params !== null && gd.fn !== null;
+      const pad = detailOn ? gd.boundsPad * this.exaggeration : 0;
+      // Stream tiles around the camera, time-sliced: ~2-3 ms of CPU + estimated GPU work per frame.
+      gd.update({ eye, pxScale, planes: this.planes, maxHeight: hf.maxHeight + pad }, dt, cam.moving ? 2 : 3);
+      this.syncGlobeGround(hf);
+      // With detail, leaves every ~16 m as on flat maps; without, every 1/8 cell.
+      const faceM = (Math.PI / 2) * R;
+      const maxDepth = detailOn ? Math.max(SphereCdlodSelector.depthFor(hf.n), Math.ceil(Math.log2(faceM / (GRID * 16)))) : SphereCdlodSelector.depthFor(hf.n);
       this.nodes = this.sphereSelector.select(hf, eye, this.planes, {
-        maxDepth: SphereCdlodSelector.depthFor(hf.n), vertexPx: this.quality.vertexPx, pxPerRad, boundsPad: 0,
+        maxDepth, vertexPx: this.quality.vertexPx, pxPerRad, boundsPad: pad,
       });
+      if (this.globeGround) {
+        const mpp = cam.metresPerPixel();
+        this.globeGround.pxFoot = Math.max(Number.isFinite(mpp) ? mpp : 1e6, faceM / 2 ** maxDepth / GRID);
+      }
       const realistic = this.globe.realistic;
       const time = realistic ? this.view.time : DEFAULT_TIME;
       const season = realistic ? this.view.season : DEFAULT_SEASON;
@@ -663,6 +761,9 @@ export class WorldView {
         season: realistic ? [ph.cos, ph.sin] : [1, 0],
         time: timeSec,
         atmos,
+        detail: this.globeDetailU,
+        eye,
+        pxScale,
       });
       // Rivers only over the realistic view (data drapes show the raster alone, as on flat maps).
       if (this.globe.layerModeRealistic) {
@@ -679,12 +780,33 @@ export class WorldView {
         });
       }
       gl.disable(gl.DEPTH_TEST);
-      this.labels.draw({ cam, ground: null, globe: hf, dpr: this.dpr, timeSec, exaggeration: this.exaggeration });
+      // Anchors sit on the detailed surface where detail tiles are resident (the camera's ground).
+      this.labels.draw({ cam, ground: null, globe: this.globeGround ?? hf, dpr: this.dpr, timeSec, exaggeration: this.exaggeration });
     }
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbo);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
     gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  /**
+   * Swaps the globe camera onto the detailed ground once the sphere detail is prepared (and back onto the
+   * macro height field when it goes away); the closest zoom follows (8 m/px with detail, 40 without).
+   */
+  private syncGlobeGround(hf: GlobeHeightField): void {
+    const gd = this.globeDetail;
+    if (gd.version === this.globeDetailSeen) return;
+    this.globeDetailSeen = gd.version;
+    if (gd.fn && gd.params) {
+      gd.fn.amp = this.globeDetailU.amp;
+      this.globeGround = new GlobeDetailGround(gd.fn, hf, gd.boundsPad);
+      this.globeCam.setGround(this.globeGround);
+      this.globeCam.minMetresPerPixel = 8;
+    } else if (this.globeGround) {
+      this.globeGround = null;
+      this.globeCam.setGround(hf);
+      this.globeCam.minMetresPerPixel = 40;
+    }
   }
 
   /** Advances the detail build and swaps in the detail-aware ground when a new version lands. */
@@ -727,4 +849,33 @@ export class WorldView {
 function smoothstep(e0: number, e1: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
   return t * t * (3 - 2 * t);
+}
+
+/** Seed and optional hydro / biome rasters for the globe detail (WorldView.setGlobeDetail). */
+export interface GlobeDetailOpts {
+  seed: number;
+  discharge?: ArrayLike<number> | null;
+  biome?: ArrayLike<number> | null;
+}
+
+/** The sphere hydrology's river graph (face-local u, v metres, research 10 / Sphere phase 4a) as the tiles' carve input. */
+function sphereRivers(g: RiverGraph, face: Uint8Array, radius: number): SphereRivers {
+  return { graph: g, nodeDir: (i, out) => surfaceDir(face[i], g.x[i], g.y[i], radius, out) };
+}
+
+/** Real-water mask (as detailTiles.prepareGlobe's): 1 where a cell has its own level and is not a river. */
+function realWater(water: Layer, wclass: Layer | null): Float32Array {
+  const d = water.data;
+  const c = wclass && wclass.data.length === d.length ? wclass.data : null;
+  const out = new Float32Array(d.length);
+  for (let i = 0; i < d.length; i++) out[i] = d[i] > -9000 && !(c && c[i] === 3) ? 1 : 0;
+  return out;
+}
+
+/** A water-level layer with river cells (class 3) dry, to prepare the detail's levels from. */
+function riverLess(water: Layer, wclass: Layer): Layer {
+  const d = Float32Array.from(water.data);
+  const c = wclass.data;
+  if (c.length === d.length) for (let i = 0; i < d.length; i++) if (c[i] === 3) d[i] = -10000;
+  return { ...water, data: d };
 }
