@@ -204,7 +204,7 @@ export class WorldView {
     this.terrain.setLandformMasks(s.masks);
     this.terrain.setDrape(s.drape);
     this.rivers.setRivers(s.rivers?.face ? null : s.rivers, this.hf?.size ?? 0);
-    this.labels.setLandmarks(s.landmarks, this.hf?.size ?? 1024e3);
+    this.labels.setLandmarks(s.landmarks, ...this.labelSpace());
     this.labels.highlight(s.highlight);
     this.setCreekWorld(this.creekWorld);
     if (s.detail) this.detail.build(s.detail);
@@ -236,7 +236,7 @@ export class WorldView {
    */
   get needsFrame(): boolean {
     if (this.contextLost) return false;
-    if (this.sphere) return this.dirty || this.globeCam.moving || this.viewKey() !== this.drawnKey;
+    if (this.sphere) return this.dirty || this.globeCam.moving || this.labels.animating || this.viewKey() !== this.drawnKey;
     return this.dirty || this.cam.moving || this.labels.animating || this.detail.building || this.viewKey() !== this.drawnKey;
   }
 
@@ -312,6 +312,7 @@ export class WorldView {
     if (this.fittedRadius !== hf.radius) {
       this.fittedRadius = hf.radius;
       this.globeCam.fitWorld();
+      if (this.src.landmarks.length) this.labels.setLandmarks(this.src.landmarks, ...this.labelSpace());
     }
     this.dirty = true;
     if (!this.contextLost) {
@@ -412,7 +413,12 @@ export class WorldView {
   setLandmarks(list: readonly Landmark[]): void {
     this.src.landmarks = list;
     this.dirty = true;
-    this.labels.setLandmarks(list, this.hf?.size ?? 1024e3);
+    this.labels.setLandmarks(list, ...this.labelSpace());
+  }
+
+  /** Where labels live: the flat map size, or a sphere's globe radius (its landmarks carry faces). */
+  private labelSpace(): [worldM: number, radiusM: number] {
+    return this.sphere && this.globeHf ? [0, this.globeHf.radius] : [this.hf?.size ?? 1024e3, 0];
   }
 
   highlightLandmark(id: number | null): void {
@@ -588,7 +594,8 @@ export class WorldView {
    * follows research 10 §6.5: the screen-relative cartographic sun near the surface, blending to the
    * real sun (fixed in the planet frame, so the night side shows) as the view rises to globe zoom.
    * The view's time is the solar time at longitude 0; the sun model's colours use the target's own
-   * local time and latitude. Detail maps, creeks, rivers, labels and clouds are flat-only for now.
+   * local time and latitude. Labels come last, placed on the globe (far side hidden). Detail maps,
+   * creeks and clouds are flat-only for now.
    */
   private drawGlobe(timeSec: number): void {
     const gl = this.gl;
@@ -672,6 +679,7 @@ export class WorldView {
         });
       }
       gl.disable(gl.DEPTH_TEST);
+      this.labels.draw({ cam, ground: null, globe: hf, dpr: this.dpr, timeSec, exaggeration: this.exaggeration });
     }
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbo);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);

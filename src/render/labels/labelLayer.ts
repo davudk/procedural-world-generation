@@ -1,9 +1,9 @@
 import type { Landmark } from '../../shared/landmarks';
 import type { GroundQuery } from '../camera/ground';
-import type { OrbitCamera } from '../camera/orbitCamera';
 import { compileProgram, uniforms } from '../gl/util';
 import { GlyphAtlas } from './glyphAtlas';
-import { INSTANCE_FLOATS, LabelEngine, type LabelStats } from './labelEngine';
+import { INSTANCE_FLOATS, LabelEngine, type LabelGlobe, type LabelStats } from './labelEngine';
+import type { LabelCamera } from './projector';
 
 const VS = /* glsl */ `#version 300 es
 precision highp float;
@@ -65,8 +65,10 @@ void main() {
 }`;
 
 export interface LabelDrawFrame {
-  cam: OrbitCamera;
-  ground: GroundQuery;
+  cam: LabelCamera;
+  /** Flat maps: the rendered ground; spheres: null and `globe` set. */
+  ground: GroundQuery | null;
+  globe?: LabelGlobe | null;
   dpr: number;
   timeSec: number;
   exaggeration: number;
@@ -119,8 +121,9 @@ export class LabelLayer {
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
 
-  setLandmarks(list: readonly Landmark[], worldM: number): void {
-    this.engine.setLandmarks(list, worldM);
+  /** `radiusM` > 0: a sphere's landmarks on a globe of that radius (see LabelEngine.setLandmarks). */
+  setLandmarks(list: readonly Landmark[], worldM: number, radiusM = 0): void {
+    this.engine.setLandmarks(list, worldM, radiusM);
   }
 
   highlight(id: number | null): void {

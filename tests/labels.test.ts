@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { GroundQuery } from '../src/render/camera/ground';
+import { GlobeCamera } from '../src/render/camera/globeCamera';
 import { OrbitCamera } from '../src/render/camera/orbitCamera';
+import { SphereGround } from '../src/render/globe/globeGround';
 import { glyphChars, type GlyphMetrics, type GlyphSource } from '../src/render/labels/glyphs';
 import { LabelEngine } from '../src/render/labels/labelEngine';
 import { labelStyle, STYLE_LAND, STYLE_WATER } from '../src/render/labels/labelStyle';
@@ -8,6 +10,7 @@ import { LabelPlacer, type PlacementCandidate } from '../src/render/labels/place
 import { Projector } from '../src/render/labels/projector';
 import { ShelfPacker, sdfFromAlpha } from '../src/render/labels/sdf';
 import { layoutAlongPath, textRun } from '../src/render/labels/textLayout';
+import { surfaceDir } from '../src/shared/cube';
 import type { Landmark, LandmarkKind } from '../src/shared/landmarks';
 
 const SIZE = 1_000_000;
@@ -438,3 +441,118 @@ describe('label engine', () => {
   });
 });
 
+
+describe('labels on a globe', () => {
+  const R = 652_000;
+  const W = (Math.PI / 2) * R;
+
+  /** Landmarks scattered uniformly over the six faces (rivers with short paths, ranges with an angle). */
+  function globeList(n: number): Landmark[] {
+    const r = rng(5);
+    const kinds: LandmarkKind[] = ['peak', 'lake', 'island', 'range', 'river', 'sea', 'ocean', 'forest'];
+    const list: Landmark[] = [];
+    for (let i = 0; i < n; i++) {
+      const kind = kinds[i % kinds.length];
+      const face = i % 6;
+      const x = (0.02 + 0.96 * r()) * W, y = (0.02 + 0.96 * r()) * W;
+      const lm = landmark(i, {
+        kind, x, y, face, importance: r(), hero: i < 3, maxMpp: 1e9, extentM: 20_000 + r() * 100_000,
+        name: `${kind} ${i}`, angle: kind === 'range' ? r() * Math.PI - Math.PI / 2 : NaN,
+      });
+      if (kind === 'river') {
+        const m = 20;
+        const path = new Float32Array(2 * m);
+        const pathFace = new Uint8Array(m).fill(face);
+        for (let k = 0; k < m; k++) {
+          path[2 * k] = Math.min(W, Math.max(0, x - 60_000 + k * 6_000));
+          path[2 * k + 1] = Math.min(W, Math.max(0, y + 8_000 * Math.sin(k / 4)));
+        }
+        lm.path = path;
+        lm.pathFace = pathFace;
+      }
+      list.push(lm);
+    }
+    return list;
+  }
+
+  function globeCam(): GlobeCamera {
+    const cam = new GlobeCamera(new SphereGround(R));
+    cam.viewW = 1600;
+    cam.viewH = 900;
+    cam.fitWorld();
+    return cam;
+  }
+
+  it('never shows a label on the far side or behind the horizon while the globe turns', () => {
+    const ground = new SphereGround(R);
+    const cam = globeCam();
+    const list = globeList(1200);
+    const engine = new LabelEngine(new FakeGlyphs());
+    engine.setLandmarks(list, 0, R);
+    const p = new Float64Array(3);
+    let t = 0;
+    let shown = 0;
+    const times: number[] = [];
+    for (let f = 0; f < 240; f++) {
+      // Spin about the axis and swing in latitude; alternate the whole disc and a regional view.
+      cam.lookAtLatLon(60 * Math.sin(f / 37), ((f * 7) % 360) - 180);
+      cam.distance = cam.fitDistance() * (f % 80 < 40 ? 1 : 0.15);
+      engine.update({ cam, ground: null, globe: ground, dpr: 2, timeSec: (t += 1 / 60), exaggeration: 1 });
+      if (f >= 20) times.push(engine.stats.placeMs);
+      const e = cam.eye();
+      for (const l of engine.drawn) {
+        if (l.path) continue;
+        surfaceDir(l.face!, l.x, l.y, R, p);
+        const facing = (e.x - p[0] * R) * p[0] + (e.y - p[1] * R) * p[1] + (e.z - p[2] * R) * p[2];
+        expect(facing, `${l.name} drawn on the far side at frame ${f}`).toBeGreaterThan(0);
+        shown++;
+      }
+    }
+    times.sort((a, b) => a - b);
+    // eslint-disable-next-line no-console
+    console.log(`globe labels: 1200 landmarks, moving camera → median ${times[times.length >> 1].toFixed(3)} ms per frame, ${(shown / 240).toFixed(1)} point labels drawn per frame`);
+    expect(shown).toBeGreaterThan(240 * 5);
+  });
+
+  it('projects with the globe camera and lays out rotated and path labels on the near side', () => {
+    const ground = new SphereGround(R);
+    const cam = globeCam();
+    const p = new Projector();
+    p.update(cam);
+    const r = rng(3);
+    for (let i = 0; i < 50; i++) {
+      const q = { x: (r() - 0.5) * 2 * R, y: (r() - 0.5) * 2 * R, z: (r() - 0.5) * 2 * R };
+      const a = cam.project(q);
+      expect(p.project(q.x, q.y, q.z)).toBe(a !== null);
+      if (a) {
+        expect(p.sx).toBeCloseTo(a.sx, 5);
+        expect(p.sy).toBeCloseTo(a.sy, 5);
+      }
+    }
+    // A range and a river on the face under the camera (face 0 is centred on lat 0, lon 0).
+    cam.lookAtLatLon(0, 0);
+    cam.distance = 600_000;
+    const path = new Float32Array(40);
+    for (let k = 0; k < 20; k++) {
+      path[2 * k] = W / 2 - 150_000 + k * 15_000;
+      path[2 * k + 1] = W / 2 + 60_000 + 5_000 * Math.sin(k / 5);
+    }
+    const river = landmark(1, { kind: 'river', name: 'Rio Teste', face: 0, x: W / 2, y: W / 2 + 60_000, path, pathFace: new Uint8Array(20) });
+    const range = landmark(2, { kind: 'range', name: 'Test Range', face: 0, x: W / 2, y: W / 2 - 80_000, angle: 0.6, extentM: 200_000 });
+    const engine = new LabelEngine(new FakeGlyphs());
+    // Landmarks without a face (flat ones) are skipped on a globe.
+    engine.setLandmarks([river, range, landmark(3, { name: 'Flat Peak' })], 0, R);
+    for (let f = 0; f < 6; f++) engine.update({ cam, ground: null, globe: ground, dpr: 1, timeSec: f / 60, exaggeration: 1 });
+    expect(engine.drawn.map((l) => l.id).sort()).toEqual([1, 2]);
+    // The range text follows its map angle: north up, the face's +u is east, so it rises to the right
+    // (a negative screen angle, y down).
+    let rangeAngle = NaN;
+    for (let i = 0; i < engine.instanceCount; i++) if (engine.instances[i * 16 + 3] !== STYLE_WATER) rangeAngle = engine.instances[i * 16 + 2];
+    expect(rangeAngle).toBeLessThan(-0.3);
+    expect(rangeAngle).toBeGreaterThan(-0.9);
+    // Turned to the far side, both go at once.
+    cam.lookAtLatLon(0, 180);
+    engine.update({ cam, ground: null, globe: ground, dpr: 1, timeSec: 1, exaggeration: 1 });
+    expect(engine.drawn).toHaveLength(0);
+  });
+});

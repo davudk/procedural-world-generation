@@ -1,4 +1,5 @@
 import './atlas.css';
+import { landmarkLatLon } from '../app/landmarkNav';
 import type { Landmark, LandmarkKind, WorldTraits } from '../shared/landmarks';
 
 export interface AtlasCallbacks {
@@ -40,6 +41,8 @@ export class AtlasPanel {
   private readonly search: HTMLInputElement;
   private landmarks: readonly Landmark[] = [];
   private traits: WorldTraits | null = null;
+  /** Spheres: planet radius, for the rows' latitude / longitude. */
+  private radiusM = 0;
   private expanded = new Set<string>();
 
   constructor(parent: HTMLElement, private readonly cb: AtlasCallbacks) {
@@ -76,9 +79,11 @@ export class AtlasPanel {
     this.el.classList.toggle('hidden', !show);
   }
 
-  set(landmarks: readonly Landmark[], traits: WorldTraits | null): void {
+  /** `radiusM`: a sphere's radius (rows then show coordinates on hover). */
+  set(landmarks: readonly Landmark[], traits: WorldTraits | null, radiusM = 0): void {
     this.landmarks = landmarks;
     this.traits = traits;
+    this.radiusM = radiusM;
     this.render();
   }
 
@@ -150,6 +155,7 @@ export class AtlasPanel {
     meta.className = 'atlas-meta';
     meta.textContent = [KIND_LABEL[l.kind], fact(l)].filter(Boolean).join(' · ');
     b.append(name, meta);
+    if (this.radiusM > 0 && l.face !== undefined) b.title = landmarkLatLon(l, this.radiusM);
     b.addEventListener('click', () => this.cb.onSelect(l));
     b.addEventListener('pointerenter', () => this.cb.onHover(l));
     b.addEventListener('pointerleave', () => this.cb.onHover(null));

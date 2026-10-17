@@ -1,5 +1,6 @@
 import type { Landmark } from '../../shared/landmarks';
-import type { GroundQuery } from '../camera/ground';
+import { surfaceDir } from '../../shared/cube';
+import type { GroundQuery, Vec3 } from '../camera/ground';
 import { glyphChars, type GlyphMetrics, type GlyphSource } from './glyphs';
 import { labelStyle, labelText, type LabelStyle } from './labelStyle';
 import { LabelPlacer, type PlacementCandidate, type PlacementOptions } from './placement';
@@ -26,11 +27,31 @@ const OCCLUSION_REFRESH = 8;
 const TILT_MIN = 0.03;
 /** A kept label survives until the view is this much coarser than its maxMpp (zoom hysteresis). */
 const MPP_HYSTERESIS = 1.2;
+/**
+ * Globe: a point shows only while the eye is this far above its tangent plane (cosine of the angle
+ * between the local up and the direction to the eye). Below 0 it is on the far side or behind the
+ * horizon (the sea-level sphere lies under every tangent plane above it, so nothing on the planet
+ * can be seen past it); near 0 text would lie flat along the limb.
+ */
+export const GLOBE_MIN_FACING = 0.12;
+
+/** What labels need of a rendered globe (GlobeGround satisfies it): planet-centred metres, +z north. */
+export interface LabelGlobe {
+  readonly radius: number;
+  /** Rendered height above the sea-level radius (m, exaggerated) toward a direction. */
+  heightAtDir(x: number, y: number, z: number): number;
+  raycast(o: Vec3, d: Vec3): Vec3 | null;
+}
 
 export interface LabelFrame {
   cam: LabelCamera;
-  /** Rendered ground (heights already include the vertical exaggeration). */
-  ground: GroundQuery;
+  /** Rendered ground of a flat map (heights already include the vertical exaggeration). */
+  ground: GroundQuery | null;
+  /**
+   * Spheres: the rendered globe. Landmarks with a face are then placed at their (face, u, v) on it
+   * (setLandmarks with the planet radius) and hidden on the far side.
+   */
+  globe?: LabelGlobe | null;
   dpr: number;
   timeSec: number;
   /** Only used to invalidate cached heights when it changes. */
@@ -49,6 +70,12 @@ interface Info {
   wy: number;
   z: number;
   zEpoch: number;
+  /**
+   * Globe: unit vector of the anchor and unit tangent of the text direction (rotated labels). The
+   * path then holds unit vectors (3 per vertex) instead of world x, y pairs.
+   */
+  dir: Float64Array | null;
+  tan: Float64Array | null;
   /** Path in world metres (x, y pairs), cached heights per vertex, sample vertex indices for culling. */
   path: Float64Array | null;
   pathZ: Float32Array | null;
@@ -122,17 +149,21 @@ export class LabelEngine {
   private frameNo = 0;
   private lastTime = -1;
   private epoch = 0;
-  private lastGround: GroundQuery | null = null;
+  private lastGround: GroundQuery | LabelGlobe | null = null;
   private lastExag = NaN;
   private dpr = 1;
   private cands: PlacementCandidate[] = [];
   private candPool: PlacementCandidate[] = [];
   private candInfo: Info[] = [];
   private hits: Info[] = [];
+  private drawnList: Landmark[] = [];
   private occBudget = 0;
   private frame: LabelFrame | null = null;
   private viewVersion = 0;
-  private readonly viewKey = new Float64Array(10);
+  private readonly viewKey = new Float64Array(16);
+  /** Globe radius the landmarks were placed for (0: flat world coordinates). */
+  private radius = 0;
+  private readonly pt = new Float64Array(3);
   private scratch = new Float32Array(4096);
   private runs: number[] = [];
 
@@ -140,7 +171,12 @@ export class LabelEngine {
     this.placer = new LabelPlacer(placement);
   }
 
-  setLandmarks(list: readonly Landmark[], worldM: number): void {
+  /**
+   * `worldM` is the flat map size (world y = worldM − map y). `radiusM` > 0 places the landmarks of a
+   * sphere (those with a face) on a globe of that radius (shared/cube.ts surfaceDir).
+   */
+  setLandmarks(list: readonly Landmark[], worldM: number, radiusM = 0): void {
+    this.radius = radiusM;
     this.infos = [];
     this.byId.clear();
     this.states.clear();
@@ -148,13 +184,42 @@ export class LabelEngine {
     this.placer.reset();
     for (const lm of list) {
       if (!lm.name || !Number.isFinite(lm.x) || !Number.isFinite(lm.y)) continue;
+      const globe = radiusM > 0;
+      if (globe !== (lm.face !== undefined)) continue;
       const st = labelStyle(lm);
       const text = labelText(lm, st);
       const glyphs = glyphChars(text).map((ch) => this.glyphs.glyph(st.style, ch));
       if (glyphs.length === 0) continue;
       let path: Float64Array | null = null;
       let samples: Int32Array | null = null;
-      if (st.mode === 'path' && lm.path) {
+      let dir: Float64Array | null = null;
+      let tan: Float64Array | null = null;
+      if (globe) {
+        dir = new Float64Array(3);
+        surfaceDir(lm.face!, lm.x, lm.y, radiusM, dir);
+        if (Number.isFinite(lm.angle)) {
+          // The angle is in the anchor face's axes (+u east, −v north): its tangent by a small step.
+          const q = new Float64Array(3);
+          const e = 1e-4 * radiusM;
+          surfaceDir(lm.face!, lm.x + Math.cos(lm.angle) * e, lm.y - Math.sin(lm.angle) * e, radiusM, q);
+          tan = Float64Array.from([q[0] - dir[0], q[1] - dir[1], q[2] - dir[2]]);
+          const l = Math.hypot(tan[0], tan[1], tan[2]) || 1;
+          for (let k = 0; k < 3; k++) tan[k] /= l;
+        }
+      }
+      if (st.mode === 'path' && lm.path && globe && lm.pathFace) {
+        const n = Math.min(lm.pathFace.length, Math.floor(lm.path.length / 2));
+        const stride = Math.max(1, Math.ceil(n / MAX_PATH_POINTS));
+        const idx: number[] = [];
+        for (let i = 0; i < n; i += stride) idx.push(i);
+        if ((n - 1) % stride !== 0) idx.push(n - 1);
+        path = new Float64Array(idx.length * 3);
+        idx.forEach((i, k) => surfaceDir(lm.pathFace![i], lm.path![2 * i], lm.path![2 * i + 1], radiusM, path!, 3 * k));
+        const pm = idx.length;
+        const ns = Math.min(pm, 9);
+        samples = new Int32Array(ns);
+        for (let s = 0; s < ns; s++) samples[s] = Math.round(((pm - 1) * s) / Math.max(1, ns - 1));
+      } else if (st.mode === 'path' && lm.path && !globe) {
         const n = Math.floor(lm.path.length / 2);
         const stride = Math.max(1, Math.ceil(n / MAX_PATH_POINTS));
         const m = Math.ceil(n / stride) + (((n - 1) % stride) !== 0 ? 1 : 0);
@@ -177,8 +242,8 @@ export class LabelEngine {
       const g = glyphs.length;
       const info: Info = {
         lm, st, text, glyphs, adv: Float32Array.from(glyphs, (gm) => gm.advance),
-        wx: lm.x, wy: worldM - lm.y, z: 0, zEpoch: -1,
-        path, pathZ: path ? new Float32Array(path.length / 2) : null, pathEpoch: -1, samples,
+        wx: lm.x, wy: worldM - lm.y, z: 0, zEpoch: -1, dir, tan,
+        path, pathZ: path ? new Float32Array(path.length / (globe ? 3 : 2)) : null, pathEpoch: -1, samples,
         sizePx: st.sizePx, ax: 0, ay: 0,
         gx: new Float32Array(g), gy: new Float32Array(g), ga: new Float32Array(g),
         boxes: new Float32Array(4), run: undefined,
@@ -199,6 +264,11 @@ export class LabelEngine {
   get animating(): boolean {
     for (const s of this.states.values()) if (s.opacity !== s.target) return true;
     return this.placer.pending > 0;
+  }
+
+  /** Landmarks whose labels were drawn in the last frame (placed and fading). */
+  get drawn(): readonly Landmark[] {
+    return this.drawnList;
   }
 
   /** Topmost placed label whose boxes contain the CSS-px point (with a 3 px tolerance). */
@@ -224,9 +294,10 @@ export class LabelEngine {
     const cam = f.cam;
     const proj = this.proj;
     proj.update(cam);
-    if (f.ground !== this.lastGround || f.exaggeration !== this.lastExag) {
+    const surface = f.globe ?? f.ground;
+    if (surface !== this.lastGround || f.exaggeration !== this.lastExag) {
       this.epoch++;
-      this.lastGround = f.ground;
+      this.lastGround = surface;
       this.lastExag = f.exaggeration;
     }
     this.bumpView(cam);
@@ -248,9 +319,9 @@ export class LabelEngine {
       const lm = info.lm;
       const forced = lm.id === hl;
       const kept = placer.wasPlaced(lm.id);
-      const z = this.zOf(info, f.ground);
+      const z = this.zOf(info, f);
       let ax = 0, ay = 0, depth = 0, ok = false;
-      if (proj.project(info.wx, info.wy, z)) {
+      if (this.projectAnchor(info, z)) {
         ax = proj.sx;
         ay = proj.sy;
         depth = proj.depth;
@@ -258,10 +329,9 @@ export class LabelEngine {
       }
       if (!ok && info.path && info.samples) {
         // The anchor is off screen: a river still qualifies when part of it is on screen.
-        this.ensurePathZ(info, f.ground);
-        const p = info.path, pz = info.pathZ!;
+        this.ensurePathZ(info, f);
         for (const s of info.samples) {
-          if (proj.project(p[2 * s], p[2 * s + 1], pz[s]) && proj.sx >= 0 && proj.sx <= W && proj.sy >= 0 && proj.sy <= H) {
+          if (this.projectVertex(info, s) && proj.sx >= 0 && proj.sx <= W && proj.sy >= 0 && proj.sy <= H) {
             ax = proj.sx;
             ay = proj.sy;
             depth = proj.depth;
@@ -291,7 +361,7 @@ export class LabelEngine {
 
     const placed = placer.place(cands, W, H, (c, i) => {
       const info = this.candInfo[i];
-      if (!info.path && this.occluded(info, f.ground, tilted)) return null;
+      if (!info.path && this.occluded(info, f, tilted)) return null;
       if (!this.layout(info)) return null;
       if (info.path) {
         c.ax = info.ax;
@@ -332,7 +402,7 @@ export class LabelEngine {
   /** Increments the view version when anything that affects screen positions changed. */
   private bumpView(cam: LabelCamera): void {
     const p = this.proj, k = this.viewKey;
-    const v = [p.ex, p.ey, p.ez, cam.pitch, cam.bearing, cam.fovY, cam.viewW, cam.viewH, this.dpr, this.epoch];
+    const v = [p.ex, p.ey, p.ez, cam.pitch, cam.bearing, cam.fovY, cam.viewW, cam.viewH, this.dpr, this.epoch, p.fx, p.fy, p.fz, p.rx, p.ry, p.rz];
     let changed = false;
     for (let i = 0; i < v.length; i++) {
       if (k[i] !== v[i]) {
@@ -343,40 +413,98 @@ export class LabelEngine {
     if (changed) this.viewVersion++;
   }
 
-  private zOf(info: Info, ground: GroundQuery): number {
+  private zOf(info: Info, f: LabelFrame): number {
     if (info.zEpoch !== this.epoch) {
-      const s = ground.size;
-      info.z = ground.heightAt(Math.min(s, Math.max(0, info.wx)), Math.min(s, Math.max(0, info.wy)));
+      if (info.dir) {
+        const d = info.dir;
+        info.z = f.globe ? f.globe.heightAtDir(d[0], d[1], d[2]) : 0;
+      } else if (f.ground) {
+        const s = f.ground.size;
+        info.z = f.ground.heightAt(Math.min(s, Math.max(0, info.wx)), Math.min(s, Math.max(0, info.wy)));
+      } else info.z = 0;
       if (!Number.isFinite(info.z)) info.z = 0;
       info.zEpoch = this.epoch;
     }
     return info.z;
   }
 
-  private ensurePathZ(info: Info, ground: GroundQuery): void {
+  private ensurePathZ(info: Info, f: LabelFrame): void {
     if (info.pathEpoch === this.epoch || !info.path || !info.pathZ) return;
-    const s = ground.size;
     const p = info.path, pz = info.pathZ;
-    for (let i = 0; i < pz.length; i++) {
-      const h = ground.heightAt(Math.min(s, Math.max(0, p[2 * i])), Math.min(s, Math.max(0, p[2 * i + 1])));
-      pz[i] = Number.isFinite(h) ? h : 0;
-    }
+    if (info.dir) {
+      for (let i = 0; i < pz.length; i++) {
+        const h = f.globe ? f.globe.heightAtDir(p[3 * i], p[3 * i + 1], p[3 * i + 2]) : 0;
+        pz[i] = Number.isFinite(h) ? h : 0;
+      }
+    } else if (f.ground) {
+      const s = f.ground.size;
+      for (let i = 0; i < pz.length; i++) {
+        const h = f.ground.heightAt(Math.min(s, Math.max(0, p[2 * i])), Math.min(s, Math.max(0, p[2 * i + 1])));
+        pz[i] = Number.isFinite(h) ? h : 0;
+      }
+    } else pz.fill(0);
     info.pathEpoch = this.epoch;
+  }
+
+  /**
+   * Projects a globe point (unit vector d at height z) when it faces the eye (GLOBE_MIN_FACING),
+   * else false: far-side and behind-the-horizon points never reach the screen.
+   */
+  private projectDir(dx: number, dy: number, dz: number, z: number): boolean {
+    const p = this.proj;
+    const r = this.radius + z;
+    const x = dx * r, y = dy * r, w = dz * r;
+    const ex = p.ex - x, ey = p.ey - y, ez = p.ez - w;
+    const up = ex * dx + ey * dy + ez * dz;
+    if (!(up > GLOBE_MIN_FACING * Math.hypot(ex, ey, ez))) return false;
+    return p.project(x, y, w);
+  }
+
+  /** Projects the anchor at height z (flat world coordinates, or its globe position). */
+  private projectAnchor(info: Info, z: number): boolean {
+    const d = info.dir;
+    return d ? this.projectDir(d[0], d[1], d[2], z) : this.proj.project(info.wx, info.wy, z);
+  }
+
+  /** Projects path vertex i at its cached height. */
+  private projectVertex(info: Info, i: number): boolean {
+    const p = info.path!, pz = info.pathZ!;
+    return info.dir ? this.projectDir(p[3 * i], p[3 * i + 1], p[3 * i + 2], pz[i]) : this.proj.project(p[2 * i], p[2 * i + 1], pz[i]);
+  }
+
+  /** World position of the anchor at height z, and its up vector. */
+  private anchorWorld(info: Info, z: number, out: Float64Array): [number, number, number] {
+    const d = info.dir;
+    if (!d) {
+      out[0] = info.wx;
+      out[1] = info.wy;
+      out[2] = z;
+      return [0, 0, 1];
+    }
+    const r = this.radius + z;
+    out[0] = d[0] * r;
+    out[1] = d[1] * r;
+    out[2] = d[2] * r;
+    return [d[0], d[1], d[2]];
   }
 
   /**
    * Cheap terrain occlusion for tilted views: a ray from the eye towards the anchor; occluded when the
    * terrain is hit clearly before it. Budgeted per frame, results reused for a few frames.
    */
-  private occluded(info: Info, ground: GroundQuery, tilted: boolean): boolean {
+  private occluded(info: Info, f: LabelFrame, tilted: boolean): boolean {
     if (!tilted) return false;
+    const ground = info.dir ? f.globe : f.ground;
+    if (!ground) return false;
     if (info.occFrame >= 0 && this.frameNo - info.occFrame < OCCLUSION_REFRESH) return info.occluded;
     if (this.occBudget <= 0) return info.occFrame >= 0 ? info.occluded : false;
     this.occBudget--;
     const p = this.proj;
-    const dx = info.wx - p.ex, dy = info.wy - p.ey;
-    const dist0 = Math.hypot(dx, dy, info.z - p.ez);
-    const dz = info.z + Math.max(5, 0.002 * dist0) - p.ez;
+    const a = this.pt;
+    const [ux, uy, uz] = this.anchorWorld(info, info.z, a);
+    const dist0 = Math.hypot(a[0] - p.ex, a[1] - p.ey, a[2] - p.ez);
+    const lift = Math.max(5, 0.002 * dist0);
+    const dx = a[0] + ux * lift - p.ex, dy = a[1] + uy * lift - p.ey, dz = a[2] + uz * lift - p.ez;
     const dist = Math.hypot(dx, dy, dz);
     let occ = false;
     if (dist > 1) {
@@ -409,8 +537,8 @@ export class LabelEngine {
   private layoutAnchor(info: Info): boolean {
     const f = this.frame!;
     const p = this.proj;
-    const z = this.zOf(info, f.ground);
-    if (!p.project(info.wx, info.wy, z)) return false;
+    const z = this.zOf(info, f);
+    if (!this.projectAnchor(info, z)) return false;
     const ax = p.sx, ay = p.sy, depth = p.depth;
     const s = info.sizePx;
     const run = this.textRunFor(info);
@@ -423,7 +551,15 @@ export class LabelEngine {
       // Text direction: map angle (0 = east, counter-clockwise on the north-up map) projected to the screen.
       const r = Math.max(1, 40 * depth * p.pxScale);
       let th = 0;
-      if (p.project(info.wx + Math.cos(info.lm.angle) * r, info.wy + Math.sin(info.lm.angle) * r, z)) {
+      let ok: boolean;
+      if (info.tan) {
+        // Globe: along the tangent of the anchor face's direction.
+        const a = this.pt;
+        this.anchorWorld(info, z, a);
+        const t = info.tan;
+        ok = p.project(a[0] + t[0] * r, a[1] + t[1] * r, a[2] + t[2] * r);
+      } else ok = p.project(info.wx + Math.cos(info.lm.angle) * r, info.wy + Math.sin(info.lm.angle) * r, z);
+      if (ok) {
         th = Math.atan2(p.sy - ay, p.sx - ax);
         if (Math.cos(th) < 0) th = wrap(th + Math.PI);
       }
@@ -483,9 +619,8 @@ export class LabelEngine {
   private layoutPath(info: Info): boolean {
     const f = this.frame!;
     const p = this.proj;
-    this.ensurePathZ(info, f.ground);
-    const path = info.path!, pz = info.pathZ!;
-    const n = pz.length;
+    this.ensurePathZ(info, f);
+    const n = info.pathZ!.length;
     if (this.scratch.length < n * 2) this.scratch = new Float32Array(n * 2);
     const pts = this.scratch;
     const W = p.w, H = p.h, inset = 4;
@@ -494,7 +629,7 @@ export class LabelEngine {
     runs.length = 0;
     let k = 0, start = 0;
     for (let i = 0; i < n; i++) {
-      const vis = p.project(path[2 * i], path[2 * i + 1], pz[i]) && p.sx >= inset && p.sx <= W - inset && p.sy >= inset && p.sy <= H - inset;
+      const vis = this.projectVertex(info, i) && p.sx >= inset && p.sx <= W - inset && p.sy >= inset && p.sy <= H - inset;
       if (!vis) {
         if (k - start >= 2) runs.push(start, k);
         start = k;
@@ -531,6 +666,7 @@ export class LabelEngine {
   private buildInstances(live: State[]): void {
     let total = 0;
     for (const s of live) total += s.info.glyphs.length;
+    this.drawnList = [];
     if (this.instances.length < total * INSTANCE_FLOATS) this.instances = new Float32Array(Math.ceil(total * 1.5) * INSTANCE_FLOATS);
     const out = this.instances;
     const fontPx = this.glyphs.fontPx;
@@ -540,9 +676,11 @@ export class LabelEngine {
       // Labels fading out keep their last layout when it can no longer be computed.
       if (info.layoutView !== this.viewVersion) {
         const had = info.hasLayout;
-        if (!this.layout(info) && had) info.hasLayout = true;
+        // On a globe a label that turned to the far side goes at once (its last layout would float there).
+        if (!this.layout(info) && had && !info.dir) info.hasLayout = true;
       }
       if (!info.hasLayout) continue;
+      this.drawnList.push(info.lm);
       const size = info.sizePx;
       const scale = size / fontPx;
       const style = info.st.style;

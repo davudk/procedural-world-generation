@@ -1,6 +1,7 @@
 import './style.css';
 import { exportActions } from './app/export/exportActions';
 import { GenHost } from './app/genHost';
+import { frameDistance, landmarkDir, latLonText, nearestLandmark, nearestLandmarkOnGlobe } from './app/landmarkNav';
 import { CameraController, isTypingTarget } from './input/cameraController';
 import { OrbitController } from './input/orbitController';
 import { worldToMapKm } from './render/camera/ground';
@@ -194,13 +195,18 @@ const panel = new ConfigPanel($('panel'), spec, {
   },
 });
 
+/** Flies the 3D view to a landmark, framing its extent (a great-circle flight on a globe), and highlights it. */
+function flyToLandmark(l: Landmark): void {
+  world.highlightLandmark(l.id);
+  const R = world.globeHf?.radius;
+  const dir = world.sphere && R ? landmarkDir(l, R) : null;
+  if (dir) world.globeCam.flyToDir(dir, frameDistance(l, world.globeCam.fovY));
+  else if (l.face === undefined) world.cam.flyTo(l.x, (world.hf?.size ?? 1024e3) - l.y, frameDistance(l, world.cam.fovY));
+}
+
 const atlas = new AtlasPanel(document.body, {
   onSelect(l) {
-    const size = world.hf?.size ?? 1024e3;
-    // Frame the feature: its extent spans about half the screen height.
-    const d = Math.max(9000, (l.extentM * 2) / (2 * Math.tan(world.cam.fovY / 2)));
-    world.cam.flyTo(l.x, size - l.y, d);
-    world.highlightLandmark(l.id);
+    flyToLandmark(l);
   },
   onHover(l) {
     world.highlightLandmark(l ? l.id : null);
@@ -213,9 +219,7 @@ orbit.onTap = (sx, sy) => {
   inspect(sx, sy);
   const l = world.labels.hitTest(sx, sy);
   if (l) {
-    const size = world.hf?.size ?? 1024e3;
-    world.highlightLandmark(l.id);
-    world.cam.flyTo(l.x, size - l.y, Math.max(9000, (l.extentM * 2) / (2 * Math.tan(world.cam.fovY / 2))));
+    flyToLandmark(l);
   } else {
     world.highlightLandmark(null);
   }
@@ -344,7 +348,7 @@ function onGenEvent(msg: FromWorker): void {
         landmarks = msg.vectors.landmarks;
         traits = msg.vectors.traits ?? null;
         world.setLandmarks(landmarks);
-        atlas.set(landmarks, msg.vectors.traits ?? null);
+        atlas.set(landmarks, msg.vectors.traits ?? null, world.globeHf?.radius);
       }
       outcomes = { ...outcomes, ...msg.outcomes };
       panel.setOutcomes(outcomes);
@@ -481,7 +485,7 @@ function showSphere(l: Layer): void {
   const wl = layers.get('waterLevel');
   const water = wl && wl.faces === 6 && wl.stage === elev?.stage ? wl : null;
   if (elev && elev.faces === 6 && (elev !== globeShown.elev || water !== globeShown.water)) {
-    if (!globeShown.elev && mode === '3d') notice('Globe view: no close-zoom detail, labels or clouds on spheres yet');
+    if (!globeShown.elev && mode === '3d') notice('Globe view: no close-zoom detail or clouds on spheres yet');
     globeShown.elev = elev;
     globeShown.water = water;
     const wc = layers.get('waterClass');
@@ -550,7 +554,7 @@ function inspect(sx: number, sy: number): void {
     return;
   }
   const lines = [`${x.toFixed(1)} km, ${y.toFixed(1)} km`, `${l.label}: ${fmtNum(v)} ${l.unit}`];
-  const near = nearestLandmark(x * 1000, y * 1000);
+  const near = nearestLandmark(landmarks, x * 1000, y * 1000);
   if (near) lines.unshift(`${near.name} (${KIND_LABEL[near.kind].toLowerCase()})`);
   if (elev && elev !== l) lines.push(`Elevation: ${fmtNum(sampleLayer(elev, x, y) ?? 0)} m`);
   inspectEl.textContent = lines.join('\n');
@@ -565,7 +569,11 @@ function inspectSphere(shown: ProjectedLayer, x: number, y: number): void {
   const lines = [`${shown.label}: ${fmtNum(v)} ${shown.unit}`];
   if (shown.projection === 'equirect') {
     const [lat, lon] = equirectLatLon(shown, x, y);
-    lines.unshift(`${Math.abs(lat).toFixed(1)}° ${lat >= 0 ? 'N' : 'S'}, ${Math.abs(lon).toFixed(1)}° ${lon >= 0 ? 'E' : 'W'}`);
+    lines.unshift(latLonText(lat, lon));
+    const R = world.globeHf?.radius ?? 0;
+    const la = (lat * Math.PI) / 180, lo = (lon * Math.PI) / 180;
+    const near = R > 0 ? nearestLandmarkOnGlobe(landmarks, { x: Math.cos(la) * Math.cos(lo), y: Math.cos(la) * Math.sin(lo), z: Math.sin(la) }, R) : null;
+    if (near) lines.unshift(`${near.name} (${KIND_LABEL[near.kind].toLowerCase()})`);
   }
   const elev = layers.get('elevation');
   if (elev && elev.label !== shown.label && elev.faces === 6) {
@@ -587,30 +595,12 @@ function inspectGlobe(sx: number, sy: number): void {
   const lat = (Math.asin(p.z / r) * 180) / Math.PI;
   const lon = (Math.atan2(p.y, p.x) * 180) / Math.PI;
   const at = (layer: Layer): number => layer.data[dirToCell(p.x, p.y, p.z, layer.w)];
-  const lines = [
-    `${Math.abs(lat).toFixed(2)}° ${lat >= 0 ? 'N' : 'S'}, ${Math.abs(lon).toFixed(2)}° ${lon >= 0 ? 'E' : 'W'}`,
-    `${l.label}: ${fmtNum(at(l))} ${l.unit}`,
-  ];
+  const lines = [latLonText(lat, lon, 2), `${l.label}: ${fmtNum(at(l))} ${l.unit}`];
+  const near = world.globeHf ? nearestLandmarkOnGlobe(landmarks, p, world.globeHf.radius) : null;
+  if (near) lines.unshift(`${near.name} (${KIND_LABEL[near.kind].toLowerCase()})`);
   const elev = layers.get('elevation');
   if (elev && elev !== l && elev.faces === 6) lines.push(`Elevation: ${fmtNum(at(elev))} m`);
   inspectEl.textContent = lines.join('\n');
-}
-
-/** The most important landmark whose extent covers a map point (metres), for the inspector. */
-function nearestLandmark(xm: number, ym: number): Landmark | null {
-  let best: Landmark | null = null;
-  let bestScore = 0;
-  for (const l of landmarks) {
-    const d = Math.hypot(l.x - xm, l.y - ym);
-    const r = Math.max(2000, l.extentM * 0.6);
-    if (d > r) continue;
-    const score = l.importance * (1 - d / r) + 0.001;
-    if (score > bestScore) {
-      bestScore = score;
-      best = l;
-    }
-  }
-  return best;
 }
 
 function fitView(): void {
