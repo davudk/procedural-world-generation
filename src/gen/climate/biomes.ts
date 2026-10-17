@@ -1,5 +1,6 @@
 import { BIOME, BIOMES, type BiomeId } from '../../shared/biomes';
 import type { Noise2 } from '../../shared/noise';
+import type { Noise3 } from '../../shared/noise3';
 import type { Grid } from '../grid/grid';
 import { smoothstep } from '../grid/ops';
 import { gaussBlur } from '../grid/smooth';
@@ -43,7 +44,8 @@ export interface BiomeInput {
   discharge: Float32Array;
   /** Shift of the glacier equilibrium-line temperature (°C; + = more ice). */
   elaShift: number;
-  noise: Noise2;
+  /** Noise2 on flat maps, Noise3 on the sphere (as coarseFbm expects). */
+  noise: Noise2 | Noise3;
 }
 
 export interface BiomeFields {
@@ -88,9 +90,19 @@ export function classifyBiomes(inp: BiomeInput): BiomeFields {
   const seaShare = Float32Array.from(sea);
   gaussBlur(seaShare, grid, 8 / cellKm);
   const mouth = new Float32Array(N);
-  // Interior cells only: the map edge has no full neighbourhood.
+  // Interior cells only: the map edge has no full neighbourhood. On the sphere `border` means seam
+  // cells, whose neighbours come from the seam table.
+  const seams = grid.seam !== null;
   for (let i = 0; i < N; i++) {
-    if (border[i] || sea[i] || discharge[i] < MOUTH_Q) continue;
+    if (sea[i] || discharge[i] < MOUTH_Q) continue;
+    if (border[i]) {
+      if (!seams) continue;
+      for (let k = 0; k < 4; k++) {
+        const j = grid.nbr(i, grid.axialToRaster[k]);
+        if (j >= 0 && sea[j]) mouth[i] = 1;
+      }
+      continue;
+    }
     if (sea[i + off4[0]] || sea[i + off4[1]] || sea[i + off4[2]] || sea[i + off4[3]]) mouth[i] = 1;
   }
   // Three box passes of radius ≈ σ reach ±3σ: the blurred mask is non-zero within ~MOUTH_KM.
@@ -142,8 +154,17 @@ export function classifyBiomes(inp: BiomeInput): BiomeFields {
       yu = nb(1);
       yd = nb(6);
     }
-    const gx = (h[xr] - h[xl]) / (((xr !== i ? 1 : 0) + (xl !== i ? 1 : 0)) * cellM);
-    const gy = (h[yd] - h[yu]) / (((yd !== i ? 1 : 0) + (yu !== i ? 1 : 0)) * cellM);
+    let gx: number;
+    let gy: number;
+    if (grid.uniform) {
+      gx = (h[xr] - h[xl]) / (((xr !== i ? 1 : 0) + (xl !== i ? 1 : 0)) * cellM);
+      gy = (h[yd] - h[yu]) / (((yd !== i ? 1 : 0) + (yu !== i ? 1 : 0)) * cellM);
+    } else {
+      // Sphere: neighbour distances from the metric.
+      const d = (j: number, k: number): number => (j !== i ? grid.dist(i, k) : 0);
+      gx = (h[xr] - h[xl]) / Math.max(1, d(xr, 4) + d(xl, 3));
+      gy = (h[yd] - h[yu]) / Math.max(1, d(yd, 6) + d(yu, 1));
+    }
     const slope = Math.sqrt(gx * gx + gy * gy);
     if (slope > mixTan) rockMix[i] = Math.min(1, (Math.atan(slope) - Math.atan(mixTan)) / (Math.atan(rockTan) - Math.atan(mixTan)));
 
@@ -227,9 +248,14 @@ function majority(raw: Uint8Array, g: Grid): Uint8Array {
   const { cells: N, off8, border } = g;
   const out = raw.slice();
   const count = new Uint8Array(BIOMES.length);
-  // Interior cells only: the map edge has no full 3×3 window.
+  // Interior cells only: the map edge has no full 3×3 window. Sphere seam cells have one through the
+  // seam table (7 cells at the cube corners).
+  const seams = g.seam !== null;
   for (let i = 0; i < N; i++) {
-    if (border[i]) continue;
+    if (border[i]) {
+      if (seams) out[i] = majoritySeam(raw, g, i, count);
+      continue;
+    }
     const self = raw[i];
     if (!FILTERABLE[self]) continue;
     let best = self;
@@ -252,6 +278,30 @@ function majority(raw: Uint8Array, g: Grid): Uint8Array {
     out[i] = best;
   }
   return out;
+}
+
+/** `majority` for one sphere seam cell, its neighbours from the seam table. */
+function majoritySeam(raw: Uint8Array, g: Grid, i: number, count: Uint8Array): number {
+  const self = raw[i];
+  if (!FILTERABLE[self]) return self;
+  const nb: number[] = [];
+  for (let k = 0; k < 8; k++) {
+    const j = g.nbr(i, k);
+    if (j >= 0) nb.push(raw[j]);
+  }
+  let best = self;
+  count[self]++;
+  for (const b of nb) if (FILTERABLE[b]) count[b]++;
+  let bestN = count[self];
+  for (const b of nb) {
+    if (count[b] > bestN) {
+      best = b;
+      bestN = count[b];
+    }
+  }
+  count[self] = 0;
+  for (const b of nb) count[b] = 0;
+  return best;
 }
 
 /**

@@ -1,5 +1,7 @@
+import { dirToCell } from '../../shared/cube';
 import { RIVER } from '../../shared/protocol';
 import type { Rng } from '../../shared/rng';
+import { localFrame } from '../grid/cube';
 import { cellIndex, forWindow, type Grid } from '../grid/grid';
 import { DEPTH_COEF, WIDTH_COEF } from './geometry';
 import type { GraphBuilder } from './graph';
@@ -45,6 +47,7 @@ type Style = 'river' | 'wave' | 'tide';
  * Galloway style from discharge vs wave and tide energy. Distributaries leave a DELTA apex upstream
  * of the mouth, cross the delta plain (never climbing above the apex water level) and end where they
  * reach the sea or the lake; arid dry-sink fans end on land. Their cells are marked in `plain`.
+ * On the sphere (3D builder positions) the fan is laid out in the tangent plane at the apex.
  */
 export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array): DeltaStats {
   const { grid, h, fixed, lakeId, rng } = inp;
@@ -52,10 +55,26 @@ export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array):
   /** Map size in metres (distributaries stop at the map edge). */
   const mapM = n * cellM;
   const stats: DeltaStats = { birdsFoot: 0, arcuate: 0, cuspate: 0, estuaries: 0, inland: 0, distributaries: 0 };
+  const sphere = gb.sphere;
   const cellOf = (x: number, y: number): number => {
     const cx = Math.min(n - 1, Math.max(0, Math.floor(x / cellM)));
     const cy = Math.min(n - 1, Math.max(0, Math.floor(y / cellM)));
     return cellIndex(grid, cx, cy);
+  };
+  const cellOfNode = (i: number): number => (sphere ? dirToCell(gb.x[i], gb.y[i], gb.w[i], n) : cellOf(gb.x[i], gb.y[i]));
+  // Sphere: tangent plane at the apex (origin A, axes E and Nn); flat: the map plane itself.
+  const A = new Float64Array(3);
+  const E = new Float64Array(3);
+  const Nn = new Float64Array(3);
+  const U = new Float64Array(3);
+  const P = new Float64Array(3);
+  const toWorld = (x: number, y: number): void => {
+    for (let k = 0; k < 3; k++) P[k] = A[k] + x * E[k] + y * Nn[k];
+  };
+  const cellOfLocal = (x: number, y: number): number => {
+    if (!sphere) return cellOf(x, y);
+    toWorld(x, y);
+    return dirToCell(P[0], P[1], P[2], n);
   };
   const reaches = gb.reaches;
   // Sea mouths largest first, so the cap keeps the big deltas; then everything else in reach order.
@@ -91,7 +110,7 @@ export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array):
       if (peak >= INLAND_DRY_MIN_Q) mode = 'dry';
     }
     if (!mode) continue;
-    const mc = cellOf(gb.x[m], gb.y[m]);
+    const mc = cellOfNode(m);
 
     let style: Style = 'wave';
     let extra = 0;
@@ -150,15 +169,32 @@ export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array):
     let apex = m;
     let dist = 0;
     while (apex > gb.reachStart[r] && dist < Rd) {
-      dist += Math.hypot(gb.x[apex] - gb.x[apex - 1], gb.y[apex] - gb.y[apex - 1]);
+      dist += sphere ? gb.dist(apex, apex - 1) : Math.hypot(gb.x[apex] - gb.x[apex - 1], gb.y[apex] - gb.y[apex - 1]);
       apex--;
     }
     if (apex === m) continue;
     gb.flags[apex] |= RIVER.DELTA;
-    const ax = gb.x[apex];
-    const ay = gb.y[apex];
+    let ax = gb.x[apex];
+    let ay = gb.y[apex];
     const az = gb.zWater[apex];
-    for (let i = apex; i <= m; i++) plain[cellOf(gb.x[i], gb.y[i])] = 1;
+    let mxL = gb.x[m];
+    let myL = gb.y[m];
+    if (sphere) {
+      A[0] = gb.x[apex];
+      A[1] = gb.y[apex];
+      A[2] = gb.w[apex];
+      const r0 = Math.hypot(A[0], A[1], A[2]);
+      for (let k = 0; k < 3; k++) U[k] = A[k] / r0;
+      localFrame(U, E, Nn);
+      const dx = gb.x[m] - A[0];
+      const dy = gb.y[m] - A[1];
+      const dw = gb.w[m] - A[2];
+      ax = 0;
+      ay = 0;
+      mxL = dx * E[0] + dy * E[1] + dw * E[2];
+      myL = dx * Nn[0] + dy * Nn[1] + dw * Nn[2];
+    }
+    for (let i = apex; i <= m; i++) plain[cellOfNode(i)] = 1;
     if (extra === 0) continue;
 
     let targetLake = -1;
@@ -167,8 +203,8 @@ export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array):
       return targetLake < 0;
     });
     const zEnd = mode === 'sea' ? 0 : gb.zWater[m];
-    const dirX = gb.x[m] - ax;
-    const dirY = gb.y[m] - ay;
+    const dirX = mxL - ax;
+    const dirY = myL - ay;
     const reachLen = Math.hypot(dirX, dirY) || 1;
     const base = Math.atan2(dirY, dirX);
     const spread = ((style === 'river' ? 55 : 35) * Math.PI) / 180;
@@ -192,8 +228,8 @@ export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array):
         const b = Math.sin(Math.min(1, s / len) * Math.PI) * bend;
         const x = ax + ux * s - uy * b;
         const y = ay + uy * s + ux * b;
-        if (x < 0 || y < 0 || x >= mapM || y >= mapM) break;
-        const c = cellOf(x, y);
+        if (!sphere && (x < 0 || y < 0 || x >= mapM || y >= mapM)) break;
+        const c = cellOfLocal(x, y);
         const target = mode === 'sea' ? fixed[c] === 1 && h[c] <= 0 : mode === 'lake' ? lakeId[c] === targetLake : s >= len;
         if (!target && (fixed[c] || lakeId[c] >= 0 || h[c] > az + 1)) break;
         z = Math.min(z, mode === 'dry' ? h[c] : az - (az - zEnd) * Math.min(1, s / len));
@@ -217,11 +253,16 @@ export function addDeltas(gb: GraphBuilder, inp: DeltaInput, plain: Uint8Array):
     const area = gb.area[apex];
     for (const p of paths) {
       gb.beginReach();
-      gb.node(ax, ay, az, az - d, q, area, w, d, st, RIVER.DISTRIBUTARY | RIVER.DELTA);
+      if (sphere) gb.node(A[0], A[1], az, az - d, q, area, w, d, st, RIVER.DISTRIBUTARY | RIVER.DELTA, A[2]);
+      else gb.node(ax, ay, az, az - d, q, area, w, d, st, RIVER.DISTRIBUTARY | RIVER.DELTA);
       for (let k = 0; k < p.xs.length; k++) {
         const last = k === p.xs.length - 1;
-        gb.node(p.xs[k], p.ys[k], p.zs[k], p.zs[k] - d, q, area, w, d, st, RIVER.DISTRIBUTARY | (last ? p.end : 0));
-        const c = cellOf(p.xs[k], p.ys[k]);
+        const flags = RIVER.DISTRIBUTARY | (last ? p.end : 0);
+        if (sphere) {
+          toWorld(p.xs[k], p.ys[k]);
+          gb.node(P[0], P[1], p.zs[k], p.zs[k] - d, q, area, w, d, st, flags, P[2]);
+        } else gb.node(p.xs[k], p.ys[k], p.zs[k], p.zs[k] - d, q, area, w, d, st, flags);
+        const c = cellOfLocal(p.xs[k], p.ys[k]);
         if (!fixed[c] && lakeId[c] < 0) plain[c] = 1;
       }
       stats.distributaries++;

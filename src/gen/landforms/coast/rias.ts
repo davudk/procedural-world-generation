@@ -1,4 +1,5 @@
 import { cellX, cellY, forWindow } from '../../grid/grid';
+import { capScale, centreOf, featureAt } from '../profiles';
 import type { LandformCtx } from '../types';
 import { COAST, type CoastInfo } from './classify';
 import { DiskSet, poisson, shuffle } from './grid';
@@ -18,10 +19,12 @@ const RIA_SPACING_KM = 40;
 export function placeRias(c: LandformCtx, info: CoastInfo, edited: Uint8Array): number {
   const { grid: g, cellKm, h, ice } = c;
   const { border, off8Axial, axialToRaster } = g;
-  // Interior neighbour k of cell i in axial order (E W S N SE NE SW NW), −1 off the map or on its edge row.
+  // Interior neighbour k of cell i in axial order (E W S N SE NE SW NW), −1 off the map or on its edge
+  // row (flat; on the sphere seams are not edges, so only a cube corner's missing diagonal is −1).
+  const flat = g.shape === 'flat';
   const inner = (i: number, k: number): number => {
     const j = border[i] === 0 ? i + off8Axial[k] : g.nbr(i, axialToRaster[k]);
-    return j >= 0 && border[j] === 0 ? j : -1;
+    return j >= 0 && (border[j] === 0 || !flat) ? j : -1;
   };
   const { sea, cells, cls, relief } = info;
   const rng = c.rng('coastal', 'rias');
@@ -53,21 +56,20 @@ export function placeRias(c: LandformCtx, info: CoastInfo, edited: Uint8Array): 
     cand.push({ i, score: conc });
   }
   const roughMul = Math.max(0.3, 1 + 6 * (c.num('coastRoughness') - 1.25));
-  const want = Math.min(RIA_CAP, poisson(rng, (RIA_RATE * roughMul * c.num('density_coast') * eligibleKm) / 1000));
+  const want = Math.min(Math.round(RIA_CAP * capScale(c)), poisson(rng, (RIA_RATE * roughMul * c.num('density_coast') * eligibleKm) / 1000));
   if (want === 0 || cand.length === 0) return 0;
   shuffle(rng, cand);
   cand.sort((a, b) => b.score - a.score);
   // Take from the better half at random, so the deepest valleys are favoured but not exclusively.
   const pool = cand.slice(0, Math.max(want * 4, Math.ceil(cand.length / 2)));
   shuffle(rng, pool);
-  const disk = new DiskSet(RIA_SPACING_KM);
+  const disk = new DiskSet(RIA_SPACING_KM, g);
   const visited = new Uint8Array(g.cells);
   let made = 0;
   const maxSteps = Math.max(3, Math.round(35 / cellKm));
   for (const { i } of pool) {
     if (made >= want) break;
-    const px = (cellX(g, i) + 0.5) * cellKm;
-    const py = (cellY(g, i) + 0.5) * cellKm;
+    const { x: px, y: py } = flat ? { x: (cellX(g, i) + 0.5) * cellKm, y: (cellY(g, i) + 0.5) * cellKm } : centreOf(c, i);
     if (!disk.free(px, py)) continue;
     const level = rng.range(25, 70);
     const path = [i];
@@ -107,7 +109,7 @@ export function placeRias(c: LandformCtx, info: CoastInfo, edited: Uint8Array): 
     }
     disk.add(px, py);
     made++;
-    c.features.push({ type: 'ria', x: px * 1000, y: py * 1000, size: path.length * cellKm * 1000, data: { depth: level } });
+    c.features.push({ type: 'ria', ...featureAt(c, px, py), size: path.length * cellKm * 1000, data: { depth: level } });
   }
   return made;
 }

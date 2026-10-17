@@ -1,3 +1,4 @@
+import { asCube } from '../grid/cube';
 import { cellX, cellY } from '../grid/grid';
 import { COAST, classifyCoast } from './coast/classify';
 import { placeBarriers } from './coast/barriers';
@@ -6,6 +7,8 @@ import { reconcileFixed } from './coast/fixed';
 import { chamferNearest, components8 } from './coast/grid';
 import { placeReefs } from './coast/reefs';
 import { placeRias } from './coast/rias';
+import { featureAt } from './profiles';
+import { SphereCentroids } from './sphere';
 import type { LandformCtx } from './types';
 
 /**
@@ -74,12 +77,15 @@ export function applyCoastal(c: LandformCtx): void {
   const enclosed = new Uint8Array(lc.sizes.length).fill(1);
   const sx = new Float64Array(lc.sizes.length);
   const sy = new Float64Array(lc.sizes.length);
+  // Sphere: lagoons may cross a seam, so their centre is the mean direction and their area the true one.
+  const sc = g.shape === 'flat' ? null : new SphereCentroids(asCube(g), lc.sizes.length);
   for (let i = 0; i < N; i++) {
     const l = lc.label[i];
     if (l < 0) continue;
     if (c.fixed[i]) enclosed[l] = 0;
     sx[l] += cellX(g, i);
     sy[l] += cellY(g, i);
+    sc?.add(l, i);
   }
   let lagoons = 0;
   let lagoonsEnclosed = 0;
@@ -87,6 +93,13 @@ export function applyCoastal(c: LandformCtx): void {
     if (lc.sizes[l] < 2) continue;
     lagoons++;
     lagoonsEnclosed += enclosed[l];
+    if (sc) {
+      const p = sc.centre(l);
+      c.features.push({
+        type: 'lagoon', ...featureAt(c, p.x, p.y), size: Math.sqrt(lc.sizes[l]) * c.cellKm * 1000, data: { areaKm2: sc.km2(l), enclosed: enclosed[l] },
+      });
+      continue;
+    }
     c.features.push({
       type: 'lagoon', x: (sx[l] / lc.sizes[l] + 0.5) * c.cellKm * 1000, y: (sy[l] / lc.sizes[l] + 0.5) * c.cellKm * 1000,
       size: Math.sqrt(lc.sizes[l]) * c.cellKm * 1000, data: { areaKm2: lc.sizes[l] * c.cellKm * c.cellKm, enclosed: enclosed[l] },

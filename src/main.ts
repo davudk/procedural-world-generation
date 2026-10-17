@@ -76,7 +76,9 @@ let sphereProjection: SphereProjection = readStored(PROJECTION_KEY) === 'net' ? 
 /** The projected sphere layer on screen (null for flat maps). */
 let sphereShown: ProjectedLayer | null = null;
 /** Sphere layers last handed to the globe (elevation, climate, drape). */
-let globeShown: { elev: Layer | null; temp: Layer | null; drape: Layer | null | undefined } = { elev: null, temp: null, drape: undefined };
+let globeShown: { elev: Layer | null; water: Layer | null; temp: Layer | null; biome: Layer | null; drape: Layer | null | undefined } = {
+  elev: null, water: null, temp: null, biome: null, drape: undefined,
+};
 
 // ── Mobile pass: quality tier, idle frame cap, context loss, export (M9) ──────────────────
 
@@ -308,7 +310,7 @@ function clearWorld(): void {
   atlas.set([], null);
   sphereShown = null;
   world.clearGlobe();
-  globeShown = { elev: null, temp: null, drape: undefined };
+  globeShown = { elev: null, water: null, temp: null, biome: null, drape: undefined };
   terrainShown = null;
   surfaceShown = null;
   drapeShown = undefined;
@@ -465,8 +467,9 @@ function showSelected(): void {
 
 /**
  * A cube-sphere layer: projected on the main thread for the 2D view (cached per layer), and handed
- * to the globe in 3D (research 10 §6). The globe shows the latest elevation, coloured by climate
- * once it exists; any other layer drapes over it.
+ * to the globe in 3D (research 10 §6). The globe shows the latest elevation with the hydrology
+ * stage's lakes, coloured by the biome stage (or by climate before it exists); any other layer drapes
+ * over it.
  */
 function showSphere(l: Layer): void {
   const shown = projectSphereLayer(l, sphereProjection);
@@ -474,32 +477,40 @@ function showSphere(l: Layer): void {
   view.setLayer(shown);
   pacer.wake();
   const elev = layers.get('elevation') ?? layers.get('lemElevation') ?? layers.get('h0');
-  if (elev && elev.faces === 6 && elev !== globeShown.elev) {
-    if (!globeShown.elev && mode === '3d') notice('Globe view: no rivers, labels or clouds on spheres yet');
+  // Water rasters only match the elevation produced by the same stage.
+  const wl = layers.get('waterLevel');
+  const water = wl && wl.faces === 6 && wl.stage === elev?.stage ? wl : null;
+  if (elev && elev.faces === 6 && (elev !== globeShown.elev || water !== globeShown.water)) {
+    if (!globeShown.elev && mode === '3d') notice('Globe view: no labels or clouds on spheres yet');
     globeShown.elev = elev;
-    // Close-zoom detail tiles. Hook for the sphere hydrology stage: pass waterLevel / waterClass /
-    // discharge (6-face layers on the elevation grid) and `rivers` (SphereRivers: the river graph plus
-    // node directions) once they exist; tiles then carve channels and valleys. Without them the sea
-    // at 0 is the only water and nothing is carved.
-    const face6 = (id: string): Layer | null => {
-      const x = layers.get(id);
-      return x && x.faces === 6 && x.w === elev.w && x.stage === elev.stage ? x : null;
-    };
-    world.setGlobe(elev, {
-      seed: spec.seed,
-      waterLevel: face6('waterLevel')?.data ?? null,
-      waterClass: face6('waterClass')?.data ?? null,
-      discharge: face6('discharge')?.data ?? null,
-      biome: face6('biome')?.data ?? null,
-      rivers: null,
-    });
+    globeShown.water = water;
+    const wc = layers.get('waterClass');
+    world.setGlobe(elev, water, wc && wc.stage === elev.stage ? wc : null);
     globeMinimap.setTerrain(elev);
   }
+  if (elev && elev.faces === 6) {
+    // Close-zoom detail tiles: the hydro stage's discharge and the biome stage's classes refine the
+    // amplitude; the view adds its prepared water and the sphere river graph (carved channels). The
+    // tiles rebuild when any of these arrive.
+    const face6 = (id: string): Layer | null => {
+      const x = layers.get(id);
+      return x && x.faces === 6 && x.w === elev.w ? x : null;
+    };
+    const dis = face6('discharge');
+    world.setGlobeDetail({ seed: spec.seed, discharge: dis && dis.stage === elev.stage ? dis.data : null, biome: face6('biome')?.data ?? null });
+  }
   const temp = layers.get('temperature');
-  if (temp && temp.faces === 6 && temp !== globeShown.temp) {
+  const sphereLayer = (id: string): Layer | null => {
+    const x = layers.get(id);
+    return x && x.faces === 6 && temp && x.w === temp.w ? x : null;
+  };
+  const biome = sphereLayer('biome');
+  if (temp && temp.faces === 6 && (temp !== globeShown.temp || biome !== globeShown.biome)) {
     globeShown.temp = temp;
+    globeShown.biome = biome;
     world.setGlobeSurface({
       temperature: temp, precip: layers.get('precip') ?? null, summerRain: layers.get('summerRain') ?? null, tempRange: layers.get('tempRange') ?? null,
+      aridity: biome ? sphereLayer('aridity') : null, biome, snow: biome ? sphereLayer('snow') : null, erg: biome ? sphereLayer('erg') : null,
     });
   }
   const drape = l.kind === 'elevation' ? null : l;

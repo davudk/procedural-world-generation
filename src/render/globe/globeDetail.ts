@@ -463,7 +463,10 @@ export class GlobeDetail implements GlobeDetailSource {
     this.prepared = pg;
     this.params = pg.params;
     this.boundsPad = globeBoundsPad(pg.params, this.opts.anchorMetres);
-    this.fn = new GlobeHeightFn({ n: pg.n, radius: pg.radius, macroPad: pg.macroPad, control: pg.controlPad, params: pg.params, tiles: this.cache });
+    this.fn = new GlobeHeightFn({
+      n: pg.n, radius: pg.radius, macroPad: pg.macroPad, surfacePad: pg.surfacePad, waterPad: pg.levelPad,
+      control: pg.controlPad, params: pg.params, tiles: this.cache,
+    });
     this.stats.prepMs = performance.now() - t;
     this.version++;
   }

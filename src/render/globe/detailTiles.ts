@@ -42,8 +42,10 @@ export interface GlobeDetailWorld {
   elevation: ArrayLike<number>;
   /** Prepared water levels (> DRY: water surface, as heightField.prepareWater), or null: the sea at 0. */
   waterLevel?: ArrayLike<number> | null;
-  /** Water class (4, 5 = river / lake water) for the water-proximity control. */
+  /** Water class (0 land, 1 ocean, 2 lake, 3 river, 4 wetland, 5 playa, 6 salt lake), with the levels. */
   waterClass?: ArrayLike<number> | null;
+  /** The view's padded water-lid surface (GlobeHeightField.padded = the GPU's u_surf), for the TS height function. */
+  surfacePad?: Float32Array | null;
   /** log10 discharge (m³/s): large rivers damp the amplification, as on flat maps. */
   discharge?: ArrayLike<number> | null;
   biome?: ArrayLike<number> | null;
@@ -58,6 +60,9 @@ export interface PreparedGlobe {
   /** Padded (6 × (n + 2·PAD)²) raw macro, water level, coastal band (0/1) and RGBA8 control. */
   macroPad: Float32Array;
   waterPad: Float32Array;
+  /** The prepared levels as the shader samples them (river cells included), or null: the sea at 0. */
+  levelPad: Float32Array | null;
+  surfacePad: Float32Array | null;
   coastPad: Float32Array;
   controlPad: Uint8Array;
   /** River node directions (3 per node) and attributes, or null. */
@@ -85,7 +90,16 @@ export function* prepareGlobe(world: GlobeDetailWorld, lattice: TileLattice): Ge
     return out;
   };
   const macroPad = yield* padded(world.elevation, 1);
-  const water = world.waterLevel ?? null;
+  const levelPad = world.waterLevel ? yield* padded(world.waterLevel, 1) : null;
+  // River cells (class 3) are ribbons over carved channels, not a water body: dry for the bounds, so a
+  // river cell is not forced under its level (the carve puts the channel floor at the water surface).
+  let water = world.waterLevel ?? null;
+  const wc = world.waterClass ?? null;
+  if (water && wc && wc.length === water.length) {
+    const w = Float32Array.from(water);
+    for (let i = 0; i < w.length; i++) if (wc[i] === 3) w[i] = -10000;
+    water = w;
+  }
   const waterPad = water ? yield* padded(water, 1) : new Float32Array(6 * m * m);
   const cellM = (world.radius * Math.PI) / 2 / n;
   const coast = new Float32Array(N6);
@@ -121,7 +135,8 @@ export function* prepareGlobe(world: GlobeDetailWorld, lattice: TileLattice): Ge
         const rl = (hi - lo) * (cellM >= 1000 ? 1000 / cellM : 1);
         const b = bio ? bio[i] & 31 : 6;
         let B = wet(c) ? 1 : 0;
-        if (cls && (cls[i] === 4 || cls[i] === 5)) B = 1;
+        // Sphere water classes: 2 lake, 3 river, 6 salt lake (4 wetland and 5 playa stay land).
+        if (cls && (cls[i] === 2 || cls[i] === 3 || cls[i] === 6)) B = 1;
         if (q) B = Math.max(B, 0.5 * smoothstep(1.0, 2.5, q[i]));
         ctl[i * 4] = Math.min(1, Math.max(0.03, (0.65 * smoothstep(0.02, 0.35, s) + 0.45 * smoothstep(30, 900, rl)) * ROUGH_MUL[b]));
         ctl[i * 4 + 1] = Math.max(ROCK_B[b], smoothstep(0.25, 0.6, s)) * (1 - B);
@@ -149,7 +164,10 @@ export function* prepareGlobe(world: GlobeDetailWorld, lattice: TileLattice): Ge
       riverDirs[i * 3 + 2] = d[2];
     }
   }
-  return { lattice, params: globeDetailParams(lattice, world.seed), n, radius: world.radius, macroPad, waterPad, coastPad, controlPad, riverDirs, rivers: rv };
+  return {
+    lattice, params: globeDetailParams(lattice, world.seed), n, radius: world.radius, macroPad, waterPad, levelPad,
+    surfacePad: world.surfacePad ?? null, coastPad, controlPad, riverDirs, rivers: rv,
+  };
 }
 
 /** Bilinear sample of a padded cube raster (ch interleaved channels, channel c) toward a direction. */

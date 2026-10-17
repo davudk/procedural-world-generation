@@ -1,5 +1,9 @@
 import { Noise2 } from '../../../shared/noise';
-import { cellX, cellY, tryCellIndex } from '../../grid/grid';
+import { Noise3 } from '../../../shared/noise3';
+import { asCube, unitPositions } from '../../grid/cube';
+import { AXIAL_DX, AXIAL_DY, cellFace, cellX, cellY, chartXY, tryCellIndex } from '../../grid/grid';
+import { capScale, centreOf, featureAt } from '../profiles';
+import { spherePos } from '../sphere';
 import type { LandformCtx } from '../types';
 import { COAST, type CoastInfo } from './classify';
 import { DiskSet, labelList, line4, poisson, shuffle } from './grid';
@@ -43,7 +47,21 @@ export function placeBarriers(
   const nb = (i: number, k: number): number => (border[i] === 0 ? i + off8Axial[k] : g.nbr(i, axialToRaster[k]));
   const { sea, cells, slot, cls, wave, shelf, landShare } = info;
   const rng = c.rng('coastal', 'barriers');
-  const noise = new Noise2(rng.nextU32());
+  const seed = rng.nextU32();
+  const noise = new Noise2(seed);
+  // Sphere: the same noise fields in 3D at the cell's position (km), continuous across seams.
+  const flat = g.shape === 'flat';
+  const n3 = flat ? null : new Noise3(seed);
+  const up = flat ? null : unitPositions(asCube(g));
+  const Rk = g.radiusM / 1000;
+  /** fBm (octaves > 0) or plain noise at cell i, wavelength km, lattice offsets (ox, oy). */
+  const at3 = (i: number, km: number, ox: number, oy: number, octaves: number): number => {
+    const k = Rk / km;
+    const x = up![i * 3] * k + ox;
+    const y = up![i * 3 + 1] * k + oy;
+    const z = up![i * 3 + 2] * k;
+    return octaves > 0 ? n3!.fbm3(x, y, z, octaves) : n3!.noise(x, y, z);
+  };
   const tide = c.num('tideRange');
   const dens = c.num('density_coast');
   const isl = c.num('islandAbundance');
@@ -61,7 +79,7 @@ export function placeBarriers(
     if (shelf[k] < -Math.max(45, 10 * cellKm) || landShare[k] > 0.7 || landShare[k] < 0.3) continue;
     const xk = cellX(g, i) * cellKm;
     const yk = cellY(g, i) * cellKm;
-    seg[k] = noise.fbm(xk / 110, yk / 110, 2);
+    seg[k] = flat ? noise.fbm(xk / 110, yk / 110, 2) : at3(i, 110, 0, 0, 2);
     eligible[k] = 1;
     eligVals.push(seg[k]);
   }
@@ -78,7 +96,7 @@ export function placeBarriers(
     const i = cells[k];
     const xk = cellX(g, i) * cellKm;
     const yk = cellY(g, i) * cellKm;
-    const dKm = 3.5 + 5.5 * (0.5 + 0.5 * noise.noise(xk / 60 + 17.3, yk / 60 - 4.1));
+    const dKm = 3.5 + 5.5 * (0.5 + 0.5 * (flat ? noise.noise(xk / 60 + 17.3, yk / 60 - 4.1) : at3(i, 60, 17.3, -4.1, 0)));
     offset[k] = Math.max(2, Math.round(dKm / cellKm));
   }
   const maxDepth = -Math.max(25, 8 * cellKm);
@@ -98,7 +116,7 @@ export function placeBarriers(
       const xk = cellX(g, j) * cellKm;
       const yk = cellY(g, j) * cellKm;
       // Tidal inlets: gaps where a short-wavelength noise peaks.
-      if (noise.noise(xk / inletKm + 91.7, yk / inletKm + 13.9) > 0.5) continue;
+      if ((flat ? noise.noise(xk / inletKm + 91.7, yk / inletKm + 13.9) : at3(j, inletKm, 91.7, 13.9, 0)) > 0.5) continue;
       bar[j] = 1;
       barList.push(j);
     } else if (d < off - 0.65) {
@@ -164,7 +182,7 @@ export function placeBarriers(
   for (const j of barList) {
     const xk = cellX(g, j) * cellKm;
     const yk = cellY(g, j) * cellKm;
-    h[j] = 1.5 + 4 * (0.5 + 0.5 * noise.noise(xk / 3 + 5.5, yk / 3 - 7.7));
+    h[j] = 1.5 + 4 * (0.5 + 0.5 * (flat ? noise.noise(xk / 3 + 5.5, yk / 3 - 7.7) : at3(j, 3, 5.5, -7.7, 0)));
     edited[j] = 1;
     beach[j] = 255;
     marsh[j] = 0;
@@ -172,7 +190,8 @@ export function placeBarriers(
   label.fill(-1);
   const barSizes = labelList(barList, bar, g, label);
   let islands = 0;
-  {
+  if (!flat) islands = barrierFeaturesSphere(c, barList, label, barSizes);
+  else {
     const K = barSizes.length;
     const bx0 = new Int32Array(K).fill(n);
     const bx1 = new Int32Array(K).fill(-1);
@@ -212,8 +231,8 @@ export function placeBarriers(
     spitCand.push(k);
   }
   shuffle(rng, spitCand);
-  const wantSpits = Math.min(SPIT_CAP, poisson(rng, (SPIT_RATE * dens * sandyKm) / 1000));
-  const spitDisk = new DiskSet(SPIT_SPACING_KM);
+  const wantSpits = Math.min(Math.round(SPIT_CAP * capScale(c)), poisson(rng, (SPIT_RATE * dens * sandyKm) / 1000));
+  const spitDisk = new DiskSet(SPIT_SPACING_KM, g);
   const spitDepth = -Math.max(20, 6 * cellKm);
   let spits = 0;
   for (const k of spitCand) {
@@ -227,8 +246,8 @@ export function placeBarriers(
     let dy = Math.sign(wt) * ty;
     const x0 = cellX(g, i);
     const y0 = cellY(g, i);
-    const pxk = (x0 + 0.5) * cellKm;
-    const pyk = (y0 + 0.5) * cellKm;
+    const face = cellFace(g, i);
+    const { x: pxk, y: pyk } = flat ? { x: (x0 + 0.5) * cellKm, y: (y0 + 0.5) * cellKm } : centreOf(c, i);
     if (!spitDisk.free(pxk, pyk)) continue;
     const lenCells = Math.max(2, Math.round(rng.range(6, 24) / cellKm));
     const hookSign = -Math.sign(dx * info.ny[k] - dy * info.nx[k]) || 1;
@@ -245,9 +264,10 @@ export function placeBarriers(
         const sa = Math.sin(a);
         [dx, dy] = [dx * ca - dy * sa, dx * sa + dy * ca];
       }
-      // Stop at the map's edge row (interior cells only).
-      const j = tryCellIndex(g, Math.floor(fx), Math.floor(fy));
-      if (j < 0 || border[j]) break;
+      // Stop at the map's edge row (interior cells only; on the sphere the walk crosses seams in the
+      // chart of the start cell's face, and normals and wind are in that face's axes).
+      const j = tryCellIndex(g, Math.floor(fx), Math.floor(fy), face);
+      if (j < 0 || (flat && border[j])) break;
       if (j !== prev) {
         const seg4 = line4(g, prev, j).slice(1);
         for (const q of seg4) {
@@ -273,7 +293,7 @@ export function placeBarriers(
     }
     spitDisk.add(pxk, pyk);
     spits++;
-    c.features.push({ type: 'spit', x: pxk * 1000, y: pyk * 1000, size: path.length * cellKm * 1000, data: { dirX: dx, dirY: dy } });
+    c.features.push({ type: 'spit', ...featureAt(c, pxk, pyk), size: path.length * cellKm * 1000, data: { dirX: dx, dirY: dy } });
   }
 
   // ── Tombolos ────────────────────────────────────────────────────────────────────────────────
@@ -314,11 +334,15 @@ export function placeBarriers(
     if (!isLand(j) || edited[j]) continue;
     const l = explore(j);
     if (l < 0) continue;
+    const jf = cellFace(g, j);
+    const jx = cellX(g, j);
+    const jy = cellY(g, j);
     for (let d = 0; d < 8; d++) {
-      // March s cells from j in direction d.
+      // March s cells from j in direction d (sphere: straight on in the chart of j's face, since the
+      // neighbour order turns at a seam).
       let q = j;
       for (let s = 1; s <= reach; s++) {
-        q = nb(q, d);
+        q = flat ? nb(q, d) : tryCellIndex(g, jx + s * AXIAL_DX[d], jy + s * AXIAL_DY[d], jf);
         if (q < 0) break;
         if (isLand(q)) {
           const k2 = info.classOf[q];
@@ -334,7 +358,7 @@ export function placeBarriers(
   }
   const tCand = [...best.values()].sort((p, q) => p.a - q.a);
   shuffle(rng, tCand);
-  const wantT = Math.min(TOMBOLO_CAP, poisson(rng, (TOMBOLO_RATE * dens * (0.5 + 0.5 * isl) * softKm) / 1000));
+  const wantT = Math.min(Math.round(TOMBOLO_CAP * capScale(c)), poisson(rng, (TOMBOLO_RATE * dens * (0.5 + 0.5 * isl) * softKm) / 1000));
   let tombolos = 0;
   for (const t of tCand) {
     if (tombolos >= wantT) break;
@@ -346,6 +370,17 @@ export function placeBarriers(
       beach[q] = 255;
     }
     tombolos++;
+    if (!flat) {
+      // Sphere: midpoint of the two ends along the great circle; length between the cell centres.
+      const pa = new Float64Array(3);
+      const pb = new Float64Array(3);
+      g.position(t.a, pa);
+      g.position(t.b, pb);
+      for (let k = 0; k < 3; k++) pa[k] += pb[k];
+      const mid = spherePos(g).enc(pa);
+      c.features.push({ type: 'tombolo', ...featureAt(c, mid.x, mid.y), size: g.distance(t.a, t.b) });
+      continue;
+    }
     const ax = cellX(g, t.a) + 0.5;
     const ay = cellY(g, t.a) + 0.5;
     const bx = cellX(g, t.b) + 0.5;
@@ -356,4 +391,40 @@ export function placeBarriers(
     });
   }
   return { islands, spits, tombolos, lagoon };
+}
+
+/**
+ * Barrier-island features on the sphere: each island's bounding box in the chart of its first cell's
+ * face (islands may cross a seam), centre and diagonal as on flat maps. Returns the island count.
+ */
+function barrierFeaturesSphere(c: LandformCtx, barList: number[], label: Int32Array, barSizes: number[]): number {
+  const g = c.grid;
+  const K = barSizes.length;
+  const face = new Int32Array(K).fill(-1);
+  const x0 = new Float64Array(K).fill(Infinity);
+  const x1 = new Float64Array(K).fill(-Infinity);
+  const y0 = new Float64Array(K).fill(Infinity);
+  const y1 = new Float64Array(K).fill(-Infinity);
+  const q = new Float64Array(2);
+  for (const j of barList) {
+    const l = label[j];
+    if (face[l] < 0) face[l] = cellFace(g, j);
+    chartXY(g, face[l], j, q);
+    if (!Number.isFinite(q[0])) continue;
+    x0[l] = Math.min(x0[l], q[0]);
+    x1[l] = Math.max(x1[l], q[0]);
+    y0[l] = Math.min(y0[l], q[1]);
+    y1[l] = Math.max(y1[l], q[1]);
+  }
+  const sp = spherePos(g);
+  const ck = c.cellKm;
+  let islands = 0;
+  for (let l = 0; l < K; l++) {
+    if (barSizes[l] < 2) continue;
+    islands++;
+    const len = Math.hypot(x1[l] - x0[l] + 1, y1[l] - y0[l] + 1) * ck * 1000;
+    const p = sp.chart(face[l], ((x0[l] + x1[l]) / 2 + 0.5) * ck, ((y0[l] + y1[l]) / 2 + 0.5) * ck);
+    c.features.push({ type: 'barrier-island', ...featureAt(c, p.x, p.y), size: len, data: { cells: barSizes[l] } });
+  }
+  return islands;
 }

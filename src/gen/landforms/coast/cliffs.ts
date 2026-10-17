@@ -1,4 +1,7 @@
-import { cellX, cellY, tryCellIndex } from '../../grid/grid';
+import { asCube } from '../../grid/cube';
+import { cellFace, cellX, cellY, tryCellIndex } from '../../grid/grid';
+import { capScale, featureAt } from '../profiles';
+import { SphereCentroids, spherePos } from '../sphere';
 import type { LandformCtx } from '../types';
 import { COAST, type CoastInfo } from './classify';
 import { DiskSet, poisson, shuffle } from './grid';
@@ -62,9 +65,10 @@ export function placeCliffs(c: LandformCtx, info: CoastInfo, edited: Uint8Array,
   }
 
   // Sea stacks: Poisson count per cliff length, Poisson-disk spaced, just off the cliff foot.
-  const want = Math.min(STACK_CAP, poisson(rng, (STACK_RATE * c.num('density_coast') * km) / 1000));
+  const want = Math.min(Math.round(STACK_CAP * capScale(c)), poisson(rng, (STACK_RATE * c.num('density_coast') * km) / 1000));
   shuffle(rng, cliffCells);
-  const disk = new DiskSet(STACK_SPACING_KM);
+  const disk = new DiskSet(STACK_SPACING_KM, g);
+  const sp = g.shape === 'flat' ? null : spherePos(g);
   let stacks = 0;
   for (const k of cliffCells) {
     if (stacks >= want) break;
@@ -73,15 +77,18 @@ export function placeCliffs(c: LandformCtx, info: CoastInfo, edited: Uint8Array,
     const cx = (cellX(g, i) + 0.5) * cellKm;
     const cy = (cellY(g, i) + 0.5) * cellKm;
     const offKm = cellKm * 0.5 + rng.range(0.1, 0.8);
-    const px = cx + info.nx[k] * offKm;
-    const py = cy + info.ny[k] * offKm;
-    const gc = tryCellIndex(g, Math.floor(px / cellKm), Math.floor(py / cellKm));
+    let px = cx + info.nx[k] * offKm;
+    let py = cy + info.ny[k] * offKm;
+    // Sphere: the offset is taken in the cell's face chart (normals are in its axes), then encoded.
+    const face = cellFace(g, i);
+    const gc = tryCellIndex(g, Math.floor(px / cellKm), Math.floor(py / cellKm), face);
     if (gc < 0 || !sea[gc]) continue;
+    if (sp) ({ x: px, y: py } = sp.chart(face, px, py));
     if (!disk.free(px, py)) continue;
     disk.add(px, py);
     stacks++;
     const size = rng.range(40, 250);
-    c.features.push({ type: 'sea-stack', x: px * 1000, y: py * 1000, size, data: { height: rng.range(15, 70) } });
+    c.features.push({ type: 'sea-stack', ...featureAt(c, px, py), size, data: { height: rng.range(15, 70) } });
     // Stacks are far below a macro cell; only a grid finer than the stack gets a bump.
     if (size >= cellKm * 1000) h[gc] = Math.max(h[gc], 10);
   }
@@ -98,8 +105,10 @@ export function placeCliffs(c: LandformCtx, info: CoastInfo, edited: Uint8Array,
     let sx = 0;
     let sy = 0;
     let top = 0;
+    const members: number[] = [];
     while (stack.length) {
       const q = stack.pop()!;
+      if (sp) members.push(q);
       count++;
       sx += cellX(g, q);
       sy += cellY(g, q);
@@ -113,6 +122,14 @@ export function placeCliffs(c: LandformCtx, info: CoastInfo, edited: Uint8Array,
       }
     }
     if (count * cellKm < 10) continue;
+    if (sp) {
+      // Sphere: mean direction of the stretch (it may cross a seam).
+      const sc = new SphereCentroids(asCube(g), 1);
+      for (const q of members) sc.add(0, q);
+      const p = sc.centre(0);
+      c.features.push({ type: 'sea-cliff', ...featureAt(c, p.x, p.y), size: count * cellKm * 1000, data: { height: top } });
+      continue;
+    }
     c.features.push({
       type: 'sea-cliff', x: (sx / count + 0.5) * cellKm * 1000, y: (sy / count + 0.5) * cellKm * 1000,
       size: count * cellKm * 1000, data: { height: top },

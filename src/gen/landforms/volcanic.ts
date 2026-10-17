@@ -1,10 +1,13 @@
 import { Noise2 } from '../../shared/noise';
-import { blockGrid, cellIndex, cellX, cellY } from '../grid/grid';
+import { localFrame } from '../grid/cube';
+import { blockGrid, cellFace, cellIndex, cellX, cellY, forWindow, type Grid } from '../grid/grid';
 import { B } from '../stages/plates';
 import {
-  areaFactor, cellOf, centreOf, DiskSet, forDisk, localMax, plateCellAt, poisson, ringMean, settleFixed, shuffle, Outline, snapshot, sstep, stampRadial,
+  areaFactor, cellOf, centreOf, DiskSet, distKm, featureAt, forDisk, localMax, offsetKm, plateCellAt, poisson, ringMean, settleFixed, shuffle,
+  Outline, snapshot, sstep, stampRadial,
 } from './profiles';
-import type { LandformCtx } from './types';
+import { sphereBlock, spherePos } from './sphere';
+import type { Feature, LandformCtx } from './types';
 
 /** An active volcanic centre placed by this pass (km, metres). */
 interface Centre {
@@ -49,26 +52,34 @@ export function applyVolcanic(c: LandformCtx): void {
   const snap = snapshot(c);
   const { n } = c;
   const P = c.plates;
+  const pg = c.platesGrid;
   const W = n * c.cellKm;
+  // On the sphere there is no map edge: positions are chart km (sphere.ts) and never leave the map.
+  const flat = c.grid.shape === 'flat';
   const vol = c.num('volcanism') * c.num('density_volcanic');
   const af = areaFactor(c);
-  const geo = new Uint8Array(n * n);
+  const geo = new Uint8Array(c.grid.cells);
   const centres: Centre[] = [];
+  const calderaAt = new Map<Feature, { x: number; y: number }>();
   const noise = new Noise2(c.rng('volcanic-noise').nextU32());
-  const occupied = new DiskSet(64);
+  const occupied = new DiskSet(64, c.grid);
   let rejuvenated = 0;
   // The world's highest summit is the crystalline king massif (base stage): no volcano or caldera
   // may sit on it, or the king would be replaced by a lower cone or cut by a caldera.
   let crownCell = 0;
-  for (let i = 1; i < n * n; i++) if (c.h[i] > c.h[crownCell]) crownCell = i;
+  for (let i = 1; i < c.grid.cells; i++) if (c.h[i] > c.h[crownCell]) crownCell = i;
   const crown = centreOf(c, crownCell);
-  const onCrown = (x: number, y: number): boolean => Math.hypot(x - crown.x, y - crown.y) < CROWN_KEEP_KM;
+  const onCrown = (x: number, y: number): boolean => distKm(c, crown.x, crown.y, x, y) < CROWN_KEEP_KM;
+  // A point at (fx, fy) ∈ [0, 1)² inside plates cell pc (km).
+  const inPlateCell = (pc: number, fx: number, fy: number): { x: number; y: number } => (flat
+    ? { x: (cellX(pg, pc) + fx) * P.cellKm, y: (cellY(pg, pc) + fy) * P.cellKm }
+    : spherePos(c.grid).chart(cellFace(pg, pc), (cellX(pg, pc) + fx) * P.cellKm, (cellY(pg, pc) + fy) * P.cellKm));
 
   if (vol > 0.05) {
     // ── Stratovolcanoes on active arcs ───────────────────────────────────────────────────────
     const srng = c.rng('strato');
     const cands: { x: number; y: number; island: boolean }[] = [];
-    for (let pc = 0; pc < P.n * P.n; pc++) {
+    for (let pc = 0; pc < pg.cells; pc++) {
       const nb = P.nearest[pc];
       const seg = P.bSeg[nb] >= 0 ? P.segments[P.bSeg[nb]] : null;
       if (!seg) continue;
@@ -79,11 +90,9 @@ export function applyVolcanic(c: LandformCtx): void {
       if (!island && !cordillera) continue;
       // Volcanic front: most centres sit ~120–180 km behind the trench.
       if (srng.float() > Math.exp(-(((d - 150) / 55) ** 2))) continue;
-      cands.push({
-        x: (cellX(c.platesGrid, pc) + srng.float()) * P.cellKm,
-        y: (cellY(c.platesGrid, pc) + srng.float()) * P.cellKm,
-        island,
-      });
+      const jx = srng.float();
+      const p = inPlateCell(pc, jx, srng.float());
+      cands.push({ x: p.x, y: p.y, island });
     }
     shuffle(srng, cands);
     // Clustered, not regular (research 05 §3.3, Clark–Evans 0.4–0.8): a Neyman–Scott process. A few
@@ -95,16 +104,16 @@ export function applyVolcanic(c: LandformCtx): void {
     for (const cd of cands) {
       if (parents.length >= nParents) break;
       if (onCrown(cd.x, cd.y)) continue;
-      if (parents.every((q) => Math.hypot(q.x - cd.x, q.y - cd.y) > PARENT_SPACING_KM)) parents.push(cd);
+      if (parents.every((q) => distKm(c, cd.x, cd.y, q.x, q.y) > PARENT_SPACING_KM)) parents.push(cd);
     }
-    const nearParent = (x: number, y: number): boolean => parents.some((q) => Math.hypot(q.x - x, q.y - y) < CLUSTER_RADIUS_KM);
+    const nearParent = (x: number, y: number): boolean => parents.some((q) => distKm(c, x, y, q.x, q.y) < CLUSTER_RADIUS_KM);
     const cap = Math.ceil(80 * af);
-    const disk = new DiskSet(spacing * 1.3);
+    const disk = new DiskSet(spacing * 1.3, c.grid);
     let strato = 0;
     for (const cd of cands) {
       if (strato >= cap) break;
       if (!nearParent(cd.x, cd.y)) continue;
-      if (cd.x < 0.02 * W || cd.y < 0.02 * W || cd.x > 0.98 * W || cd.y > 0.98 * W) continue;
+      if (flat && (cd.x < 0.02 * W || cd.y < 0.02 * W || cd.x > 0.98 * W || cd.y > 0.98 * W)) continue;
       if (!disk.free(cd.x, cd.y, spacing * srng.range(0.85, 1.25))) continue;
       let { x, y } = cd;
       const site = cellOf(c, x, y);
@@ -142,7 +151,7 @@ export function applyVolcanic(c: LandformCtx): void {
       stampRadial(c, x, y, R * outline.maxScale * (cd.island ? 2 : 1), 'max', (_r, dx, dy) => cone(dx, dy));
       centres.push({ kind: 'stratovolcano', x, y, R, base, summit, cone });
       occupied.add(x, y);
-      c.features.push({ type: 'stratovolcano', x: x * 1000, y: y * 1000, size: 2 * R * 1000, data: { height: summit, island: cd.island ? 1 : 0, rejuvenated: onOld ? 1 : 0 } });
+      c.features.push({ type: 'stratovolcano', ...featureAt(c, x, y), size: 2 * R * 1000, data: { height: summit, island: cd.island ? 1 : 0, rejuvenated: onOld ? 1 : 0 } });
       strato++;
     }
     c.stats['volcanoStrato'] = strato;
@@ -153,10 +162,10 @@ export function applyVolcanic(c: LandformCtx): void {
     let shields = 0;
     let detected = 0;
     if (hotspots > 0) {
-      const tracks = detectHotspotHeads(c, occupied);
+      const tracks = flat ? detectHotspotHeads(c, occupied) : detectHotspotHeadsSphere(c, occupied);
       detected = tracks.length;
       const hrng = c.rng('shields');
-      const hdisk = new DiskSet(150);
+      const hdisk = new DiskSet(150, c.grid);
       for (const t of tracks) {
         if (shields >= hotspots) break;
         if (onCrown(t.x, t.y)) continue;
@@ -179,7 +188,7 @@ export function applyVolcanic(c: LandformCtx): void {
         stampRadial(c, t.x, t.y, R * outline.maxScale, 'max', (_r, dx, dy) => cone(dx, dy));
         centres.push({ kind: 'shield-volcano', x: t.x, y: t.y, R, base, summit, cone });
         occupied.add(t.x, t.y);
-        c.features.push({ type: 'shield-volcano', x: t.x * 1000, y: t.y * 1000, size: 2 * R * 1000, data: { height: summit } });
+        c.features.push({ type: 'shield-volcano', ...featureAt(c, t.x, t.y), size: 2 * R * 1000, data: { height: summit } });
         shields++;
       }
     }
@@ -191,7 +200,7 @@ export function applyVolcanic(c: LandformCtx): void {
     const large = centres.filter((v) => v.kind === 'shield-volcano' || v.summit - v.base >= 1800);
     shuffle(crng, large);
     const want = Math.floor(c.num('calderaShare') * large.length + crng.float());
-    const cdisk = new DiskSet(60);
+    const cdisk = new DiskSet(60, c.grid);
     let calderas = 0;
     for (const v of large) {
       if (calderas >= want) break;
@@ -233,7 +242,9 @@ export function applyVolcanic(c: LandformCtx): void {
         return s <= 0 ? floor : floor + (rim - floor) * (0.5 - 0.5 * Math.cos(Math.PI * s));
       });
       cdisk.add(v.x, v.y);
-      c.features.push({ type: 'caldera', x: v.x * 1000, y: v.y * 1000, size: 2 * rOut * 1000, data: { depth: rim - floor, floor, rim } });
+      const cf: Feature = { type: 'caldera', ...featureAt(c, v.x, v.y), size: 2 * rOut * 1000, data: { depth: rim - floor, floor, rim } };
+      c.features.push(cf);
+      calderaAt.set(cf, { x: v.x, y: v.y });
       // Calderas are the hottest centres: wide geothermal halo.
       halo(c, geo, v.x, v.y, Math.max(15, rOut * 2));
       calderas++;
@@ -246,28 +257,29 @@ export function applyVolcanic(c: LandformCtx): void {
     let riftKm = 0;
     for (const s of P.segments) if (s.cls === B.RIFT) riftKm += s.lengthKm;
     const riftCells: number[] = [];
-    for (let pc = 0; pc < P.n * P.n; pc++) {
+    for (let pc = 0; pc < pg.cells; pc++) {
       const nb = P.nearest[pc];
       if (P.bClass[nb] === B.RIFT && P.dBKm[pc] < 50 && P.continent[pc] !== -1) riftCells.push(pc);
     }
     const nRift = Math.min(poisson(frng, (riftKm / 1000) * 2 * Math.min(3, vol)), riftCells.length);
     for (let k = 0; k < nRift * 4 && fieldSites.length < nRift; k++) {
       const pc = riftCells[frng.int(riftCells.length)];
-      fieldSites.push({ x: (cellX(c.platesGrid, pc) + frng.float()) * P.cellKm, y: (cellY(c.platesGrid, pc) + frng.float()) * P.cellKm });
+      const jx = frng.float();
+      fieldSites.push(inPlateCell(pc, jx, frng.float()));
     }
     for (const v of centres) {
       if (frng.float() > (v.kind === 'shield-volcano' ? 0.7 : 0.15)) continue;
       const a = frng.range(0, Math.PI * 2);
       const d = v.R * frng.range(0.6, 1.3);
-      fieldSites.push({ x: v.x + d * Math.cos(a), y: v.y + d * Math.sin(a) });
+      fieldSites.push(offsetKm(c, v.x, v.y, d * Math.cos(a), d * Math.sin(a)));
     }
-    const fdisk = new DiskSet(120);
+    const fdisk = new DiskSet(120, c.grid);
     let fields = 0;
     let cones = 0;
     const fieldCap = Math.ceil(12 * af);
     for (const f of fieldSites) {
       if (fields >= fieldCap) break;
-      if (f.x < 0 || f.y < 0 || f.x >= W || f.y >= W) continue;
+      if (flat && (f.x < 0 || f.y < 0 || f.x >= W || f.y >= W)) continue;
       if (c.h[cellOf(c, f.x, f.y)] <= 0 || !fdisk.free(f.x, f.y, 120)) continue;
       fdisk.add(f.x, f.y);
       const radius = frng.range(8, 18);
@@ -275,8 +287,7 @@ export function applyVolcanic(c: LandformCtx): void {
       for (let j = 0; j < k; j++) {
         const a = frng.range(0, Math.PI * 2);
         const d = radius * Math.sqrt(frng.float());
-        const x = f.x + d * Math.cos(a);
-        const y = f.y + d * Math.sin(a);
+        const { x, y } = offsetKm(c, f.x, f.y, d * Math.cos(a), d * Math.sin(a));
         const cell = cellOf(c, x, y);
         if (c.h[cell] <= 0) continue;
         const rc = frng.range(0.35, 0.9);
@@ -287,7 +298,7 @@ export function applyVolcanic(c: LandformCtx): void {
         cones++;
       }
       halo(c, geo, f.x, f.y, radius + 5);
-      c.features.push({ type: 'cinder-field', x: f.x * 1000, y: f.y * 1000, size: 2 * radius * 1000, data: { cones: k } });
+      c.features.push({ type: 'cinder-field', ...featureAt(c, f.x, f.y), size: 2 * radius * 1000, data: { cones: k } });
       fields++;
     }
     c.stats['cinderFields'] = fields;
@@ -296,8 +307,8 @@ export function applyVolcanic(c: LandformCtx): void {
 
   // ── Geothermal halo and markers (hot springs 5–15 km around active centres, research 05 §3.3) ─
   const grng = c.rng('geothermal');
-  const gdisk = new DiskSet(60);
-  const geyserDisk = new DiskSet(300);
+  const gdisk = new DiskSet(60, c.grid);
+  const geyserDisk = new DiskSet(300, c.grid);
   let geoMarkers = 0;
   for (const v of centres) {
     halo(c, geo, v.x, v.y, v.kind === 'shield-volcano' ? Math.max(15, v.R * 0.5) : 10);
@@ -306,15 +317,19 @@ export function applyVolcanic(c: LandformCtx): void {
     gdisk.add(v.x, v.y);
     const geyser = grng.float() < 0.3 && geyserDisk.free(v.x, v.y, 300);
     if (geyser) geyserDisk.add(v.x, v.y);
-    c.features.push({ type: 'geothermal', x: v.x * 1000, y: v.y * 1000, size: 20000, data: { springs: 5 + grng.int(26), geysers: geyser ? 1 : 0 } });
+    c.features.push({ type: 'geothermal', ...featureAt(c, v.x, v.y), size: 20000, data: { springs: 5 + grng.int(26), geysers: geyser ? 1 : 0 } });
     geoMarkers++;
   }
   for (const f of c.features) {
-    if (f.type !== 'caldera' || !gdisk.free(f.x / 1000, f.y / 1000, 30)) continue;
-    gdisk.add(f.x / 1000, f.y / 1000);
-    const geyser = grng.float() < 0.5 && geyserDisk.free(f.x / 1000, f.y / 1000, 300);
-    if (geyser) geyserDisk.add(f.x / 1000, f.y / 1000);
-    c.features.push({ type: 'geothermal', x: f.x, y: f.y, size: 30000, data: { springs: 10 + grng.int(41), geysers: geyser ? 1 : 0 } });
+    if (f.type !== 'caldera') continue;
+    // Flat: back from the feature's metres, as always; sphere: the caldera's own chart-km position.
+    const p = flat ? { x: f.x / 1000, y: f.y / 1000 } : calderaAt.get(f)!;
+    if (!gdisk.free(p.x, p.y, 30)) continue;
+    gdisk.add(p.x, p.y);
+    const geyser = grng.float() < 0.5 && geyserDisk.free(p.x, p.y, 300);
+    if (geyser) geyserDisk.add(p.x, p.y);
+    const at = f.face === undefined ? { x: f.x, y: f.y } : { face: f.face, x: f.x, y: f.y };
+    c.features.push({ type: 'geothermal', ...at, size: 30000, data: { springs: 10 + grng.int(41), geysers: geyser ? 1 : 0 } });
     geoMarkers++;
   }
   c.stats['geothermalMarkers'] = geoMarkers;
@@ -404,6 +419,80 @@ function detectHotspotHeads(c: LandformCtx, occupied: DiskSet): { x: number; y: 
       const dy = b.y - a.y;
       const d = Math.hypot(dx, dy);
       return d < 300 && (dx * ux + dy * uy) / d > 0.8 && b.h > a.h - 300;
+    });
+  });
+  heads.sort((a, b) => b.h - a.h);
+  return heads;
+}
+
+/**
+ * detectHotspotHeads on the sphere: the same test on a block lattice that tiles every face (block
+ * size a divisor of n near 20 km), with 5×5 block neighbourhoods taken across seams, plate motion
+ * from the plate's Euler pole (ω × p) in the local east/south frame, and great-circle offsets.
+ */
+function detectHotspotHeadsSphere(c: LandformCtx, occupied: DiskSet): { x: number; y: number; h: number }[] {
+  const { h } = c;
+  const g = c.grid;
+  const P = c.plates;
+  const bc = sphereBlock(c.n, Math.max(1, Math.round(20 / c.cellKm)));
+  const bg: Grid = blockGrid(g, bc);
+  const bMax = new Float32Array(bg.cells).fill(-Infinity);
+  const bIdx = new Int32Array(bg.cells);
+  for (let i = 0; i < g.cells; i++) {
+    const b = cellIndex(bg, Math.floor(cellX(g, i) / bc), Math.floor(cellY(g, i) / bc), cellFace(g, i));
+    if (h[i] > bMax[b]) {
+      bMax[b] = h[i];
+      bIdx[b] = i;
+    }
+  }
+  const peaks: { x: number; y: number; h: number }[] = [];
+  for (let b = 0; b < bg.cells; b++) {
+    const v = bMax[b];
+    if (v < 200) continue;
+    let isMax = true;
+    forWindow(bg, b, 2, (o) => {
+      if (o !== b && (bMax[o] > v || (bMax[o] === v && o < b))) {
+        isMax = false;
+        return false;
+      }
+      return true;
+    });
+    if (!isMax) continue;
+    const p = centreOf(c, bIdx[b]);
+    if (ringMean(c, p.x, p.y, 90) > v - 1200) continue;
+    const pc = plateCellAt(c, p.x, p.y);
+    const seg = P.bSeg[P.nearest[pc]] >= 0 ? P.segments[P.bSeg[P.nearest[pc]]] : null;
+    if (seg && CONVERGENT.includes(seg.cls) && P.dBKm[pc] < 250) continue;
+    if (!occupied.free(p.x, p.y, 60)) continue;
+    peaks.push({ ...p, h: v });
+  }
+  const sp = spherePos(g);
+  const pa = new Float64Array(3);
+  const e = new Float64Array(3);
+  const nn = new Float64Array(3);
+  const off = new Float64Array(3);
+  const heads = peaks.filter((a) => {
+    const pl = P.plate[plateCellAt(c, a.x, a.y)];
+    sp.dir(a.x, a.y, pa);
+    localFrame(pa, e, nn);
+    // Surface velocity ω × p, then its east and south components.
+    const w = P.omega ?? new Float64Array(3 * (pl + 1));
+    const wx = w[pl * 3];
+    const wy = w[pl * 3 + 1];
+    const wz = w[pl * 3 + 2];
+    const vx = wy * pa[2] - wz * pa[1];
+    const vy = wz * pa[0] - wx * pa[2];
+    const vz = wx * pa[1] - wy * pa[0];
+    const ve = vx * e[0] + vy * e[1] + vz * e[2];
+    const vs = -(vx * nn[0] + vy * nn[1] + vz * nn[2]);
+    const s = Math.hypot(ve, vs) || 1;
+    const ux = ve / s;
+    const uy = vs / s;
+    return !peaks.some((b) => {
+      if (b === a) return false;
+      sp.local(a.x, a.y, b.x, b.y, off);
+      const d = off[2];
+      return d < 300 && (off[0] * ux + off[1] * uy) / d > 0.8 && b.h > a.h - 300;
     });
   });
   heads.sort((a, b) => b.h - a.h);

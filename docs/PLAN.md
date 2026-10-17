@@ -1070,6 +1070,45 @@ Spherical worlds are being added as an option, with flat staying the default ([r
 - Elevation uploads are not sliced (~250 ms per layer at build size).
 - When the built-in browser pane is hidden, `requestAnimationFrame` stops, so the first fit can run with a 1 × 1 view. Flat worlds also showed a NaN `DetailGround` height in a hidden pane (a pre-existing issue, not looked into here).
 
+### Sphere phase 4a — Glaciers, landforms, hydrology and biomes on the sphere (2026-10-16)
+
+**What landed:**
+- **The sphere pipeline runs through biomes** (`SPHERE_STAGES`: plates → … → climate → glacial → landforms → hydro → biome; the timeline shows 10 steps). Only the registry is skipped; the status line says landmarks are not available on spheres yet.
+- **Grid helpers** (`grid/grid.ts`, `grid/cube.ts`): `tryCellIndex(g, x, y, face)` continues a planar walk past a seam in the *extended equal-angle chart* of the walk's face (`CubeGrid.chartCell`), `chartXY` gives any cell's position in that chart, `forWindow` works on spheres (each cell of the chart box once, breadth-first), plus `isDiagonalStep` and `stepLength` from the seam table. Lattice walks in an extended chart may hit a cell beyond a seam twice but never skip one, which min/max stamps absorb.
+- **Glacial:** ice accumulates by cell area; corridor centrelines are unit vectors on spheres (smoothed in 3D) and each segment is carved in the extended chart of its upstream face; the softening blur and cirque stamps cross seams; fjord spacing is great-circle and the fjord budget scales with √A.
+- **Landforms** (`landforms/sphere.ts`): positions are "chart km", `x = f·4W + u`, `y = v` in face f's extended chart, decoded to unit vectors by every helper. Stamps take their cells from geodesic charts (each cell once, so additive stamps are exact across seams and cube corners); Poisson spacing is great-circle; coarse noise is Noise3; fetch rays and relief walks continue across seams; the coast chamfer repeats its pass pair until stable; `settleFixed`/`reconcileFixed` drop the map-edge rule; hotspot heads and atoll chains follow ω × p. Caps of rare coastal features scale with the planet's area. Features carry `face` plus face-local metres.
+- **Hydrology:** water balance, discharge and TWI by cell area; the depression hierarchy visits all 8 seam neighbours (a turned face's forward set may miss a pair); `uncross` also tests the three other 2×2 blocks of seam cells (at a cube corner the block has three cells and cannot hold two diagonals), and on spheres the flats walk defers diagonal steps that would cross a block's other diagonal, then a second `uncross` pass may move either cell. River geometry (Chaikin axis, Kinoshita meanders, monotone surface) runs in 3D with the side vector up × tangent; deltas are laid out in the tangent plane at the apex; lake centroids are mean directions. Graph metrics (length, Hack, longest river, crossings) use 3D chords.
+- **Biomes:** Noise3 jitter, the river-mouth and 3×3 majority rules through seam neighbours (7 at cube corners), metric slopes, area-weighted shares.
+- **River and lake position convention (for the registry in 4c):** `RiverGraph.face` (Uint8Array) and `LakeInfo.face`; x/y are face-local metres (u, v) in the grid's SurfacePoint convention, u = (a + π/4)·R, so cell (cx, cy) has its centre at ((cx + ½)·cellM, (cy + ½)·cellM). `shared/cube.ts` converts: `surfaceDir(face, u, v, R)`, `dirSurface`, `surfaceLatLon`. Flat graphs have no `face` and are unchanged. Inside the generator `GraphBuilder` holds 3D points (m from the planet centre) on spheres and converts in `finish`.
+- **Globe rendering:** realistic colours from the biome stage (its P/PET in the LUT, cover masks for sand/erg, marsh, rock and perennial snow, seasonal snow as on flat maps); the climate proxy stays as the fallback until the biome layers arrive. Lakes are in the water lid: the hydrology water level is spread two rings past the shore across seams (`prepareWaterSphere`), and the CPU height field's padded surface is also the GPU's surface texture. River ribbons (`render/water/globeRivers.ts`) are built per node along its direction at R + water surface, with the globe's per-vertex light and aerial perspective. Flat rendering is unchanged.
+
+**Measurements** (default small planet, earth; `metrics/out-scratch` drivers):
+
+| | Seed 7 | Seed 11 | Seed 42 |
+|---|---|---|---|
+| Preview: lakes / glaciers / fjords | 280 / 368 / 16 | 255 / 369 / 11 | 441 / 431 / 11 |
+| Preview: reaches by Strahler order 1–5 | 3167 1249 452 179 1 | 3080 1312 442 155 17 | 3146 1148 361 41 – |
+| Preview: deltas (bird's-foot / cuspate) + estuaries | 12 / 5 + 7 | 17 / 5 (+1 arcuate) + 10 | 20 / 5 + 17 |
+| Build: lakes (> 10 km²) / salt / playas | 888 (342) / 25 / 54 | 777 (334) / 9 / 29 | 1265 (610) / 4 / 9 |
+| Build: glaciers, land ice share | 1269, 0.16 | 1041, 0.22 | 1385, 0.24 |
+| Build: river nodes, reaches by order 1–7 | 540 k; 59920 23442 12622 4970 1479 595 | 551 k; 60184 23527 12757 5918 1622 879 75 | 520 k; 60017 23019 11943 4794 1141 208 |
+| Build: deltas + estuaries, longest river | 17 + 7, 932 km | 22 + 10, 1146 km | 25 + 11, 570 km |
+
+- Stage times, preview ≈ 1.8 s total: glacial 70–80, landforms 125–145, hydro 215–245, biome 42–46 ms. Build ≈ 16.5 s total: glacial 0.45, landforms 0.65, hydro 2.5–2.7, biome 0.5 s.
+- Flat goldens are byte-identical (`tests/golden.json` untouched); only the sphere fixture was re-recorded (its stages up to climate kept their hashes).
+- Flat `npm run bench`, interleaved A/B against main: build total −0.0 %, preview total +1.4 % (the preview landforms stage +7 ms, inside noise elsewhere).
+
+**Tests:** `tests/sphereHydro.test.ts` (stages and layers, termination, mouths next to the sea or a lake, monotone water, no crossing receivers in any 2×2 block including seams, lakes flat and at or below spill by a Priority-Flood fill, outlets at the lake level, seam continuity of the river graph, drainage, biome determinism, ribbon geometry); `tests/sphereLandforms.test.ts` (stamps across seams and cube corners, great-circle spacing, the chamfer against Bellman–Ford, `line4` over a seam and a corner, fetch exposure of a sea on a seam, landforms determinism and valid feature positions).
+
+**Verified in the browser:** the default sphere (seed 7) from space and at regional zoom: biome colours, lakes with smooth shores, river ribbons and dashed ephemeral channels, volcanoes, coastal barriers and lagoons; no console errors.
+
+**Known gaps:**
+- Polar ice: 16–24 % of the land on builds and ~30 % on previews; no ice-sheet cap yet.
+- Links from a tributary into a lake outlet's first node can be up to ~1.2 cells long (as on flat maps); every other link is ≤ 1 cell, across seams too. Graph polylines still have a few meander contacts (11–17 per 540 k nodes, the flat rate).
+- Coast lengths and per-coast-km rates use the nominal cell size (~8 % high on spheres); atolls can be slightly elliptical near face edges; the dune azimuth mask is in face axes and not drawn on the globe.
+- Close views of the globe still have 2 km cells (detail tiles are phase 4b). Reefs, craters and cliffs are not drawn on the globe; canopy does not darken the globe colours.
+- The registry (landmarks, names, labels) is phase 4c; landform features and lakes already carry (face, u, v).
+
 ### Sphere phase 4b — Close-zoom detail on the globe (2026-10-16)
 
 **What landed:**

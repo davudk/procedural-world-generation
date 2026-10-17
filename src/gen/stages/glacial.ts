@@ -5,6 +5,7 @@ import type { StageDef } from '../pipeline';
 import { LEM_M } from './base';
 import type { ClimateExtra } from './climate';
 import type { ErodedExtra } from './lem';
+import { shapeHeader } from './plates';
 
 /** Terrain after glacial carving: ErodedExtra plus glacier ice cover. */
 export interface GlacialExtra extends ErodedExtra {
@@ -63,12 +64,13 @@ export const glacialStage: StageDef = {
       // area only (no diffusion or talus, so it only lowers; the clamp makes that exact).
       const t1 = performance.now();
       const h = r.h;
-      const active = new Uint8Array(n * n);
-      for (let i = 0; i < n * n; i++) active[i] = r.carve[i] > 0 ? 1 : 0;
+      const N = grid.cells;
+      const active = new Uint8Array(N);
+      for (let i = 0; i < N; i++) active[i] = r.carve[i] > 0 ? 1 : 0;
       const lem = repairDrainage(h, r.fixed, t.K, grid, LEM_M, REPAIR_DT, REPAIR_ITERATIONS, active);
       repairMs = performance.now() - t1;
       basinKm2 = Math.round(lem.basinCells * t.cellKm * t.cellKm);
-      for (let i = 0; i < n * n; i++) {
+      for (let i = 0; i < N; i++) {
         if (r.fixed[i]) continue;
         if (h[i] > t.h[i]) h[i] = t.h[i];
         r.carve[i] = Math.max(0, t.h[i] - h[i]);
@@ -79,7 +81,7 @@ export const glacialStage: StageDef = {
     const worldKm = ctx.num('worldSize');
     let carveMax = 0;
     for (const v of extra.carve) carveMax = Math.max(carveMax, v);
-    const base = { stage: 'glacial' as const, kind: 'scalar' as const, w: n, h: n, worldKm };
+    const base = { stage: 'glacial' as const, kind: 'scalar' as const, w: n, h: n, worldKm, ...shapeHeader(grid) };
     const layers: Layer[] = [
       { ...base, id: 'ice', label: 'Glacier ice', unit: '', min: 0, max: 1, data: extra.ice },
       { ...base, id: 'glacialCarve', label: 'Glacial carving (m removed)', unit: 'm', min: 0, max: Math.max(1, carveMax), data: extra.carve },

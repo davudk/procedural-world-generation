@@ -1,11 +1,13 @@
 import { BIOME, BIOMES } from '../../shared/biomes';
 import { Noise2 } from '../../shared/noise';
+import { Noise3 } from '../../shared/noise3';
 import type { Layer } from '../../shared/protocol';
 import { classifyBiomes } from '../climate/biomes';
 import type { StageDef } from '../pipeline';
 import type { ClimateExtra } from './climate';
 import type { HydroExtra } from './hydro';
 import type { ErodedExtra } from './lem';
+import { shapeHeader } from './plates';
 
 /** Biome output for later stages (landforms, GPU packing). All rasters n×n, row-major. */
 export interface BiomeExtra {
@@ -39,23 +41,38 @@ export const biomeStage: StageDef = {
     const hy = ctx.input('hydro').extra as HydroExtra;
     const { n, cellKm } = cl;
     if (t.n !== n || hy.n !== n) throw new Error(`biome: grids differ (${t.n}, ${n}, ${hy.n})`);
+    const grid = ctx.grid(n);
+    const seed = ctx.rng('noise').nextU32();
     const f = classifyBiomes({
-      grid: ctx.grid(n), h: t.h, temp: cl.temp, tAmp: cl.tAmp, precip: cl.precip, pSummer: cl.pSummer, pet: cl.pet, fog: cl.fog, coastKm: cl.coastKm,
+      grid, h: t.h, temp: cl.temp, tAmp: cl.tAmp, precip: cl.precip, pSummer: cl.pSummer, pet: cl.pet, fog: cl.fog, coastKm: cl.coastKm,
       waterClass: hy.waterClass, discharge: hy.discharge,
       // glaciation 1 = the Ohmura relation as is; each unit moves the ELA by 2 °C (~300 m).
       elaShift: 2 * (ctx.num('glaciation') - 1),
-      noise: new Noise2(ctx.rng('noise').nextU32()),
+      noise: grid.shape === 'flat' ? new Noise2(seed) : new Noise3(seed),
     });
 
     await ctx.checkpoint();
 
+    // Shares by cell count on flat maps, by area on the sphere (cells differ by up to √2).
+    const N = grid.cells;
     const counts = new Float64Array(BIOMES.length);
-    for (const b of f.biome) counts[b]++;
-    const land = n * n - counts[BIOME.WATER];
+    let canopySum = 0;
+    let total = N;
+    if (grid.uniform) {
+      for (const b of f.biome) counts[b]++;
+      for (let i = 0; i < N; i++) canopySum += f.canopy[i];
+    } else {
+      total = 0;
+      for (let i = 0; i < N; i++) {
+        const a = grid.area(i) / grid.areaTable![0];
+        counts[f.biome[i]] += a;
+        canopySum += f.canopy[i] * a;
+        total += a;
+      }
+    }
+    const land = total - counts[BIOME.WATER];
     const stats: Record<string, number> = {};
     let present = 0;
-    let canopySum = 0;
-    for (let i = 0; i < n * n; i++) canopySum += f.canopy[i];
     for (const info of BIOMES) {
       if (info.id === BIOME.WATER) continue;
       const share = land > 0 ? counts[info.id] / land : 0;
@@ -66,7 +83,7 @@ export const biomeStage: StageDef = {
     stats.meanCanopy = land > 0 ? Math.round((canopySum / land) * 1000) / 1000 : 0;
 
     const worldKm = ctx.num('worldSize');
-    const base = { stage: 'biome' as const, w: n, h: n, worldKm };
+    const base = { stage: 'biome' as const, w: n, h: n, worldKm, ...shapeHeader(grid) };
     const layers: Layer[] = [
       { ...base, id: 'biome', label: 'Biome', kind: 'categorical', unit: '', min: 0, max: BIOMES.length - 1, data: f.biome },
       { ...base, id: 'canopy', label: 'Canopy cover', kind: 'scalar', unit: '', min: 0, max: 1, data: f.canopy },

@@ -5,10 +5,11 @@ import { OrbitCamera } from './camera/orbitCamera';
 import { GlobeCamera } from './camera/globeCamera';
 import { applyViewSize, type ViewCamera } from './camera/viewCamera';
 import { GlobeSkyPass, type GlobeAtmosFrame } from './globe/atmosphere';
-import { GlobeHeightField, SphereGround } from './globe/globeGround';
+import { GlobeHeightField, prepareWaterSphere, SphereGround } from './globe/globeGround';
 import { GlobePass, type GlobeSurface } from './globe/globePass';
 import { GlobeDetail, globeDetailOptions } from './globe/globeDetail';
-import type { GlobeDetailWorld } from './globe/detailTiles';
+import type { GlobeDetailWorld, SphereRivers } from './globe/detailTiles';
+import { surfaceDir } from '../shared/cube';
 import { GlobeDetailUniforms } from './glsl/globeDetail';
 import { GlobeDetailGround } from './height/globeHeightFn';
 import { SphereCdlodSelector } from './terrain/cdlodSphere';
@@ -26,6 +27,7 @@ import { CloudPass } from './lighting/clouds';
 import { declination, DEFAULT_SEASON, DEFAULT_TIME, DEFAULT_VIEW, seasonPhase, sunLight, type ViewSettings } from './lighting/sun';
 import { TerrainPass, type SurfaceLayers } from './terrain/terrainPass';
 import { CreekManager } from './water/creeks/creekManager';
+import { GlobeRiverPass } from './water/globeRivers';
 import { RiverPass } from './water/rivers';
 
 /** Cloud base above sea level (m, before exaggeration). */
@@ -89,6 +91,7 @@ export class WorldView {
   private sky!: SkyPass;
   private clouds!: CloudPass;
   private globe!: GlobePass;
+  private globeRivers!: GlobeRiverPass;
   private globeSky!: GlobeSkyPass;
   /** Time of day, season and clouds (M9 view settings; the defaults keep the pre-M9 look). */
   view: ViewSettings = { ...DEFAULT_VIEW };
@@ -118,12 +121,15 @@ export class WorldView {
     drape: Layer | null;
     detail: DetailInput | null;
     globe: Layer | null;
+    /** Prepared water rasters of the globe (prepareWaterSphere), or null. */
+    globeWater: { level: Float32Array; cls: Float32Array } | null;
     globeSurface: GlobeSurface | null;
     globeDrape: Layer | null;
     globeDetail: GlobeDetailWorld | null;
+    globeDetailOpts: GlobeDetailOpts | null;
   } = {
     terrain: null, surface: null, masks: null, rivers: null, landmarks: [], highlight: null, drape: null, detail: null,
-    globe: null, globeSurface: null, globeDrape: null, globeDetail: null,
+    globe: null, globeWater: null, globeSurface: null, globeDrape: null, globeDetail: null, globeDetailOpts: null,
   };
   /** Camera and viewport state of the last drawn frame (to skip redraws when nothing changed). */
   private drawnKey = '';
@@ -176,6 +182,7 @@ export class WorldView {
     const labelsOn = this.labels?.enabled ?? true;
     this.terrain = new TerrainPass(gl);
     this.globe = new GlobePass(gl);
+    this.globeRivers = new GlobeRiverPass(gl);
     if (palette) this.terrain.palette = this.globe.palette = palette;
     this.globeSky = new GlobeSkyPass(gl);
     this.rivers = new RiverPass(gl);
@@ -211,12 +218,13 @@ export class WorldView {
     this.terrain.setSurface(s.surface);
     this.terrain.setLandformMasks(s.masks);
     this.terrain.setDrape(s.drape);
-    this.rivers.setRivers(s.rivers, this.hf?.size ?? 0);
+    this.rivers.setRivers(s.rivers?.face ? null : s.rivers, this.hf?.size ?? 0);
     this.labels.setLandmarks(s.landmarks, this.hf?.size ?? 1024e3);
     this.labels.highlight(s.highlight);
     this.setCreekWorld(this.creekWorld);
     if (s.detail) this.detail.build(s.detail);
-    if (s.globe && this.globeHf) this.globe.setTerrain(s.globe, this.globeHf.radius);
+    if (s.globe && this.globeHf) this.globe.setTerrain(s.globe, this.globeHf, s.globeWater);
+    this.globeRivers.setRivers(s.rivers?.face ? s.rivers : null, this.globeHf?.radius ?? 1);
     this.globeDetail.setWorld(s.globeDetail);
     this.globe.setSurface(s.globeSurface);
     this.globe.setDrape(s.globeDrape);
@@ -321,11 +329,15 @@ export class WorldView {
   /**
    * Shows a sphere world (six-face elevation): builds the CPU height field and uploads the globe
    * textures. The globe camera fits the planet when its radius changes, otherwise keeps the view.
+   * `water` / `wclass`: the hydrology stage's water level and class on the same grid (lakes in the
+   * water lid, as on flat maps), or null.
    */
-  setGlobe(layer: Layer, detail: Omit<GlobeDetailWorld, 'n' | 'radius' | 'elevation'> | null = null): void {
+  setGlobe(layer: Layer, water: Layer | null = null, wclass: Layer | null = null): void {
     this.sphere = true;
     this.src.globe = layer;
-    const hf = new GlobeHeightField(layer);
+    const prepared = water && water.faces === 6 && water.w === layer.w ? prepareWaterSphere(water, wclass) : null;
+    this.src.globeWater = prepared;
+    const hf = new GlobeHeightField(layer, prepared?.level ?? null);
     hf.exaggeration = this.exaggeration;
     this.globeHf = hf;
     this.globeGround = null;
@@ -336,12 +348,42 @@ export class WorldView {
       this.globeCam.fitWorld();
     }
     this.dirty = true;
-    // Close-zoom detail tiles amplify this elevation (rebuilt from scratch for every new layer).
-    this.src.globeDetail = detail ? { ...detail, n: hf.n, radius: hf.radius, elevation: hf.data } : null;
     if (!this.contextLost) {
-      this.globe.setTerrain(layer, hf.radius);
-      this.globeDetail.setWorld(this.src.globeDetail);
+      this.globe.setTerrain(layer, hf, prepared);
+      this.globeRivers.setRivers(this.src.rivers?.face ? this.src.rivers : null, hf.radius);
     }
+    this.rebuildGlobeDetail();
+  }
+
+  /**
+   * Inputs of the globe's close-zoom detail beyond the elevation, water and rivers the view already
+   * has: the seed and the hydro / biome rasters (6-face, elevation grid). The tiles are rebuilt when
+   * any of them changes (they arrive stage by stage), and on new elevation, water or rivers.
+   */
+  setGlobeDetail(opts: GlobeDetailOpts | null): void {
+    const o = this.src.globeDetailOpts;
+    if (o === opts || (o && opts && o.seed === opts.seed && o.discharge === opts.discharge && o.biome === opts.biome)) return;
+    this.src.globeDetailOpts = opts;
+    this.rebuildGlobeDetail();
+  }
+
+  /** Restarts the detail tiles from the current sphere world (elevation, prepared water, rivers, options). */
+  private rebuildGlobeDetail(): void {
+    const hf = this.globeHf;
+    const o = this.src.globeDetailOpts;
+    const water = this.src.globeWater;
+    const g = this.src.rivers;
+    const fit = (d: ArrayLike<number> | null | undefined): ArrayLike<number> | null => (d && hf && d.length === hf.data.length ? d : null);
+    this.src.globeDetail = hf && o
+      ? {
+        n: hf.n, radius: hf.radius, elevation: hf.data, surfacePad: hf.padded, seed: o.seed,
+        waterLevel: water?.level ?? null, waterClass: water?.cls ?? null,
+        discharge: fit(o.discharge), biome: fit(o.biome),
+        rivers: g?.face ? sphereRivers(g, g.face, hf.radius) : null,
+      }
+      : null;
+    this.dirty = true;
+    if (!this.contextLost) this.globeDetail.setWorld(this.src.globeDetail);
   }
 
   /** Forgets the sphere world (the next world is flat): the view draws flat terrain again. */
@@ -350,6 +392,7 @@ export class WorldView {
     this.globeHf = null;
     this.globeGround = null;
     this.src.globe = this.src.globeSurface = this.src.globeDrape = null;
+    this.src.globeWater = null;
     this.src.globeDetail = null;
     if (!this.contextLost) this.globeDetail.setWorld(null);
     this.dirty = true;
@@ -447,10 +490,16 @@ export class WorldView {
     this.labels.highlight(id);
   }
 
+  /** River graph of the world on show: flat ribbons, or globe ribbons for a sphere graph (`face` set). */
   setRivers(graph: RiverGraph | null): void {
+    const prev = this.src.rivers;
     this.src.rivers = graph;
     this.dirty = true;
-    if (!this.contextLost) this.rivers.setRivers(graph, this.hf?.size ?? 0);
+    if (this.contextLost) return;
+    this.rivers.setRivers(graph?.face ? null : graph, this.hf?.size ?? 0);
+    this.globeRivers.setRivers(graph?.face && this.globeHf ? graph : null, this.globeHf?.radius ?? 1);
+    // Sphere rivers carve the detail tiles' channels and valleys.
+    if (graph !== prev && this.sphere && this.globeHf && (graph?.face || this.src.globeDetail?.rivers)) this.rebuildGlobeDetail();
   }
 
   setDrape(layer: Layer | null): void {
@@ -699,6 +748,20 @@ export class WorldView {
         eye,
         pxScale,
       });
+      // Rivers only over the realistic view (data drapes show the raster alone, as on flat maps).
+      if (this.globe.layerModeRealistic) {
+        this.globeRivers.draw({
+          viewProj: this.viewProj,
+          exaggeration: this.exaggeration,
+          pxScale: (2 * Math.tan(cam.fovY / 2)) / Math.max(1, cam.viewH),
+          time: timeSec,
+          sunReal,
+          realK,
+          light: local.light,
+          ambient: local.ambient,
+          atmos,
+        });
+      }
       gl.disable(gl.DEPTH_TEST);
     }
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbo);
@@ -767,4 +830,16 @@ export class WorldView {
 function smoothstep(e0: number, e1: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
   return t * t * (3 - 2 * t);
+}
+
+/** Seed and optional hydro / biome rasters for the globe detail (WorldView.setGlobeDetail). */
+export interface GlobeDetailOpts {
+  seed: number;
+  discharge?: ArrayLike<number> | null;
+  biome?: ArrayLike<number> | null;
+}
+
+/** The sphere hydrology's river graph (face-local u, v metres, research 10 / Sphere phase 4a) as the tiles' carve input. */
+function sphereRivers(g: RiverGraph, face: Uint8Array, radius: number): SphereRivers {
+  return { graph: g, nodeDir: (i, out) => surfaceDir(face[i], g.x[i], g.y[i], radius, out) };
 }

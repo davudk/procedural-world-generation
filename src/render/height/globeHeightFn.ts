@@ -287,6 +287,10 @@ export interface GlobeHeightSources {
   radius: number;
   /** Raw elevation padded like the GPU array: 6 × (n + 2·PAD)² (m). */
   macroPad: Float32Array;
+  /** Rendered macro surface (the water lid), padded: GlobeHeightField.padded = the GPU's u_surf. Null: max(h, 0) of macroPad. */
+  surfacePad?: Float32Array | null;
+  /** Prepared water levels, padded (< DRY: dry), as the GPU's u_wlevel; null: the sea at 0 everywhere. */
+  waterPad?: Float32Array | null;
   /** Control (RGBA8, padded like the macro): roughness, rock, water proximity, unused. */
   control: Uint8Array | null;
   params: GlobeDetailParams | null;
@@ -384,16 +388,17 @@ export class GlobeHeightFn {
     return out;
   }
 
-  /** Rendered macro surface (= GLSL heightAt(f, ang).y): bilinear of max(h, 0). */
+  /** Rendered macro surface (= GLSL heightAt(f, ang).y): bilinear of the water lid. */
   surfaceMacro(face: number, a: number, b: number): number {
     const m = this.m;
     const px = Math.min(m - 1.001, Math.max(0, (a + Q) / this.delta - 0.5 + PAD));
     const py = Math.min(m - 1.001, Math.max(0, (b + Q) / this.delta - 0.5 + PAD));
     const x0 = Math.floor(px), y0 = Math.floor(py);
     const fx = px - x0, fy = py - y0;
-    const d = this.src.macroPad;
+    const lid = this.src.surfacePad ?? null;
+    const d = lid ?? this.src.macroPad;
     const o = face * m * m + y0 * m + x0;
-    const s = (v: number): number => (v > 0 ? v : 0);
+    const s = lid ? (v: number): number => v : (v: number): number => (v > 0 ? v : 0);
     const top = s(d[o]) + (s(d[o + 1]) - s(d[o])) * fx;
     const bot = s(d[o + m]) + (s(d[o + m + 1]) - s(d[o + m])) * fx;
     return top + (bot - top) * fy;
@@ -409,6 +414,17 @@ export class GlobeHeightFn {
     out[0] = tB[0];
     chartGrad(face, a, b, tB[1] / this.delta, tB[2] / this.delta, this.radius, out);
     return out;
+  }
+
+  /** Water surface (= GLSL gWaterLevel): bilinear prepared level (< DRY dry), or the sea at 0. */
+  waterLevel(face: number, a: number, b: number): number {
+    const w = this.src.waterPad;
+    if (!w) return 0;
+    const m = this.m;
+    const px = Math.min(m - 1.001, Math.max(0, (a + Q) / this.delta - 0.5 + PAD));
+    const py = Math.min(m - 1.001, Math.max(0, (b + Q) / this.delta - 0.5 + PAD));
+    bilinearAt(w, face * m * m, m, px, py, tA);
+    return tA[0];
   }
 
   /** Share of the detail (tiles + octaves) at a footprint: 1 below one texel per pixel, 0 above two. */
@@ -528,20 +544,22 @@ export class GlobeHeightFn {
     const ctl = this.control(face, a, b, tD);
     const amp = this.amp * (DN.AMP_BASE + DN.AMP_ROUGH * ctl[0]) * p.ampScale * (1 - ctl[2]);
     const rock = ctl[1];
-    const room = Math.abs(out[0]) - DN.SHORE_MARGIN;
+    const wl = this.waterLevel(face, a, b);
+    const room = wl > DN.DRY ? Math.abs(out[0] - wl) - DN.SHORE_MARGIN : 1e9;
     const s = amp > 0 ? Math.min(1, Math.max(0, room / amp)) : 0;
     const R = this.radius;
     fbm3(dir3[0] * R, dir3[1] * R, dir3[2] * R, dir3, pxFoot, p.lam0, p.octaves, amp * s, rock, out, p.seed, out);
     return out;
   }
 
-  /** Rendered surface before exaggeration: the sea lid max(h, 0) (= GLSL globeSurface). */
+  /** Rendered surface before exaggeration: the water lid max(h, level) (= GLSL globeSurface). */
   surface(face: number, a: number, b: number, pxFoot: number): number {
     const t = this.detailWeight(pxFoot);
     const s0 = t < 1 ? this.surfaceMacro(face, a, b) : 0;
     if (t <= 0) return s0;
     const h = this.sample(face, a, b, pxFoot, sOut)[0];
-    return s0 + (Math.max(h, 0) - s0) * t;
+    const wl = this.waterLevel(face, a, b);
+    return s0 + ((wl > DN.DRY ? Math.max(h, wl) : Math.max(h, 0)) - s0) * t;
   }
 }
 

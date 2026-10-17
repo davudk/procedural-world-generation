@@ -17,6 +17,8 @@ export function wetnessIndex(S: Float32Array, g: Grid, rcv: Int32Array, fixed: U
   const slope = new Float32Array(N);
   const lowerMask = new Uint8Array(N);
   const inv = INV_DIST.map((d) => d / cellM);
+  // Sphere: per-neighbour distances and cell areas from the metric.
+  const uni = g.uniform;
   for (let i = 0; i < N; i++) {
     if (fixed[i]) continue;
     const b = border[i];
@@ -26,7 +28,7 @@ export function wetnessIndex(S: Float32Array, g: Grid, rcv: Int32Array, fixed: U
       let j: number;
       if (b === 0) j = i + off[k];
       else if ((j = g.nbr(i, k)) < 0) continue;
-      const s = (S[i] - S[j]) * inv[k];
+      const s = (S[i] - S[j]) * (uni ? inv[k] : 1 / g.dist(i, k));
       if (s <= 0) continue;
       mask |= 1 << k;
       if (s > best) best = s;
@@ -44,7 +46,7 @@ export function wetnessIndex(S: Float32Array, g: Grid, rcv: Int32Array, fixed: U
   const area = cellM * cellM;
   for (let qh = 0; qh < qt; qh++) {
     const i = queue[qh];
-    a[i] += area;
+    a[i] += uni ? area : g.area(i);
     if (fixed[i]) continue;
     const mask = lowerMask[i];
     if (mask === 0) {
@@ -62,7 +64,7 @@ export function wetnessIndex(S: Float32Array, g: Grid, rcv: Int32Array, fixed: U
         w[k] = 0;
         continue;
       }
-      w[k] = (S[i] - S[b === 0 ? i + off[k] : g.nbr(i, k)]) * inv[k] * CONTOUR[k];
+      w[k] = (S[i] - S[b === 0 ? i + off[k] : g.nbr(i, k)]) * (uni ? inv[k] : 1 / g.dist(i, k)) * CONTOUR[k];
       sum += w[k];
     }
     for (let k = 0; k < 8; k++) {

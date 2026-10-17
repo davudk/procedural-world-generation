@@ -72,6 +72,10 @@ export class CubeGrid implements Grid {
   private markGen = 0;
   private readonly pa = new Float64Array(3);
   private readonly pb = new Float64Array(3);
+  private readonly pc = new Float64Array(3);
+  private wmark: Int32Array | null = null;
+  private wgen = 0;
+  private inWindow = false;
 
   constructor(
     readonly n: number,
@@ -297,11 +301,7 @@ export class CubeGrid implements Grid {
     const north = new Float64Array(3);
     localFrame(up, east, north);
     const R = this.radiusM;
-    const mark = (this.mark ??= new Int32Array(this.cells));
-    if (++this.markGen > 0x7fffffff) {
-      mark.fill(0);
-      this.markGen = 1;
-    }
+    const mark = this.marks();
     const gen = this.markGen;
     const start = dirToCell(up[0], up[1], up[2], this.n);
     const queue = [start];
@@ -331,6 +331,117 @@ export class CubeGrid implements Grid {
         queue.push(j);
       }
     }
+  }
+
+  /**
+   * Continuous cell coordinates of the unit vector p in face f's extended equal-angle chart: column
+   * and row with cell centres at integers (so in-face cells give exactly their x, y), continuing past
+   * the face edges onto the neighbouring faces. False (out unchanged) when p is 90° or more from the
+   * face's plane normal, where the chart ends.
+   */
+  chartXYDir(f: number, p: ArrayLike<number>, out: Float64Array): boolean {
+    const o = f * 3;
+    const dc = p[0] * FACE_C[o] + p[1] * FACE_C[o + 1] + p[2] * FACE_C[o + 2];
+    if (!(dc > 1e-9)) return false;
+    const X = (p[0] * FACE_E[o] + p[1] * FACE_E[o + 1] + p[2] * FACE_E[o + 2]) / dc;
+    const Y = (p[0] * FACE_S[o] + p[1] * FACE_S[o + 1] + p[2] * FACE_S[o + 2]) / dc;
+    out[0] = (Math.atan(X) + QUARTER) / this.delta - 0.5;
+    out[1] = (Math.atan(Y) + QUARTER) / this.delta - 0.5;
+    return true;
+  }
+
+  /** Extended chart coordinates of cell i's centre in face f's chart (exact integers when i is on f). */
+  chartXY(f: number, i: number, out: Float64Array): boolean {
+    const n = this.n;
+    const fi = Math.floor(i / this.n2);
+    if (fi === f) {
+      const r = i - f * this.n2;
+      const y = Math.floor(r / n);
+      out[0] = r - y * n;
+      out[1] = y;
+      return true;
+    }
+    this.position(i, this.pc);
+    return this.chartXYDir(f, this.pc, out);
+  }
+
+  /**
+   * Cell at integer column x, row y of face f's extended chart: the cell itself on the face, else the
+   * cell of the neighbouring face containing that chart point; −1 where the chart ends (≥ 90° away).
+   */
+  chartCell(f: number, x: number, y: number): number {
+    const n = this.n;
+    if (x >= 0 && y >= 0 && x < n && y < n) return f * this.n2 + y * n + x;
+    const a = (x + 0.5) * this.delta - QUARTER;
+    const b = (y + 0.5) * this.delta - QUARTER;
+    if (Math.abs(a) >= Math.PI / 2 - 1e-6 || Math.abs(b) >= Math.PI / 2 - 1e-6) return -1;
+    const X = Math.tan(a);
+    const Y = Math.tan(b);
+    const o = f * 3;
+    return dirToCell(FACE_C[o] + X * FACE_E[o] + Y * FACE_S[o], FACE_C[o + 1] + X * FACE_E[o + 1] + Y * FACE_S[o + 1], FACE_C[o + 2] + X * FACE_E[o + 2] + Y * FACE_S[o + 2], n);
+  }
+
+  /** Cell at continuous chart coordinates (centres at integers) of face f; −1 where the chart ends. */
+  chartCellAt(f: number, fx: number, fy: number): number {
+    return this.chartCell(f, Math.round(fx), Math.round(fy));
+  }
+
+  /**
+   * Visits each cell once whose centre, in the extended chart of c's face, lies in the (2r + 1)² box
+   * around c (|round(dx)|, |round(dy)| ≤ r), with its chart offsets dx (east along the face's
+   * columns) and dy (along its rows), in cells. Off c's face the offsets are not integers. Cells are
+   * found by a flood from c, so the order is breadth-first. `visit` may return false to stop early.
+   */
+  window(c: number, r: number, visit: (j: number, dx: number, dy: number) => boolean | void): void {
+    if (this.inWindow) throw new Error('cube: window() is not re-entrant');
+    this.inWindow = true;
+    try {
+      const f = Math.floor(c / this.n2);
+      const q = new Float64Array(2);
+      this.chartXY(f, c, q);
+      const cx = q[0];
+      const cy = q[1];
+      const mark = (this.wmark ??= new Int32Array(this.cells));
+      if (++this.wgen > 0x7fffffff) {
+        mark.fill(0);
+        this.wgen = 1;
+      }
+      const gen = this.wgen;
+      const queue = [c];
+      mark[c] = gen;
+      for (let h = 0; h < queue.length; h++) {
+        const i = queue[h];
+        if (!this.chartXY(f, i, q)) continue;
+        const dx = q[0] - cx;
+        const dy = q[1] - cy;
+        if (Math.abs(Math.round(dx)) > r || Math.abs(Math.round(dy)) > r) continue;
+        if (visit(i, dx, dy) === false) return;
+        for (let k = 0; k < 8; k++) {
+          const j = this.nbr(i, k);
+          if (j < 0 || mark[j] === gen) continue;
+          mark[j] = gen;
+          queue.push(j);
+        }
+      }
+    } finally {
+      this.inWindow = false;
+    }
+  }
+
+  /** The chart flood's mark array with a fresh generation. */
+  private marks(): Int32Array {
+    const mark = (this.mark ??= new Int32Array(this.cells));
+    if (++this.markGen > 0x7fffffff) {
+      mark.fill(0);
+      this.markGen = 1;
+    }
+    return mark;
+  }
+
+  /** Raster slot k (0–7) with nbr(i, k) = j, or −1 when j is not a neighbour of i. */
+  slotOf(i: number, j: number): number {
+    for (let k = 0; k < 8; k++) if (this.nbr(i, k) === j) return k;
+    return -1;
   }
 
   /** Bilinear sample within the face; taps beyond a face edge read the seam neighbour. */

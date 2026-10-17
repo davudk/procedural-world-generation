@@ -385,6 +385,84 @@ describe('globe detail tiles (CPU reference of the GPU build)', () => {
   });
 });
 
+describe('globe detail with the sphere hydrology', () => {
+  it('keeps lakes under their level and shores dry, treats river cells as land, and the octaves never cross a lake level', () => {
+    const world = planet();
+    const elev = world.elevation as Float32Array;
+    const level = new Float32Array(elev.length).fill(-10000);
+    const cls = new Uint8Array(elev.length);
+    // A lake at 300 m over all low land cells, the sea elsewhere below 0, and a river cell.
+    for (let i = 0; i < elev.length; i++) {
+      if (elev[i] > 0 && elev[i] < 300) {
+        level[i] = 300;
+        cls[i] = 2;
+      } else if (elev[i] < 0) {
+        level[i] = 0;
+        cls[i] = 1;
+      }
+    }
+    const ri = (2 * N + 8) * N + 8;
+    level[ri] = elev[ri] + 5;
+    cls[ri] = 3;
+    world.waterLevel = level;
+    world.waterClass = cls;
+    const pg = runSync(prepareGlobe(world, tileLattice(N, R, TILE_N)));
+    expect(pg.levelPad).not.toBeNull();
+    const l = pg.lattice;
+    const fn = new GlobeHeightFn({
+      n: N, radius: R, macroPad: pg.macroPad, waterPad: pg.levelPad, control: pg.controlPad, params: pg.params,
+      tiles: { lattice: l, tile: (k) => ({ data: extractTile(runSync(buildTileCpu(prepareTile(pg, k), 2, { talus: 0.75, thermalRate: 0.5 })), l), fade: 1 }) },
+    });
+    const cache = new Map<number, Float32Array>();
+    const tiles: TileSource = {
+      lattice: l,
+      tile: (k) => {
+        let t = cache.get(k);
+        if (!t) cache.set(k, (t = extractTile(runSync(buildTileCpu(prepareTile(pg, k), 2, { talus: 0.75, thermalRate: 0.5 })), l)));
+        return { data: t, fade: 1 };
+      },
+    };
+    const det = new GlobeHeightFn({ ...fn.src, tiles });
+    const flat = new GlobeHeightFn({ ...fn.src, tiles });
+    flat.amp = 0;
+    const out = new Float64Array(4);
+    const b0 = new Float64Array(4);
+    let lake = 0, dry = 0;
+    for (let f = 0; f < 6; f++) {
+      for (let y = 1; y < N - 1; y++) {
+        for (let x = 1; x < N - 1; x++) {
+          const i = (f * N + y) * N + x;
+          if (cls[i] !== 2) continue;
+          // Only cells whose 3×3 neighbourhood is all lake: inside the lake, away from its bilinear shore.
+          let inner = true;
+          for (let dy = -1; dy <= 1 && inner; dy++) for (let dx = -1; dx <= 1; dx++) if (cls[i + dy * N + dx] !== 2) inner = false;
+          if (!inner) continue;
+          const a = ((x + 0.5) / N - 0.5) * (Math.PI / 2), b = ((y + 0.5) / N - 0.5) * (Math.PI / 2);
+          expect(det.sample(f, a, b, 4, out)[0]).toBeLessThan(300);
+          expect(det.surface(f, a, b, 4)).toBeCloseTo(300, 6);
+          lake++;
+        }
+      }
+    }
+    // Octaves never cross the lake level anywhere on face 0.
+    for (let k = 0; k < 300; k++) {
+      const a = -0.7 + 1.4 * ((k * 0.618) % 1), b = -0.7 + 1.4 * ((k * 0.377) % 1);
+      const wl = det.waterLevel(0, a, b);
+      if (wl < 100) continue;
+      const h = det.sample(0, a, b, 4, out)[0];
+      const h0 = flat.sample(0, a, b, 4, b0)[0];
+      expect(Math.sign(h - wl)).toBe(Math.sign(h0 - wl));
+      dry++;
+    }
+    expect(lake).toBeGreaterThan(0);
+    expect(dry).toBeGreaterThan(10);
+    // The river cell is land for the bounds (its level is not a lid the tiles must stay under).
+    const m = N + 4;
+    expect(pg.waterPad[2 * m * m + (8 + 2) * m + 8 + 2]).toBeLessThan(-9000);
+    expect(pg.levelPad![2 * m * m + (8 + 2) * m + 8 + 2]).toBeCloseTo(level[ri], 4);
+  });
+});
+
 describe('globe height function', () => {
   it('has no jumps on steep terrain: refined around the largest step, the step vanishes', () => {
     const pg = runSync(prepareGlobe(planet(5, 7000), tileLattice(N, R, TILE_N)));
@@ -442,9 +520,10 @@ describe('globe height function', () => {
 
   it('equals the phase-3 bilinear globe at globe zoom', () => {
     const pg = prepared();
-    const fn = heightFn(allTiles(pg.lattice));
     const layer = { id: 'elevation', w: N, h: N, worldKm: (4 * CELL * N) / 1000, radiusKm: R / 1000, faces: 6, data: planet().elevation } as unknown as Layer;
     const hf = new GlobeHeightField(layer);
+    // As the view wires it: the macro surface is the height field's padded water lid (the GPU's u_surf).
+    const fn = new GlobeHeightFn({ n: N, radius: R, macroPad: pg.macroPad, surfacePad: hf.padded, control: pg.controlPad, params: pg.params, tiles: allTiles(pg.lattice) });
     const out = new Float64Array(4);
     for (const [f, a, b] of [[0, 0.1, 0.2], [3, -0.7, 0.5], [5, 0.78, -0.78]] as const) {
       expect(fn.surface(f, a, b, 10 * pg.params.texelM)).toBeCloseTo(hf.surfaceAt(f, a, b), 4);

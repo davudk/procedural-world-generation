@@ -100,10 +100,10 @@ vec4 gFbmAt(vec3 P, vec3 up, float pxFoot, float lam0, int oct, float amp, float
 
 /**
  * Paste into BOTH the globe VS and FS after CUBE_GLSL (uses u_height, u_hn, PAD, QUARTER, u_faceC/E/S,
- * heightAt and u_radius). Provides:
+ * heightAt, u_radius and gWaterLevel(f, ang): the water surface, < −9000 dry; the sea is 0). Provides:
  *   float gDetailWeight(float pxFoot)                      0..1 share of the detail (0 at globe zoom)
  *   vec4  globeSample(int f, vec2 ang, vec3 rel, float pxFoot)   (h, 3D tangent gradient), raw elevation
- *   float globeSurface(int f, vec2 ang, vec3 rel, float pxFoot)  sea lid max(h, 0); = heightAt().y far out
+ *   float globeSurface(int f, vec2 ang, vec3 rel, float pxFoot)  water lid max(h, level); = heightAt().y far out
  * rel = the sea-level point dir·R minus the eye (m); pxFoot = metres per pixel there.
  */
 export const GLOBE_DETAIL_GLSL = /* glsl */ `
@@ -267,7 +267,8 @@ vec4 globeSample(int f, vec2 ang, vec3 rel, float pxFoot) {
   float mm = float(u_hn + 2 * PAD);
   vec4 ctl = textureLod(u_gCtl, vec3(((ang + QUARTER) / delta + float(PAD)) / mm, float(f)), 0.0);
   float amp = u_gAmp * (G_AMP_BASE + G_AMP_ROUGH * ctl.r) * u_gAmpScale * (1.0 - ctl.b);
-  float room = abs(b.x) - G_SHORE_MARGIN;
+  float wl = gWaterLevel(f, ang);
+  float room = wl > -9000.0 ? abs(b.x - wl) - G_SHORE_MARGIN : 1e9;
   float s = amp > 0.0 ? clamp(room / amp, 0.0, 1.0) : 0.0;
   b += gFbm(u_gOff + rel, u_gTile, dir, pxFoot, u_gLam0, u_gOct, amp * s, ctl.g, b.yzw, u_gSeed);
   return b;
@@ -278,7 +279,8 @@ float globeSurface(int f, vec2 ang, vec3 rel, float pxFoot) {
   float s0 = t < 1.0 ? heightAt(f, ang).y : 0.0;
   if (t <= 0.0) return s0;
   float h = globeSample(f, ang, rel, pxFoot).x;
-  return mix(s0, max(h, 0.0), t);
+  float wl = gWaterLevel(f, ang);
+  return mix(s0, wl > -9000.0 ? max(h, wl) : max(h, 0.0), t);
 }
 `;
 
