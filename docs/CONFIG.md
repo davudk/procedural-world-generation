@@ -42,7 +42,7 @@ Levels are evaluated top-down: **L0 → L1 → L2 → L3**. L4 (view) never affe
 |---|---|---|---|
 | `seed` | int | random | |
 | `archetype` | enum | Earth-like | Earth-like, Archipelago, Pangaea, Rift & great lakes, Fjordland, Desert world, Volcanic island chain, Ice age, Hothouse tropics, Old craton, **Custom**. Applies a bundle of pins and biases (§5) |
-| `worldShape` | enum | Flat | Flat \| Sphere ([research 10](research/10-spherical-worlds.md)). Never written to URLs when flat. Spheres run plates → climate for now and show as a 2D map |
+| `worldShape` | enum | Flat | Flat \| Sphere ([research 10](research/10-spherical-worlds.md)). Never written to URLs when flat. Spheres run every stage and show as a labelled globe or a 2D map |
 | `worldSize` | scalar, log slider | 1024 km | Flat only. 256–4096 km; preset stops at 512 / 1024 / 2048 / 4096 |
 | `planetSize` | scalar, log slider | AUTO ← archetype (4,096 km) | Sphere only. Circumference, 2,048–40,030 km; radius and surface area shown read-only. AUTO formulas that scale with the world read the equal-area size √(4πR²) instead of `worldSize` |
 | `landFraction` | scalar | AUTO ← archetype (0.40) | 0.05–0.80 |
@@ -100,7 +100,7 @@ Levels are evaluated top-down: **L0 → L1 → L2 → L3**. L4 (view) never affe
 | `oceanCurrents` | toggle + strength | ← mapEdge | |
 | `moistureLength` | scalar km | ← worldSize (Earth-like interiors scale with size) | |
 | `seasonality` | scalar | ← latitudeSpan | |
-| `glaciation` | scalar 0–2 | ← temperatureOffset, latitudeSpan, peakHeight | Snowline and ice extent |
+| `glaciation` | scalar 0–2 | ← temperatureOffset, latitudeSpan, peakHeight | Snowline and ice extent. Spheres read a 65° poleward reach (their poles come from the climate model; research 11 §4) |
 | `fjords` | toggle | AUTO = on if glaciation is high enough and the coasts are mountainous | |
 
 **Water**
@@ -150,7 +150,7 @@ Notation:
 | `meanPlateArea` | `S² / n` |
 | `rangeLength` | `[0.55, 1.2] · √(meanPlateArea)` |
 | `continentCount` centre | `c = clamp(1.6 + 1.0·s2 + 3(L − 0.4), 1, 12)`; range `[round(c − 0.8), round(c + 1.0)]`; archetype overrides (Pangaea → [1, 1]) |
-| `peakHeight` | `[1500 + 2000a, 3000 + 4000a + 500·max(0, s2)] · (1 − 0.45(g − 0.5))`, capped at 9000 m |
+| `peakHeight` | `[1500 + 2000a, 3000 + 4000a + 500·max(0, s2)] · (1 − 0.45(g − 0.5))`, capped at 9000 m. Spheres drop the size term (research 11 §4) |
 | `hotspotCount` | `[0, round(1 + 2a·(S/1024)^1.5)]` |
 | `craterCount` | `round(λ · land area · (0.5 + g) · impactHistory)`, with `λ` from research 05; a P(≥1) guarantee only if a crater is chosen as a hero |
 | `heroCount` | `[3, 5]` for S ≤ 1024, else `[5, 8]` |

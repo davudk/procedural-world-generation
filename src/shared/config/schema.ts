@@ -45,7 +45,7 @@ export const PARAMS: readonly ParamDef[] = [
   // ── L0 World ────────────────────────────────────────────────────────────────────────────
   choice({
     id: 'worldShape', label: 'World shape', level: 0, section: 'world', stage: 'plates',
-    help: 'A flat square map, or a whole planet (spherical worlds generate terrain and climate so far).',
+    help: 'A flat square map, or a whole planet shown as a globe.',
     options: [
       { value: 'flat', label: 'Flat' },
       { value: 'sphere', label: 'Sphere' },
