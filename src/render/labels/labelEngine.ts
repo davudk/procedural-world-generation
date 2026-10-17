@@ -36,6 +36,20 @@ const MPP_HYSTERESIS = 1.2;
 export const GLOBE_MIN_FACING = 0.3;
 /** Globe: a label's boxes keep this far (CSS px) inside the planet's disc on screen. */
 const LIMB_MARGIN_PX = 2;
+/** Globe: kinds whose labels slide inwards when they would cross the limb, and the largest slide (× disc radius). */
+const SLIDE_KINDS: ReadonlySet<string> = new Set(['continent', 'ocean', 'sea']);
+const SLIDE_MAX = 0.4;
+
+/** How far (px) the farthest box corner lies outside a circle; ≤ 0 when all are inside. */
+function overshoot(b: Float32Array, cx: number, cy: number, r: number): number {
+  let worst = -Infinity;
+  for (let k = 0; k + 3 < b.length; k += 4) {
+    for (const [qx, qy] of [[b[k], b[k + 1]], [b[k + 2], b[k + 1]], [b[k], b[k + 3]], [b[k + 2], b[k + 3]]] as const) {
+      worst = Math.max(worst, Math.hypot(qx - cx, qy - cy) - r);
+    }
+  }
+  return worst;
+}
 
 /** What labels need of a rendered globe (GlobeGround satisfies it): planet-centred metres, +z north. */
 export interface LabelGlobe {
@@ -532,17 +546,18 @@ export class LabelEngine {
     if (info.layoutView === this.viewVersion && info.layoutSize === info.sizePx) return info.hasLayout;
     info.layoutView = this.viewVersion;
     info.layoutSize = info.sizePx;
-    info.hasLayout = info.path ? this.layoutPath(info) : this.layoutAnchor(info) && (!info.dir || this.insideDisc(info));
+    info.hasLayout = info.path ? this.layoutPath(info) : this.layoutAnchor(info) && (!info.dir || this.fitDisc(info));
     return info.hasLayout;
   }
 
   /**
-   * Globe: whether a label's boxes stay inside the planet's disc on screen. The limb distance is taken
-   * in the plane of the eye, the planet centre and the anchor: the tangent point T = R(cos φ ê + sin φ û)
-   * with cos φ = R / |eye| projects to the limb on the anchor's side. Long names of anchors that still
-   * face the eye (GLOBE_MIN_FACING) could otherwise reach past the disc into space.
+   * Globe: whether a label's boxes stay inside the planet's disc on screen; continent, ocean and sea
+   * names may slide inwards first. The limb distance is taken in the plane of the eye, the planet
+   * centre and the anchor: the tangent point T = R(cos φ ê + sin φ û) with cos φ = R / |eye| projects
+   * to the limb on the anchor's side. Long names of anchors that still face the eye
+   * (GLOBE_MIN_FACING) could otherwise reach past the disc into space.
    */
-  private insideDisc(info: Info): boolean {
+  private fitDisc(info: Info): boolean {
     const p = this.proj;
     const d = info.dir!;
     const R = this.radius;
@@ -562,13 +577,35 @@ export class LabelEngine {
     const sinP = Math.sqrt(1 - cosP * cosP);
     if (!p.project(R * (cosP * ex + sinP * ux), R * (cosP * ey + sinP * uy), R * (cosP * ez + sinP * uz))) return true;
     const lim = Math.hypot(p.sx - cx, p.sy - cy) - LIMB_MARGIN_PX;
+    const over = overshoot(info.boxes, cx, cy, lim);
+    if (over <= 0) return true;
+    // Continent, ocean and sea names are wide and their anchors often sit well off the disc's centre:
+    // slide them inwards (at most SLIDE_MAX of the disc radius) rather than dropping them.
+    if (!SLIDE_KINDS.has(info.lm.kind) || over > SLIDE_MAX * lim) return false;
     const b = info.boxes;
+    let mx = 0, my = 0;
     for (let k = 0; k + 3 < b.length; k += 4) {
-      for (const [qx, qy] of [[b[k], b[k + 1]], [b[k + 2], b[k + 1]], [b[k], b[k + 3]], [b[k + 2], b[k + 3]]]) {
-        if (Math.hypot(qx - cx, qy - cy) > lim) return false;
-      }
+      mx += b[k] + b[k + 2];
+      my += b[k + 1] + b[k + 3];
     }
-    return true;
+    mx /= b.length / 2;
+    my /= b.length / 2;
+    const ml = Math.hypot(cx - mx, cy - my);
+    if (ml < 1e-6) return false;
+    const dx = ((cx - mx) / ml) * (over + 1), dy = ((cy - my) / ml) * (over + 1);
+    for (let i = 0; i < info.gx.length; i++) {
+      info.gx[i] += dx;
+      info.gy[i] += dy;
+    }
+    for (let k = 0; k + 3 < b.length; k += 4) {
+      b[k] += dx;
+      b[k + 2] += dx;
+      b[k + 1] += dy;
+      b[k + 3] += dy;
+    }
+    info.ax += dx;
+    info.ay += dy;
+    return overshoot(b, cx, cy, lim) <= 0;
   }
 
   private layoutAnchor(info: Info): boolean {
