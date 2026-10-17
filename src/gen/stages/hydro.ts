@@ -58,6 +58,8 @@ const BREACH_AREA = 4;
  * limits grow by DISTRICT_BREACH_DEPTH and DISTRICT_BREACH_AREA, so only deep troughs keep their lakes.
  */
 const DISTRICT_SHARE = 0.3;
+/** Spheres: lake density is scaled by min(1, this / cell size in km) (see the hydro stage). */
+const SPHERE_LAKE_CELL_KM = 4;
 const DISTRICT_KM = 250;
 const DISTRICT_BREACH_DEPTH = 5;
 const DISTRICT_BREACH_AREA = 100;
@@ -86,6 +88,12 @@ const ARID_LOSS = 10;
  * lake). The riverDensity outcome is that ratio × riverDensity, in slider units.
  */
 const DD_COEF = 0.55;
+/**
+ * The same coefficient measured on spheres (10 archetypes × 20 small-planet previews, research 11 §6):
+ * realised channel networks run ~3 % denser than on flat worlds at the same channel-head area, which put
+ * hot and dry archetypes just past the ±10 % check. It only scales the reported ratio, not the network.
+ */
+const DD_COEF_SPHERE = 0.57;
 /**
  * A great river reaches the sea over at least this length (km) on the default 1024 km world, scaled
  * with world width (research 05 §4 row 12 as restated in research 09 §4.15; mirrored in metrics/targets.ts).
@@ -127,7 +135,10 @@ export const hydroStage: StageDef = {
     const sphere = g.shape !== 'flat';
     const areaM2 = (i: number): number => (sphere ? g.area(i) : cellM2);
     const worldKm = ctx.num('worldSize');
-    const lakeDensity = ctx.num('lakeDensity');
+    // Spheres: coarse cells keep every pit as a lake of at least a cell (64 km² in 8 km previews, 256+ km²
+    // on big planets), so per area there were 2–3× more lakes of ≥ 100 km² than at 2 km; the density
+    // scales with the cell size below SPHERE_LAKE_CELL_KM (research 11 §6).
+    const lakeDensity = ctx.num('lakeDensity') * (sphere ? Math.min(1, SPHERE_LAKE_CELL_KM / cellKm) : 1);
     const riverDensity = ctx.num('riverDensity');
     const stats: Record<string, number> = { n, cellKm };
     let tLap = performance.now();
@@ -362,7 +373,7 @@ export const hydroStage: StageDef = {
     const chLandKm2 = sphere ? chLandArea : chLand * cellKm2;
     const pts = sphere ? riverPoints(rivers, g.radiusM) : null;
     const lengthKm = channelLengthKm(rivers, pts);
-    const ddExpected = DD_COEF / Math.sqrt(ath);
+    const ddExpected = (sphere ? DD_COEF_SPHERE : DD_COEF) / Math.sqrt(ath);
     let toSea = 0;
     let waterfalls = 0;
     let rapids = 0;

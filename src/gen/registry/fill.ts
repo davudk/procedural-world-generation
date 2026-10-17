@@ -280,6 +280,12 @@ function patches(I: RegistryInput, S: Shared, B: Band, far: (c: number) => boole
  * Runs after the world-band budget (on what it kept) and is not budgeted itself; marked `wFill`.
  */
 const W_FILL_FRAC = 0.15;
+/**
+ * Spheres: the W fill starts farther out. A planet holds ~5 W views of land and every fill region is big
+ * enough to count at the globe band too (globe views showing ~2.4 W views of land went past 60 features);
+ * W empty disks still stay within their 200 km cap at this distance (research 11 §4).
+ */
+const SPHERE_W_FILL_FRAC = 0.2;
 const W_FILL_RADIUS_FRAC = 0.07;
 /** Share of the land in the disk the dominant cover needs. */
 const W_FILL_MIN_SHARE = 0.4;
@@ -319,7 +325,7 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[], scale?:
   for (const l of I.lakes) if (l.type !== 'playa' && Math.sqrt(l.areaKm2) * 1000 >= lo) mark(geo.enc(l.face, l.cx), l.cy);
   for (const f of I.landforms.features) if (LANDFORM_PLACES.has(f.type) && f.size >= lo) mark(geo.enc(f.face, f.x), f.y);
   const rad = (scale ? scale.radM : W_FILL_RADIUS_FRAC * worldM) / R.cellM;
-  const need = (scale ? scale.needM : W_FILL_FRAC * worldM) / R.cellM;
+  const need = (scale ? scale.needM : (S.geo.sphere ? SPHERE_W_FILL_FRAC : W_FILL_FRAC) * worldM) / R.cellM;
   const rKm2 = (R.cellM / 1000) ** 2;
   const covers: [string, string, number[]][] = [
     ['forest', 'taiga', [G.BOREAL]], ['forest', 'forest', [G.TEMPERATE]], ['forest', 'jungle', [G.TROPICAL]],
