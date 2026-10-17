@@ -147,8 +147,11 @@ async function runPool(jobs: WorldJob[], workers: number, onDone: (m: WorldMetri
       });
       next();
     };
-    for (let k = 0; k < Math.min(workers, queue.length); k++) start();
-    if (queue.length === 0) resolveAll();
+    // Fixed before starting: each start takes a job, and with fewer jobs than workers an emptied queue
+    // used to resolve the pool before the started workers reported.
+    const n = Math.min(workers, queue.length);
+    for (let k = 0; k < n; k++) start();
+    if (n === 0) resolveAll();
   });
 }
 
