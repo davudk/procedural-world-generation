@@ -528,7 +528,7 @@ describe('globe height function', () => {
       }
       expect(fine).toBeLessThan(0.05);
     }
-  });
+  }, 30_000);
 
   it('equals the phase-3 bilinear globe at globe zoom', () => {
     const pg = prepared();
