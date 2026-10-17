@@ -6,12 +6,14 @@ import { OrbitController } from './input/orbitController';
 import { worldToMapKm } from './render/camera/ground';
 import { Camera } from './render/camera2d';
 import { FramePacer } from './render/framePacer';
+import { GlobeMinimap } from './render/globeMinimap';
 import { Minimap } from './render/minimap';
 import { RasterView, sampleLayer } from './render/rasterView';
 import { equirectLatLon, projectSphereLayer, type ProjectedLayer, type SphereProjection } from './render/sphereProjection';
 import { parseQualityChoice, pickQuality, probeDevice, type QualityChoice } from './render/quality';
 import { WorldView } from './render/worldView';
 import { fmtNum, resolve } from './shared/config/resolve';
+import { dirToCell } from './shared/cube';
 import type { WorldShape, WorldSpec } from './shared/config/types';
 import { queryToSpec, specToQuery } from './shared/config/url';
 import type { Landmark, WorldTraits } from './shared/landmarks';
@@ -54,6 +56,7 @@ let outcomes: Record<string, number> = {};
 const world = new WorldView(canvas);
 const orbit = new OrbitController(canvas, world.cam);
 const minimap = new Minimap($('layers'), world.cam);
+const globeMinimap = new GlobeMinimap($('layers'), world.globeCam);
 const compass = new Compass($('compass-host'), world.cam);
 // Time of day, season and clouds (M9 view settings, stored locally; T animates the time).
 $('legend').before(new ViewControls($('layers'), (s) => Object.assign(world.view, s)).el);
@@ -72,8 +75,8 @@ let genShape: WorldShape | null = null;
 let sphereProjection: SphereProjection = readStored(PROJECTION_KEY) === 'net' ? 'net' : 'equirect';
 /** The projected sphere layer on screen (null for flat maps). */
 let sphereShown: ProjectedLayer | null = null;
-/** A sphere switched the view to 2D; a flat world switches it back. */
-let forced2d = false;
+/** Sphere layers last handed to the globe (elevation, climate, drape). */
+let globeShown: { elev: Layer | null; temp: Layer | null; drape: Layer | null | undefined } = { elev: null, temp: null, drape: undefined };
 
 // ── Mobile pass: quality tier, idle frame cap, context loss, export (M9) ──────────────────
 
@@ -88,7 +91,7 @@ const applyQuality = (): void => {
 const pacer = new FramePacer(world.quality.idleFps);
 applyQuality();
 
-// Short notices (e.g. "globe view arrives in phase 3"), faded out after a few seconds.
+// Short notices, faded out after a few seconds.
 const noticeEl = document.createElement('div');
 noticeEl.className = 'view-notice hidden';
 noticeEl.setAttribute('role', 'status');
@@ -304,6 +307,20 @@ function clearWorld(): void {
   world.setLandmarks([]);
   atlas.set([], null);
   sphereShown = null;
+  world.clearGlobe();
+  globeShown = { elev: null, temp: null, drape: undefined };
+  terrainShown = null;
+  surfaceShown = null;
+  drapeShown = undefined;
+  syncCamera();
+}
+
+/** Input, compass and minimap follow the camera of the world shape on show. */
+function syncCamera(): void {
+  orbit.cam = world.activeCam;
+  compass.cam = world.activeCam;
+  minimap.el.hidden = world.sphere;
+  globeMinimap.el.hidden = !world.sphere;
 }
 
 function onGenEvent(msg: FromWorker): void {
@@ -380,11 +397,6 @@ function showSelected(): void {
   }
   sphereShown = null;
   projectionEl.hidden = true;
-  if (forced2d) {
-    // Back to a flat world after a sphere forced the 2D view: restore the 3D view.
-    forced2d = false;
-    setMode('3d', false);
-  }
   view.setLayer(l);
   pacer.wake();
   const elev = layers.get('elevation');
@@ -439,6 +451,7 @@ function showSelected(): void {
     drapeShown = drape;
     world.setDrape(drape);
   }
+  syncCamera();
   if (fittedFor !== l.worldKm) {
     fittedFor = l.worldKm;
     fitView();
@@ -451,19 +464,35 @@ function showSelected(): void {
 }
 
 /**
- * A cube-sphere layer in the 2D view: projected on the main thread (cached per layer). The 3D view
- * has no globe renderer yet, so spheres always show in 2D (research 10 §8, Phase 3).
+ * A cube-sphere layer: projected on the main thread for the 2D view (cached per layer), and handed
+ * to the globe in 3D (research 10 §6). The globe shows the latest elevation, coloured by climate
+ * once it exists; any other layer drapes over it.
  */
 function showSphere(l: Layer): void {
   const shown = projectSphereLayer(l, sphereProjection);
   sphereShown = shown;
   view.setLayer(shown);
   pacer.wake();
-  if (mode === '3d') {
-    notice('Globe view arrives in phase 3 — showing the 2D map');
-    forced2d = true;
-    setMode('2d', false);
+  const elev = layers.get('elevation') ?? layers.get('lemElevation') ?? layers.get('h0');
+  if (elev && elev.faces === 6 && elev !== globeShown.elev) {
+    if (!globeShown.elev && mode === '3d') notice('Globe view: no close-zoom detail, rivers, labels or clouds on spheres yet');
+    globeShown.elev = elev;
+    world.setGlobe(elev);
+    globeMinimap.setTerrain(elev);
   }
+  const temp = layers.get('temperature');
+  if (temp && temp.faces === 6 && temp !== globeShown.temp) {
+    globeShown.temp = temp;
+    world.setGlobeSurface({
+      temperature: temp, precip: layers.get('precip') ?? null, summerRain: layers.get('summerRain') ?? null, tempRange: layers.get('tempRange') ?? null,
+    });
+  }
+  const drape = l.kind === 'elevation' ? null : l;
+  if (drape !== globeShown.drape) {
+    globeShown.drape = drape;
+    world.setGlobeDrape(drape);
+  }
+  syncCamera();
   projectionEl.hidden = false;
   projectionEl.textContent = sphereProjection === 'net' ? 'Show map' : 'Show cube net';
   const key = `${shown.projection}:${shown.worldKm}`;
@@ -481,6 +510,10 @@ function showSphere(l: Layer): void {
 function inspect(sx: number, sy: number): void {
   let x = cam.screenToWorldX(sx);
   let y = cam.screenToWorldY(sy);
+  if (mode === '3d' && world.sphere) {
+    inspectGlobe(sx, sy);
+    return;
+  }
   if (sphereShown) {
     inspectSphere(sphereShown, x, y);
     return;
@@ -524,6 +557,27 @@ function inspectSphere(shown: ProjectedLayer, x: number, y: number): void {
     const e = sampleLayer(projectSphereLayer(elev, shown.projection), x, y);
     if (e !== null) lines.push(`Elevation: ${fmtNum(e)} m`);
   }
+  inspectEl.textContent = lines.join('\n');
+}
+
+/** Inspector on the globe: latitude / longitude of the picked point and the raw face values there. */
+function inspectGlobe(sx: number, sy: number): void {
+  const p = world.globeCam.pick(sx, sy);
+  const l = layers.get(shownLayerId());
+  if (!p || !l || l.faces !== 6) {
+    inspectEl.textContent = '';
+    return;
+  }
+  const r = Math.hypot(p.x, p.y, p.z);
+  const lat = (Math.asin(p.z / r) * 180) / Math.PI;
+  const lon = (Math.atan2(p.y, p.x) * 180) / Math.PI;
+  const at = (layer: Layer): number => layer.data[dirToCell(p.x, p.y, p.z, layer.w)];
+  const lines = [
+    `${Math.abs(lat).toFixed(2)}° ${lat >= 0 ? 'N' : 'S'}, ${Math.abs(lon).toFixed(2)}° ${lon >= 0 ? 'E' : 'W'}`,
+    `${l.label}: ${fmtNum(at(l))} ${l.unit}`,
+  ];
+  const elev = layers.get('elevation');
+  if (elev && elev !== l && elev.faces === 6) lines.push(`Elevation: ${fmtNum(at(elev))} m`);
   inspectEl.textContent = lines.join('\n');
 }
 
@@ -576,10 +630,12 @@ function frame(now: number): void {
   if (mode === '3d') {
     world.resize();
     orbit.update(dt);
-    world.cam.update(dt);
+    if (world.sphere) world.globeCam.update(dt);
+    else world.cam.update(dt);
     if (pacer.shouldDraw(now, world.needsFrame, true)) {
       world.draw(now / 1000);
-      minimap.draw();
+      if (world.sphere) globeMinimap.draw();
+      else minimap.draw();
       compass.update();
     }
   } else {
@@ -594,16 +650,10 @@ function frame(now: number): void {
   requestAnimationFrame(frame);
 }
 
-/** `persist` = false for switches the app makes on its own (a sphere forcing the 2D view). */
-function setMode(m: '3d' | '2d', persist = true): void {
-  if (persist) forced2d = false;
-  if (m === '3d' && sphereShown) {
-    notice('Globe view arrives in phase 3 — showing the 2D map');
-    m = '2d';
-  }
+function setMode(m: '3d' | '2d'): void {
   mode = m;
   pacer.wake();
-  if (persist) writeStored(MODE_KEY, m);
+  writeStored(MODE_KEY, m);
   orbit.enabled = m === '3d';
   camCtl.enabled = m === '2d';
   document.body.classList.toggle('mode-2d', m === '2d');

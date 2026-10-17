@@ -2,6 +2,12 @@ import type { Landmark } from '../shared/landmarks';
 import type { Layer, RiverGraph } from '../shared/protocol';
 import type { GroundQuery, Vec3 } from './camera/ground';
 import { OrbitCamera } from './camera/orbitCamera';
+import { GlobeCamera } from './camera/globeCamera';
+import type { ViewCamera } from './camera/viewCamera';
+import { GlobeSkyPass, type GlobeAtmosFrame } from './globe/atmosphere';
+import { GlobeHeightField, SphereGround } from './globe/globeGround';
+import { GlobePass, type GlobeSurface } from './globe/globePass';
+import { SphereCdlodSelector } from './terrain/cdlodSphere';
 import { HeightField, prepareWater } from './heightField';
 import { CdlodSelector, GRID } from './terrain/cdlod';
 import type { Palette } from './terrain/biomeLut';
@@ -13,7 +19,7 @@ import { LabelLayer } from './labels/labelLayer';
 import { DetailMap, type DetailInput } from './terrain/detail/detailMap';
 import { SkyPass } from './lighting/sky';
 import { CloudPass } from './lighting/clouds';
-import { DEFAULT_SEASON, DEFAULT_TIME, DEFAULT_VIEW, seasonPhase, sunLight, type ViewSettings } from './lighting/sun';
+import { declination, DEFAULT_SEASON, DEFAULT_TIME, DEFAULT_VIEW, seasonPhase, sunLight, type ViewSettings } from './lighting/sun';
 import { TerrainPass, type SurfaceLayers } from './terrain/terrainPass';
 import { CreekManager } from './water/creeks/creekManager';
 import { RiverPass } from './water/rivers';
@@ -42,6 +48,8 @@ type LandformMasks = { reef: Layer | null; erg: Layer | null; crater: Layer | nu
 /**
  * The 3D world view (M2): CDLOD terrain with a water lid, orbit camera, reversed-Z where
  * EXT_clip_control exists, and MSAA (per quality tier) into a float-depth framebuffer blitted to the canvas.
+ * Sphere worlds (Sphere phase 3) draw the globe instead: six-root CDLOD, the globe camera and an
+ * atmosphere; `sphere` says which of the two the view shows.
  *
  * Every GPU object lives in the passes created by `initGpu()`; the inputs they were fed are kept here
  * as CPU copies, so a lost WebGL context is rebuilt on `webglcontextrestored` without a reload (M9).
@@ -49,7 +57,13 @@ type LandformMasks = { reef: Layer | null; erg: Layer | null; crater: Layer | nu
 export class WorldView {
   readonly gl: WebGL2RenderingContext;
   readonly cam: OrbitCamera;
+  /** Camera for sphere worlds (research 10 §6.4). */
+  readonly globeCam: GlobeCamera;
   hf: HeightField | null = null;
+  /** CPU elevation of the sphere world, when one is shown. */
+  globeHf: GlobeHeightField | null = null;
+  /** True while a sphere world is shown (the globe is drawn instead of the flat terrain). */
+  sphere = false;
   readonly reversedZ: boolean;
   /** Geometric vertical exaggeration (user setting). */
   exaggeration = 1.5;
@@ -61,6 +75,7 @@ export class WorldView {
   /** Called after a context loss (true) and after the rebuild (false). */
   onContextChange?: ((lost: boolean) => void) | undefined;
   private readonly selector = new CdlodSelector();
+  private readonly sphereSelector = new SphereCdlodSelector();
   // GPU passes: re-created by initGpu() after a context loss.
   private terrain!: TerrainPass;
   rivers!: RiverPass;
@@ -69,6 +84,8 @@ export class WorldView {
   private horizon!: HorizonPass;
   private sky!: SkyPass;
   private clouds!: CloudPass;
+  private globe!: GlobePass;
+  private globeSky!: GlobeSkyPass;
   /** Time of day, season and clouds (M9 view settings; the defaults keep the pre-M9 look). */
   view: ViewSettings = { ...DEFAULT_VIEW };
   private cloudDrift: [number, number] = [0, 0];
@@ -89,7 +106,13 @@ export class WorldView {
     highlight: number | null;
     drape: Layer | null;
     detail: DetailInput | null;
-  } = { terrain: null, surface: null, masks: null, rivers: null, landmarks: [], highlight: null, drape: null, detail: null };
+    globe: Layer | null;
+    globeSurface: GlobeSurface | null;
+    globeDrape: Layer | null;
+  } = {
+    terrain: null, surface: null, masks: null, rivers: null, landmarks: [], highlight: null, drape: null, detail: null,
+    globe: null, globeSurface: null, globeDrape: null,
+  };
   /** Camera and viewport state of the last drawn frame (to skip redraws when nothing changed). */
   private drawnKey = '';
   /** Set by uploads; cleared by draw(). */
@@ -104,6 +127,7 @@ export class WorldView {
   private fbH = 0;
   private dpr = 1;
   private fittedSize = -1;
+  private fittedRadius = -1;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     // alpha: true makes the default framebuffer RGBA8, matching the MSAA colour buffer: a multisample
@@ -114,6 +138,8 @@ export class WorldView {
     this.reversedZ = this.enableClipControl();
     this.cam = new OrbitCamera(new FlatGround(1024e3));
     this.cam.reversedZ = this.reversedZ;
+    this.globeCam = new GlobeCamera(new SphereGround(652e3));
+    this.globeCam.reversedZ = this.reversedZ;
     this.initGpu();
     // Without preventDefault() on the loss the browser never restores the context.
     canvas.addEventListener('webglcontextlost', (e) => {
@@ -137,7 +163,9 @@ export class WorldView {
     const palette = this.terrain?.palette;
     const labelsOn = this.labels?.enabled ?? true;
     this.terrain = new TerrainPass(gl);
-    if (palette) this.terrain.palette = palette;
+    this.globe = new GlobePass(gl);
+    if (palette) this.terrain.palette = this.globe.palette = palette;
+    this.globeSky = new GlobeSkyPass(gl);
     this.rivers = new RiverPass(gl);
     this.creekPass = new RiverPass(gl);
     // Creeks fade in at the zooms the camera can reach (the manager must use the same constant).
@@ -175,6 +203,9 @@ export class WorldView {
     this.labels.highlight(s.highlight);
     this.setCreekWorld(this.creekWorld);
     if (s.detail) this.detail.build(s.detail);
+    if (s.globe && this.globeHf) this.globe.setTerrain(s.globe, this.globeHf.radius);
+    this.globe.setSurface(s.globeSurface);
+    this.globe.setDrape(s.globeDrape);
     this.dirty = true;
     this.onContextChange?.(false);
   }
@@ -199,10 +230,21 @@ export class WorldView {
    */
   get needsFrame(): boolean {
     if (this.contextLost) return false;
+    if (this.sphere) return this.dirty || this.globeCam.moving || this.viewKey() !== this.drawnKey;
     return this.dirty || this.cam.moving || this.labels.animating || this.detail.building || this.viewKey() !== this.drawnKey;
   }
 
+  /** The camera the input and the compass drive: the globe camera while a sphere is shown. */
+  get activeCam(): ViewCamera {
+    return this.sphere ? this.globeCam : this.cam;
+  }
+
   private viewKey(): string {
+    if (this.sphere) {
+      const g = this.globeCam;
+      const d = g.dir;
+      return `g|${d.x}|${d.y}|${d.z}|${g.targetH}|${g.distance}|${g.pitch}|${g.bearing}|${this.canvas.width}x${this.canvas.height}|${this.exaggeration}`;
+    }
     const c = this.cam;
     const t = c.target;
     return `${t.x}|${t.y}|${t.z}|${c.distance}|${c.pitch}|${c.bearing}|${this.canvas.width}x${this.canvas.height}|${this.exaggeration}`;
@@ -210,6 +252,7 @@ export class WorldView {
 
   /** Terrain elevation plus optional water level / water class rasters (same grid). */
   setTerrain(layer: Layer, water: Layer | null = null, wclass: Layer | null = null): void {
+    this.sphere = false;
     this.src.terrain = [layer, water, wclass];
     const hf = this.uploadTerrain(layer, water, wclass);
     this.cam.setGround(hf);
@@ -242,6 +285,48 @@ export class WorldView {
   setExaggeration(x: number): void {
     this.exaggeration = x;
     if (this.hf) this.hf.exaggeration = x;
+    if (this.globeHf) this.globeHf.exaggeration = x;
+  }
+
+  /**
+   * Shows a sphere world (six-face elevation): builds the CPU height field and uploads the globe
+   * textures. The globe camera fits the planet when its radius changes, otherwise keeps the view.
+   */
+  setGlobe(layer: Layer): void {
+    this.sphere = true;
+    this.src.globe = layer;
+    const hf = new GlobeHeightField(layer);
+    hf.exaggeration = this.exaggeration;
+    this.globeHf = hf;
+    this.globeCam.setGround(hf);
+    if (this.fittedRadius !== hf.radius) {
+      this.fittedRadius = hf.radius;
+      this.globeCam.fitWorld();
+    }
+    this.dirty = true;
+    if (!this.contextLost) this.globe.setTerrain(layer, hf.radius);
+  }
+
+  /** Forgets the sphere world (the next world is flat): the view draws flat terrain again. */
+  clearGlobe(): void {
+    this.sphere = false;
+    this.globeHf = null;
+    this.src.globe = this.src.globeSurface = this.src.globeDrape = null;
+    this.dirty = true;
+  }
+
+  /** Climate layers for the globe's colours (null: hypsometric tints). */
+  setGlobeSurface(s: GlobeSurface | null): void {
+    this.src.globeSurface = s;
+    this.dirty = true;
+    if (!this.contextLost) this.globe.setSurface(s);
+  }
+
+  /** Drapes a sphere layer over the globe (null = realistic colouring). */
+  setGlobeDrape(layer: Layer | null): void {
+    this.src.globeDrape = layer;
+    this.dirty = true;
+    if (!this.contextLost) this.globe.setDrape(layer);
   }
 
   setSurface(s: SurfaceLayers | null): void {
@@ -258,6 +343,7 @@ export class WorldView {
 
   setPalette(p: Palette | 'hypsometric'): void {
     this.terrain.palette = p;
+    this.globe.palette = p;
     this.dirty = true;
   }
 
@@ -338,8 +424,8 @@ export class WorldView {
     this.dpr = pixelRatio(this.quality, window.devicePixelRatio || 1);
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
-    this.cam.viewW = w;
-    this.cam.viewH = h;
+    this.cam.viewW = this.globeCam.viewW = w;
+    this.cam.viewH = this.globeCam.viewH = h;
     const bw = Math.max(1, Math.round(w * this.dpr));
     const bh = Math.max(1, Math.round(h * this.dpr));
     if (this.canvas.width !== bw || this.canvas.height !== bh) {
@@ -374,6 +460,10 @@ export class WorldView {
     const gl = this.gl;
     this.dirty = false;
     this.drawnKey = this.viewKey();
+    if (this.sphere) {
+      this.drawGlobe(timeSec);
+      return;
+    }
     this.stepDetail();
     const W = this.canvas.width;
     const H = this.canvas.height;
@@ -468,6 +558,88 @@ export class WorldView {
       });
       gl.disable(gl.DEPTH_TEST);
       this.labels.draw({ cam, ground: this.ground ?? hf, dpr: this.dpr, timeSec, exaggeration: this.exaggeration });
+      gl.disable(gl.DEPTH_TEST);
+    }
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  /**
+   * One globe frame (Sphere phase 3): atmosphere and space, then the sphere CDLOD terrain. Lighting
+   * follows research 10 §6.5: the screen-relative cartographic sun near the surface, blending to the
+   * real sun (fixed in the planet frame, so the night side shows) as the view rises to globe zoom.
+   * The view's time is the solar time at longitude 0; the sun model's colours use the target's own
+   * local time and latitude. Detail maps, creeks, rivers, labels and clouds are flat-only for now.
+   */
+  private drawGlobe(timeSec: number): void {
+    const gl = this.gl;
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    this.ensureTargets(W, H);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+    gl.viewport(0, 0, W, H);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clearDepth(this.reversedZ ? 0 : 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    const hf = this.globeHf;
+    const cam = this.globeCam;
+    if (hf) {
+      const R = hf.radius;
+      const eye = cam.eye();
+      cam.viewProjRelative(this.viewProj, eye);
+      cam.frustumPlanesRelative(this.planes, eye);
+      const pxPerRad = cam.viewH / (2 * Math.tan(cam.fovY / 2));
+      this.nodes = this.sphereSelector.select(hf, eye, this.planes, {
+        maxDepth: SphereCdlodSelector.depthFor(hf.n), vertexPx: this.quality.vertexPx, pxPerRad, boundsPad: 0,
+      });
+      const realistic = this.globe.realistic;
+      const time = realistic ? this.view.time : DEFAULT_TIME;
+      const season = realistic ? this.view.season : DEFAULT_SEASON;
+      const [lat, lon] = cam.latLon();
+      const local = sunLight(realistic ? (((time + lon / 15) % 24) + 24) % 24 : time, season, cam.bearing, (lat * Math.PI) / 180);
+      // Cartographic sun in screen coordinates (right, up, local up).
+      const b = cam.bearing;
+      const sd = local.dir;
+      const sunCarto = [sd[0] * Math.cos(b) - sd[1] * Math.sin(b), sd[0] * Math.sin(b) + sd[1] * Math.cos(b), sd[2]] as const;
+      const ax = cam.axes();
+      const up = cam.dir;
+      const cartoWorld: [number, number, number] = [
+        sunCarto[0] * ax.r.x + sunCarto[1] * ax.fh.x + sunCarto[2] * up.x,
+        sunCarto[0] * ax.r.y + sunCarto[1] * ax.fh.y + sunCarto[2] * up.y,
+        sunCarto[0] * ax.r.z + sunCarto[1] * ax.fh.z + sunCarto[2] * up.z,
+      ];
+      // Real sun: declination from the season, sub-solar longitude from the time at longitude 0.
+      const dec = declination(season);
+      const lonS = (-(time - 12) / 24) * 2 * Math.PI;
+      const sunReal = [Math.cos(dec) * Math.cos(lonS), Math.cos(dec) * Math.sin(lonS), Math.sin(dec)] as const;
+      const altitude = cam.clearance();
+      const realK = realistic ? smoothstep(0.03 * R, 0.4 * R, cam.altitude()) : 0;
+      const atmos: GlobeAtmosFrame = { eye, radius: R, sun: realistic ? sunReal : cartoWorld, sunI: 1.0 };
+      gl.disable(gl.DEPTH_TEST);
+      this.globeSky.draw(this.viewProj, this.reversedZ, atmos, atmos.sun);
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(this.reversedZ ? gl.GEQUAL : gl.LEQUAL);
+      const ph = seasonPhase(season);
+      this.globe.draw({
+        viewProj: this.viewProj,
+        instances: this.sphereSelector.instances,
+        count: this.nodes,
+        exaggeration: this.exaggeration,
+        normalExaggeration: this.exaggeration * (1.4 + 5.0 * smoothstep(5e3, 6e5, altitude)),
+        sunCarto,
+        camRight: ax.r,
+        camUp: ax.u,
+        sunReal,
+        realK,
+        light: local.light,
+        ambient: local.ambient,
+        realistic,
+        season: realistic ? [ph.cos, ph.sin] : [1, 0],
+        time: timeSec,
+        atmos,
+      });
       gl.disable(gl.DEPTH_TEST);
     }
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbo);

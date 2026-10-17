@@ -131,6 +131,11 @@ body {
   touch-action: none;
 }
 
+/* Flat worlds show the square minimap, spheres the equirectangular one. */
+.minimap[hidden] {
+  display: none;
+}
+
 .exag {
   display: flex;
   align-items: center;
@@ -229,7 +234,7 @@ body.mode-2d #layers.collapsed {
   display: none;
 }
 
-/* Short status notices (e.g. a sphere switching to the 2D map), top centre. */
+/* Short status notices (e.g. what the globe view does not show yet), top centre. */
 .view-notice {
   position: fixed;
   left: 50%;
@@ -260,6 +265,11 @@ body.mode-2d #layers.collapsed {
   border: 1px solid var(--panel-border);
   border-radius: 4px;
   cursor: pointer;
+}
+
+/* The projection only applies to the 2D map; the 3D view shows the globe. */
+body:not(.mode-2d) .projection-toggle {
+  display: none;
 }
 
 .gl-lost button {

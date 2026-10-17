@@ -92,10 +92,10 @@ const NIGHT_ZENITH: Rgb = [0.012, 0.02, 0.05];
 
 /**
  * Light for a time, season and camera bearing (rad). The defaults reproduce the pre-M9 constants
- * exactly: every colour ramp saturates above ~27° of sun elevation.
+ * exactly: every colour ramp saturates above ~27° of sun elevation. Globes pass the target's latitude.
  */
-export function sunLight(time: number, season: number, bearing: number): SunLight {
-  const v = solarVector(time, season);
+export function sunLight(time: number, season: number, bearing: number, lat = LATITUDE): SunLight {
+  const v = solarVector(time, season, lat);
   const sinEl = v[2];
   const cosEl = Math.sqrt(Math.max(0, 1 - sinEl * sinEl));
   // Cartographic azimuth (light from the top-left of the screen) plus the true solar azimuth change.

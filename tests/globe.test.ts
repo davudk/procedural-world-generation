@@ -4,6 +4,7 @@ import { acrossCell, dirToFaceAngles, faceEdges, padFaces, PAD } from '../src/re
 import { GlobeCamera } from '../src/render/camera/globeCamera';
 import { wrapAngle } from '../src/render/camera/orbitCamera';
 import { GlobeHeightField, SphereGround } from '../src/render/globe/globeGround';
+import { sphereGradients } from '../src/render/globe/globePass';
 import { hullBelowHorizon, SphereCdlodSelector, type SphereNode } from '../src/render/terrain/cdlodSphere';
 import { faceDir, latLonDir } from '../src/shared/cube';
 import { Rng } from '../src/shared/rng';
@@ -68,6 +69,38 @@ describe('cube-face texture padding (research 10 §6.2)', () => {
       expect(list.length).toBe(3);
       for (const v of list) expect(v).toBeCloseTo(list[0], 4);
     }
+  });
+});
+
+describe('globe surface gradients', () => {
+  it('match the analytic gradient of a smooth field, also on face borders', () => {
+    const n = 64;
+    const R = 652e3;
+    const d = new Float64Array(3);
+    const h = new Float32Array(6 * n * n);
+    const dirs = new Float64Array(6 * n * n * 3);
+    for (let f = 0; f < 6; f++) {
+      for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) {
+          const i = (f * n + y) * n + x;
+          faceDir(f, ((x + 0.5) / n - 0.5) * (Math.PI / 2), ((y + 0.5) / n - 0.5) * (Math.PI / 2), d);
+          dirs.set(d, i * 3);
+          h[i] = 5000 + 3000 * d[2];
+        }
+      }
+    }
+    const g = sphereGradients(h, n, R);
+    let worst = 0;
+    for (let i = 0; i < 6 * n * n; i++) {
+      const z = dirs[i * 3 + 2];
+      // ∇(3000·z) on the sphere of radius R: (3000 / R)(ẑ − z·p̂).
+      const ex = (3000 / R) * (0 - z * dirs[i * 3]);
+      const ey = (3000 / R) * (0 - z * dirs[i * 3 + 1]);
+      const ez = (3000 / R) * (1 - z * z);
+      worst = Math.max(worst, Math.hypot(g[i * 4] - ex, g[i * 4 + 1] - ey, g[i * 4 + 2] - ez) / (3000 / R));
+    }
+    // Central differences over mirror cells at the seams: a few per cent at most.
+    expect(worst).toBeLessThan(0.05);
   });
 });
 

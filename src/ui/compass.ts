@@ -1,5 +1,5 @@
 import './compass.css';
-import type { OrbitCamera } from '../render/camera/orbitCamera';
+import type { ViewCamera } from '../render/camera/viewCamera';
 
 const ROTATE_PER_PX = 0.012; // rad of bearing per px of horizontal drag
 const CLICK_SLOP_PX = 3;
@@ -15,7 +15,7 @@ export class Compass {
   private lastBearing = NaN;
   private lastPitch = NaN;
 
-  constructor(parent: HTMLElement, private readonly cam: OrbitCamera) {
+  constructor(parent: HTMLElement, public cam: ViewCamera) {
     this.el = document.createElement('div');
     this.el.className = 'compass';
     this.el.tabIndex = 0;

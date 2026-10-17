@@ -1,5 +1,5 @@
 import type { Vec3 } from '../render/camera/ground';
-import type { OrbitCamera } from '../render/camera/orbitCamera';
+import type { ViewCamera } from '../render/camera/viewCamera';
 import { classifyWheel, isTypingTarget } from './cameraController';
 
 const ZOOM_STEP = 0.0016;    // mouse wheel, per delta pixel
@@ -62,7 +62,8 @@ export class OrbitController {
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
-    private readonly cam: OrbitCamera,
+    /** The camera driven (swapped for the globe camera while a sphere is shown). */
+    public cam: ViewCamera,
   ) {
     canvas.style.touchAction = 'none';
     canvas.addEventListener('pointerdown', this.onDown);
