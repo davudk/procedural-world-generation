@@ -7,6 +7,10 @@ import { applyViewSize, type ViewCamera } from './camera/viewCamera';
 import { GlobeSkyPass, type GlobeAtmosFrame } from './globe/atmosphere';
 import { GlobeHeightField, SphereGround } from './globe/globeGround';
 import { GlobePass, type GlobeSurface } from './globe/globePass';
+import { GlobeDetail, globeDetailOptions } from './globe/globeDetail';
+import type { GlobeDetailWorld } from './globe/detailTiles';
+import { GlobeDetailUniforms } from './glsl/globeDetail';
+import { GlobeDetailGround } from './height/globeHeightFn';
 import { SphereCdlodSelector } from './terrain/cdlodSphere';
 import { HeightField, prepareWater } from './heightField';
 import { CdlodSelector, GRID } from './terrain/cdlod';
@@ -94,6 +98,13 @@ export class WorldView {
   private detailU!: DetailUniforms;
   private detailSeen = -1;
   private ground: DetailGround | null = null;
+  /** Streamed close-zoom detail tiles of the sphere world (Sphere phase 4b). */
+  globeDetail!: GlobeDetail;
+  private globeDetailU!: GlobeDetailUniforms;
+  private globeDetailSeen = -1;
+  private globeGround: GlobeDetailGround | null = null;
+  private globeDetailTier = '';
+  private lastGlobeTime = -1;
   labels!: LabelLayer;
   private creekWorld: CreekWorld | null = null;
   // CPU copies of everything uploaded, replayed after a context loss.
@@ -109,9 +120,10 @@ export class WorldView {
     globe: Layer | null;
     globeSurface: GlobeSurface | null;
     globeDrape: Layer | null;
+    globeDetail: GlobeDetailWorld | null;
   } = {
     terrain: null, surface: null, masks: null, rivers: null, landmarks: [], highlight: null, drape: null, detail: null,
-    globe: null, globeSurface: null, globeDrape: null,
+    globe: null, globeSurface: null, globeDrape: null, globeDetail: null,
   };
   /** Camera and viewport state of the last drawn frame (to skip redraws when nothing changed). */
   private drawnKey = '';
@@ -176,6 +188,7 @@ export class WorldView {
     this.detail = new DetailMap(gl);
     this.detailU = new DetailUniforms(this.detail);
     this.detailSeen = -1;
+    this.newGlobeDetail();
     this.labels = new LabelLayer(gl);
     // The cloud pass holds no data of its own: its climate texture is TerrainPass.climate2 (rebuilt
     // by setSurface, which restore() replays) and everything else is per-frame uniforms.
@@ -204,6 +217,7 @@ export class WorldView {
     this.setCreekWorld(this.creekWorld);
     if (s.detail) this.detail.build(s.detail);
     if (s.globe && this.globeHf) this.globe.setTerrain(s.globe, this.globeHf.radius);
+    this.globeDetail.setWorld(s.globeDetail);
     this.globe.setSurface(s.globeSurface);
     this.globe.setDrape(s.globeDrape);
     this.dirty = true;
@@ -213,6 +227,22 @@ export class WorldView {
   setQuality(q: QualitySettings): void {
     this.quality = q;
     this.dirty = true;
+    // Tile size and the LRU budget follow the tier: rebuild the tile set when it changes.
+    if (this.globeDetail && q.tier !== this.globeDetailTier && !this.contextLost) {
+      this.globeDetail.dispose();
+      this.newGlobeDetail();
+      this.globeDetail.setWorld(this.src.globeDetail);
+    }
+  }
+
+  /** A fresh tile set for the current quality tier (no world yet). */
+  private newGlobeDetail(): void {
+    this.globeDetail = new GlobeDetail(this.gl, globeDetailOptions(this.quality.tier));
+    this.globeDetailTier = this.quality.tier;
+    this.globeDetailU ??= new GlobeDetailUniforms();
+    this.globeDetailU.src = this.globeDetail;
+    this.globeDetailSeen = -1;
+    this.globeGround = null;
   }
 
   /** Starts building the close-zoom detail map (time-sliced in draw()). */
@@ -230,7 +260,7 @@ export class WorldView {
    */
   get needsFrame(): boolean {
     if (this.contextLost) return false;
-    if (this.sphere) return this.dirty || this.globeCam.moving || this.viewKey() !== this.drawnKey;
+    if (this.sphere) return this.dirty || this.globeCam.moving || this.globeDetail.busy || this.viewKey() !== this.drawnKey;
     return this.dirty || this.cam.moving || this.labels.animating || this.detail.building || this.viewKey() !== this.drawnKey;
   }
 
@@ -292,26 +322,36 @@ export class WorldView {
    * Shows a sphere world (six-face elevation): builds the CPU height field and uploads the globe
    * textures. The globe camera fits the planet when its radius changes, otherwise keeps the view.
    */
-  setGlobe(layer: Layer): void {
+  setGlobe(layer: Layer, detail: Omit<GlobeDetailWorld, 'n' | 'radius' | 'elevation'> | null = null): void {
     this.sphere = true;
     this.src.globe = layer;
     const hf = new GlobeHeightField(layer);
     hf.exaggeration = this.exaggeration;
     this.globeHf = hf;
+    this.globeGround = null;
     this.globeCam.setGround(hf);
+    this.globeCam.minMetresPerPixel = 40;
     if (this.fittedRadius !== hf.radius) {
       this.fittedRadius = hf.radius;
       this.globeCam.fitWorld();
     }
     this.dirty = true;
-    if (!this.contextLost) this.globe.setTerrain(layer, hf.radius);
+    // Close-zoom detail tiles amplify this elevation (rebuilt from scratch for every new layer).
+    this.src.globeDetail = detail ? { ...detail, n: hf.n, radius: hf.radius, elevation: hf.data } : null;
+    if (!this.contextLost) {
+      this.globe.setTerrain(layer, hf.radius);
+      this.globeDetail.setWorld(this.src.globeDetail);
+    }
   }
 
   /** Forgets the sphere world (the next world is flat): the view draws flat terrain again. */
   clearGlobe(): void {
     this.sphere = false;
     this.globeHf = null;
+    this.globeGround = null;
     this.src.globe = this.src.globeSurface = this.src.globeDrape = null;
+    this.src.globeDetail = null;
+    if (!this.contextLost) this.globeDetail.setWorld(null);
     this.dirty = true;
   }
 
@@ -591,9 +631,25 @@ export class WorldView {
       cam.viewProjRelative(this.viewProj, eye);
       cam.frustumPlanesRelative(this.planes, eye);
       const pxPerRad = cam.viewH / (2 * Math.tan(cam.fovY / 2));
+      const pxScale = (2 * Math.tan(cam.fovY / 2)) / Math.max(1, cam.viewH);
+      const gd = this.globeDetail;
+      const dt = this.lastGlobeTime < 0 ? 0 : Math.min(0.1, Math.max(0, timeSec - this.lastGlobeTime));
+      this.lastGlobeTime = timeSec;
+      const detailOn = gd.params !== null && gd.fn !== null;
+      const pad = detailOn ? gd.boundsPad * this.exaggeration : 0;
+      // Stream tiles around the camera, time-sliced: ~2-3 ms of CPU + estimated GPU work per frame.
+      gd.update({ eye, pxScale, planes: this.planes, maxHeight: hf.maxHeight + pad }, dt, cam.moving ? 2 : 3);
+      this.syncGlobeGround(hf);
+      // With detail, leaves every ~16 m as on flat maps; without, every 1/8 cell.
+      const faceM = (Math.PI / 2) * R;
+      const maxDepth = detailOn ? Math.max(SphereCdlodSelector.depthFor(hf.n), Math.ceil(Math.log2(faceM / (GRID * 16)))) : SphereCdlodSelector.depthFor(hf.n);
       this.nodes = this.sphereSelector.select(hf, eye, this.planes, {
-        maxDepth: SphereCdlodSelector.depthFor(hf.n), vertexPx: this.quality.vertexPx, pxPerRad, boundsPad: 0,
+        maxDepth, vertexPx: this.quality.vertexPx, pxPerRad, boundsPad: pad,
       });
+      if (this.globeGround) {
+        const mpp = cam.metresPerPixel();
+        this.globeGround.pxFoot = Math.max(Number.isFinite(mpp) ? mpp : 1e6, faceM / 2 ** maxDepth / GRID);
+      }
       const realistic = this.globe.realistic;
       const time = realistic ? this.view.time : DEFAULT_TIME;
       const season = realistic ? this.view.season : DEFAULT_SEASON;
@@ -639,6 +695,9 @@ export class WorldView {
         season: realistic ? [ph.cos, ph.sin] : [1, 0],
         time: timeSec,
         atmos,
+        detail: this.globeDetailU,
+        eye,
+        pxScale,
       });
       gl.disable(gl.DEPTH_TEST);
     }
@@ -646,6 +705,26 @@ export class WorldView {
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
     gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  /**
+   * Swaps the globe camera onto the detailed ground once the sphere detail is prepared (and back onto the
+   * macro height field when it goes away); the closest zoom follows (8 m/px with detail, 40 without).
+   */
+  private syncGlobeGround(hf: GlobeHeightField): void {
+    const gd = this.globeDetail;
+    if (gd.version === this.globeDetailSeen) return;
+    this.globeDetailSeen = gd.version;
+    if (gd.fn && gd.params) {
+      gd.fn.amp = this.globeDetailU.amp;
+      this.globeGround = new GlobeDetailGround(gd.fn, hf, gd.boundsPad);
+      this.globeCam.setGround(this.globeGround);
+      this.globeCam.minMetresPerPixel = 8;
+    } else if (this.globeGround) {
+      this.globeGround = null;
+      this.globeCam.setGround(hf);
+      this.globeCam.minMetresPerPixel = 40;
+    }
   }
 
   /** Advances the detail build and swaps in the detail-aware ground when a new version lands. */

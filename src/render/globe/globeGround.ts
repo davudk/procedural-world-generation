@@ -78,10 +78,11 @@ export class GlobeHeightField implements GlobeGround {
     this.delta = Math.PI / 2 / n;
     this.cellM = this.delta * this.radius;
     this.data = layer.data instanceof Float32Array ? layer.data : Float32Array.from(layer.data);
-    const surface = new Float32Array(this.data.length);
-    for (let i = 0; i < surface.length; i++) surface[i] = Math.max(0, this.data[i]);
     this.m = n + 2 * PAD;
-    this.padded = padFaces(surface, n);
+    // Pad the raw elevation, then lid it, as the shader does per fetched texel (the corner texels are
+    // means of raw cells, so lidding first would differ there).
+    this.padded = padFaces(this.data, n);
+    for (let i = 0; i < this.padded.length; i++) this.padded[i] = Math.max(0, this.padded[i]);
     const m = this.m;
     for (let f = 0; f < 6; f++) {
       // Level 0 spans each cell's 3×3 neighbourhood (across seams through the padding): a bilinear

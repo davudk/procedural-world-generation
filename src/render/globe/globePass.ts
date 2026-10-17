@@ -5,6 +5,8 @@ import { buildBiomeLut, LUT_SIZE, type Palette } from '../terrain/biomeLut';
 import { GRID } from '../terrain/cdlod';
 import { SPHERE_INSTANCE_FLOATS, SPHERE_MAX_NODES } from '../terrain/cdlodSphere';
 import { bindGlobeAtmos, GLOBE_ATMOS_GLSL, type GlobeAtmosFrame } from './atmosphere';
+import { GLOBE_DETAIL_GLSL, type GlobeDetailUniforms } from '../glsl/globeDetail';
+import type { Vec3 } from '../camera/ground';
 import { FACE_C, FACE_E, FACE_S, faceDir } from '../../shared/cube';
 import { acrossCell, arrayTexture, PAD, padFaces, SIDE_E, SIDE_N, SIDE_S, SIDE_W, uploadArray } from './cubeTex';
 
@@ -50,11 +52,14 @@ layout(location = 3) in vec3 a_lod;      // level, morph start, morph end (m)
 uniform mat4 u_viewProj;
 uniform float u_radius;
 uniform float u_exag;
+uniform float u_pxScale;   // 2·tan(fovY/2) / viewport height: metres per pixel per metre of distance
 ${CUBE_GLSL}
+${GLOBE_DETAIL_GLSL}
 ${GLOBE_ATMOS_GLSL}
 out vec2 v_ang;
 flat out int v_face;
 out vec3 v_rel;
+out vec3 v_relSea;   // the sea-level point dir·R relative to the eye (noise argument, precise)
 out vec3 v_air;     // aerial perspective: in-scattered light and transmittance, per vertex (smooth)
 out vec3 v_trans;
 
@@ -87,11 +92,16 @@ void main() {
   vec2 off = (g / ${GRID}.0 - 0.5) * S;
   vec3 dd = dirOffset(f, c0, off, F0, L0);
   vec2 ang = c0 + off;
-  float h = heightAt(f, ang).y * u_exag;
-  vec3 rel = a_centre + u_radius * dd + h * (dir0 + dd);
+  vec3 relSea = a_centre + u_radius * dd;
+  // Geometry can't hold wavelengths under ~2 vertex spacings: the footprint is at least the spacing and
+  // grows with the morph, so detail octaves fade together with vertex snapping (as on flat maps).
+  float foot = max(d0 * u_pxScale, S * u_radius / ${GRID}.0 * (1.0 + k));
+  float h = (u_gOn == 1 ? globeSurface(f, ang, relSea, foot) : heightAt(f, ang).y) * u_exag;
+  vec3 rel = relSea + h * (dir0 + dd);
   v_ang = ang;
   v_face = f;
   v_rel = rel;
+  v_relSea = relSea;
   vec3 trans;
   v_air = atmosphere(u_eyeP, normalize(rel), length(rel), 8, trans);
   v_trans = trans;
@@ -105,6 +115,7 @@ precision highp sampler2DArray;
 in vec2 v_ang;
 flat in int v_face;
 in vec3 v_rel;
+in vec3 v_relSea;
 in vec3 v_air;
 in vec3 v_trans;
 uniform float u_radius;
@@ -129,6 +140,7 @@ uniform int u_realistic;
 uniform vec2 u_season;             // seasonal phase (cos, sin); (1, 0) at the warm peak
 uniform float u_time;
 ${CUBE_GLSL}
+${GLOBE_DETAIL_GLSL}
 ${COLORMAPS_GLSL}
 out vec4 o;
 
@@ -210,11 +222,16 @@ void main() {
   float texelsPerPx = length(fwidth(ang)) / delta;
   // Close up, smooth the cell structure of the coast (bilinear far out, where cells are a few px).
   float smoothK = 1.0 - smoothstep(0.08, 0.25, texelsPerPx);
-  float h = smoothK > 0.0 ? mix(hs.x, heightSmooth(f, ang), smoothK) : hs.x;
+  float pxFoot = length(fwidth(v_rel));
+  // Close-zoom detail (streamed tiles + 3D octaves) replaces the B-spline rounding when it exists.
+  float tD = gDetailWeight(pxFoot);
+  vec4 ds = tD > 0.0 ? globeSample(f, ang, v_relSea, pxFoot) : vec4(hs.x, 0.0, 0.0, 0.0);
+  float h = u_gOn == 1 ? ds.x : smoothK > 0.0 ? mix(hs.x, heightSmooth(f, ang), smoothK) : hs.x;
   bool water = h < 0.0;
   // Mipmapped gradient: smooth normals, no aliasing when cells are smaller than a pixel.
   vec3 grad = textureLod(u_grad, vec3((ang + QUARTER) / 1.5707963267948966, float(f)), max(0.0, log2(max(texelsPerPx, 1e-6)) - 0.5)).xyz;
   grad -= dot(grad, up) * up;
+  if (tD > 0.0) grad = mix(grad, ds.yzw, tD);
   vec3 n = normalize(up - grad * u_normalExag);
 
   // Light: the screen-relative cartographic sun in every pixel's own tangent frame, blended to the real sun.
@@ -231,7 +248,6 @@ void main() {
   }
 
   vec3 V = normalize(-v_rel);
-  float pxFoot = length(fwidth(v_rel));
   vec3 P = up * (u_radius + hs.y * u_exag);
   vec4 cl = u_hasClimate == 1 ? climateAt(f, ang) : vec4(15.0, 1.0, 0.5, 10.0);
   float tNow = cl.r + cl.a * u_season.x;
@@ -300,6 +316,10 @@ export interface GlobeFrame {
   season: readonly [number, number];
   time: number;
   atmos: GlobeAtmosFrame;
+  /** Close-zoom detail (uniforms and textures), the eye (planet-centred, float64) and 2·tan(fovY/2)/viewH. */
+  detail: GlobeDetailUniforms;
+  eye: Vec3;
+  pxScale: number;
 }
 
 /** Climate rasters for globe colouring (any face grid). */
@@ -347,6 +367,7 @@ export class GlobePass {
       'u_viewProj', 'u_radius', 'u_exag', 'u_normalExag', 'u_faceC', 'u_faceE', 'u_faceS', 'u_height', 'u_hn', 'u_grad',
       'u_climate', 'u_cn', 'u_hasClimate', 'u_lut', 'u_palette', 'u_layer', 'u_ln', 'u_layerMode', 'u_layerMin', 'u_layerMax',
       'u_sunCarto', 'u_camRight', 'u_camUp', 'u_sunReal', 'u_realK', 'u_lightCol', 'u_ambient', 'u_realistic', 'u_season', 'u_time',
+      'u_pxScale',
     ] as const);
 
     const verts = new Float32Array((GRID + 1) * (GRID + 1) * 2);
@@ -511,6 +532,7 @@ export class GlobePass {
     gl.uniform1i(u.u_realistic, f.realistic ? 1 : 0);
     gl.uniform2f(u.u_season, f.season[0], f.season[1]);
     gl.uniform1f(u.u_time, f.time);
+    gl.uniform1f(u.u_pxScale, f.pxScale);
     const bindArr = (unit: number, tex: WebGLTexture, loc: WebGLUniformLocation | null): void => {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
@@ -523,6 +545,7 @@ export class GlobePass {
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
     gl.uniform1i(u.u_lut, 4);
+    f.detail.bind(gl, this.prog, 5, f.eye);
     bindGlobeAtmos(gl, this.prog, f.atmos);
     gl.bindVertexArray(this.vao);
     gl.drawElementsInstanced(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_SHORT, 0, f.count);

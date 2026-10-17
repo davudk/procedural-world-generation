@@ -475,9 +475,24 @@ function showSphere(l: Layer): void {
   pacer.wake();
   const elev = layers.get('elevation') ?? layers.get('lemElevation') ?? layers.get('h0');
   if (elev && elev.faces === 6 && elev !== globeShown.elev) {
-    if (!globeShown.elev && mode === '3d') notice('Globe view: no close-zoom detail, rivers, labels or clouds on spheres yet');
+    if (!globeShown.elev && mode === '3d') notice('Globe view: no rivers, labels or clouds on spheres yet');
     globeShown.elev = elev;
-    world.setGlobe(elev);
+    // Close-zoom detail tiles. Hook for the sphere hydrology stage: pass waterLevel / waterClass /
+    // discharge (6-face layers on the elevation grid) and `rivers` (SphereRivers: the river graph plus
+    // node directions) once they exist; tiles then carve channels and valleys. Without them the sea
+    // at 0 is the only water and nothing is carved.
+    const face6 = (id: string): Layer | null => {
+      const x = layers.get(id);
+      return x && x.faces === 6 && x.w === elev.w && x.stage === elev.stage ? x : null;
+    };
+    world.setGlobe(elev, {
+      seed: spec.seed,
+      waterLevel: face6('waterLevel')?.data ?? null,
+      waterClass: face6('waterClass')?.data ?? null,
+      discharge: face6('discharge')?.data ?? null,
+      biome: face6('biome')?.data ?? null,
+      rivers: null,
+    });
     globeMinimap.setTerrain(elev);
   }
   const temp = layers.get('temperature');
