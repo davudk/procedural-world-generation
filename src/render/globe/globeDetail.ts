@@ -51,7 +51,7 @@ export const DEFAULT_GLOBE_DETAIL: GlobeDetailOptions = {
   talus: DEFAULT_DETAIL_OPTIONS.talus,
   thermalRate: DEFAULT_DETAIL_OPTIONS.thermalRate,
   hydro: DEFAULT_DETAIL_OPTIONS.hydro,
-  // Measured in the browser pane (Apple silicon): the flat map's 8 underestimated the tile passes by ~1.7x.
+  // Starting point; with timer queries the estimates are calibrated against measured GPU time (gpuScale).
   gpuMtexPerMs: 5,
   readback: true,
   idleFreeMs: 5000,
@@ -177,6 +177,10 @@ export interface GlobeDetailStats {
   maxSliceMs: number;
   /** Mean wall time per tile. */
   meanTileMs: number;
+  /** Measured / estimated GPU time of build slices (1 without timer queries). */
+  gpuScale: number;
+  /** GPU time (ms) of the last build slices, when timer queries exist. */
+  sliceGpuMs: number[];
 }
 
 interface Scratch {
@@ -217,7 +221,7 @@ export class GlobeDetail implements GlobeDetailSource {
   boundsPad = 0;
   readonly gpu: boolean;
   readonly opts: GlobeDetailOptions;
-  stats: GlobeDetailStats = { path: 'none', prepMs: 0, compileMs: 0, built: 0, lastTileMs: 0, lastTileCpuMs: 0, lastReadbackMs: 0, maxSliceMs: 0, meanTileMs: 0 };
+  stats: GlobeDetailStats = { path: 'none', prepMs: 0, compileMs: 0, built: 0, lastTileMs: 0, lastTileCpuMs: 0, lastReadbackMs: 0, maxSliceMs: 0, meanTileMs: 0, gpuScale: 2.5, sliceGpuMs: [] };
   /** Increments when the world preparation finishes (swap the camera ground then). */
   version = 0;
 
@@ -236,10 +240,21 @@ export class GlobeDetail implements GlobeDetailSource {
   private lastBuild = 0;
   private unitsUsed = 0;
   private tileTotalMs = 0;
+  /**
+   * Measured / estimated GPU time of build slices (EMA), from timer queries when available. Starts
+   * conservative (≈ what the browser pane measured on Apple silicon) so the first slices don't hitch.
+   */
+  gpuScale = 2.5;
+  private readonly timer: { TIME_ELAPSED_EXT: number; GPU_DISJOINT_EXT: number } | null;
+  private queries: { q: WebGLQuery; est: number }[] = [];
+  private get timerBusy(): boolean {
+    return this.queries.length > 4;
+  }
 
   constructor(private readonly gl: WebGL2RenderingContext, opts: Partial<GlobeDetailOptions> = {}) {
     this.opts = { ...DEFAULT_GLOBE_DETAIL, ...opts, hydro: { ...DEFAULT_GLOBE_DETAIL.hydro, ...(opts.hydro ?? {}) } };
     this.gpu = gl.getExtension('EXT_color_buffer_float') !== null && probeFloatTargets(gl);
+    this.timer = gl.getExtension('EXT_disjoint_timer_query_webgl2') as { TIME_ELAPSED_EXT: number; GPU_DISJOINT_EXT: number } | null;
     this.fbo = gl.createFramebuffer();
     this.vao = gl.createVertexArray();
   }
@@ -265,7 +280,7 @@ export class GlobeDetail implements GlobeDetailSource {
     if (!world) return;
     const lat = tileLattice(world.n, world.radius, this.opts.tileN);
     this.lattice = lat;
-    this.stats = { ...this.stats, path: this.gpu ? 'gpu' : 'cpu', prepMs: 0, built: 0, lastTileMs: 0, lastTileCpuMs: 0, lastReadbackMs: 0, maxSliceMs: 0, meanTileMs: 0 };
+    this.stats = { ...this.stats, path: this.gpu ? 'gpu' : 'cpu', prepMs: 0, built: 0, lastTileMs: 0, lastTileCpuMs: 0, lastReadbackMs: 0, maxSliceMs: 0, meanTileMs: 0, sliceGpuMs: [] };
     this.tileTotalMs = 0;
     this.job = this.prepJob(world, lat);
     this.jobKey = -1;
@@ -290,6 +305,7 @@ export class GlobeDetail implements GlobeDetailSource {
         }
       }
     }
+    this.pollTimers();
     if (this.job) changed = this.step(budgetMs) || changed;
     if (c && c.tick(dt)) this.idxDirty = true;
     if (this.idxDirty) {
@@ -308,6 +324,8 @@ export class GlobeDetail implements GlobeDetailSource {
     for (const p of Object.values(this.progs)) if (p) gl.deleteProgram(p);
     this.progs = {};
     this.compiled = false;
+    for (const { q } of this.queries) gl.deleteQuery(q);
+    this.queries = [];
     gl.deleteFramebuffer(this.fbo);
     gl.deleteVertexArray(this.vao);
   }
@@ -343,7 +361,12 @@ export class GlobeDetail implements GlobeDetailSource {
     let spent = 0;
     let gpuWork = false;
     let done = false;
+    let estSum = 0;
     const residentBefore = this.residentCount;
+    // GPU time of this slice, when timer queries exist: calibrates the per-pass estimates (gpuScale).
+    const timer = this.timer;
+    const q = timer && !this.timerBusy ? gl.createQuery() : null;
+    if (q) gl.beginQuery(timer!.TIME_ELAPSED_EXT, q);
     this.withState(() => {
       while (spent < budgetMs) {
         const t = performance.now();
@@ -356,10 +379,15 @@ export class GlobeDetail implements GlobeDetailSource {
         if (r.value === WAIT) break;
         if (r.value > 0) {
           gpuWork = true;
-          spent += r.value;
+          estSum += r.value;
+          spent += r.value * this.gpuScale;
         }
       }
     });
+    if (q) {
+      gl.endQuery(timer!.TIME_ELAPSED_EXT);
+      this.queries.push({ q, est: estSum });
+    }
     if (gpuWork && !done) this.fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
     if (done) {
       this.job = null;
@@ -367,6 +395,27 @@ export class GlobeDetail implements GlobeDetailSource {
       this.lastBuild = performance.now();
     }
     return this.residentCount !== residentBefore;
+  }
+
+  /** Folds finished timer queries into gpuScale (slices with little estimated work are skipped). */
+  private pollTimers(): void {
+    const gl = this.gl;
+    const t = this.timer;
+    if (!t || this.queries.length === 0) return;
+    const disjoint = gl.getParameter(t.GPU_DISJOINT_EXT) as boolean;
+    while (this.queries.length > 0) {
+      const { q, est } = this.queries[0];
+      if (!gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) break;
+      const ms = (gl.getQueryParameter(q, gl.QUERY_RESULT) as number) / 1e6;
+      gl.deleteQuery(q);
+      this.queries.shift();
+      if (disjoint) continue;
+      this.stats.sliceGpuMs.push(ms);
+      if (this.stats.sliceGpuMs.length > 256) this.stats.sliceGpuMs.shift();
+      if (est < 0.3) continue;
+      this.gpuScale = Math.min(20, Math.max(0.25, 0.7 * this.gpuScale + 0.3 * (ms / est)));
+    }
+    this.stats.gpuScale = this.gpuScale;
   }
 
   private cancel(): void {
