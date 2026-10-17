@@ -1186,3 +1186,55 @@ Spherical worlds are being added as an option, with flat staying the default ([r
 - The Catmull-Rom clamp is back, as a continuous envelope: the 2×2-texel cell extremes of the 3×3 cells around the point, interpolated on the dual grid (= the flat clamp at a cell centre, no jumps at texel edges). Without it the cubic overshot over narrow channels.
 - At river nodes inside resident tiles (40 k samples, default world), the detailed surface minus the ribbon's zWater is p50 −1.3 m, p5 −7.5 m, p95 +2.1 m, p99 +6.8 m; 8.6 % of nodes are buried by > 1 m. On 4a's macro surface 85 % were buried by > 1 m (p50 +20 m). The remaining error is mostly the 250 m texels on steep reaches (≈ 5 m of drop per texel) and bends.
 - GlobePass binds the detail at units 9–11 and the detail water at 12–13; 4a's units 0–8 are unchanged. The globe notice now says only labels and clouds are missing.
+
+### Sphere phase 4c — Landmarks, names, labels and the Atlas on spheres (2026-10-16)
+
+**What landed:**
+- **The registry runs on spheres** (`SPHERE_STAGES` ends with `registry`; the timeline shows 11 steps, and the "landmarks are not available on spheres yet" status is gone).
+- **Positions** (`registry/geo.ts`): detectors keep passing one (x, y) pair around, as on flat maps. On a sphere x carries the face, x = face · π·R + u, y = v (face-local metres in the 4a convention), so `cellX`/`cellAtM` work on every registry grid of the world. Positions are only compared through `Geo` (great-circle `dist`/`d2`, `angleOf`/`angleAlong`/`angleFromCell` for label angles in the anchor face's axes) or decoded. On flat maps the stride is 0 and every helper is the planar expression the detectors used, so flat outputs are byte-identical.
+- **Sphere-aware detectors:**
+  - Exact cell areas for areas and shares (`compKm2`, `cellsKm2`, area-weighted sea basins); the world area is 4πR² and `worldKm` is the equal-area size √(4πR²).
+  - Components carry mean unit vectors (`Components.dir`) for centroids (islands, archipelagos, ice caps, wood patches, island languages); `nearestWhereM` searches a geodesic disc through `chart`.
+  - Ranges and rifts: PCA in the azimuthal-equidistant tangent plane at the weighted mean direction (`pca` → `Axes.plane`, `axesXY`, `axesDir`); crest smoothing and bin means on unit vectors.
+  - Gulfs and bays: rays straight in the extended equal-angle chart of the cell's face (`tryCellIndex`), crossing seams.
+  - Volcano summits, gorge depth and the world fill's cover disc use charts / `forWindow`; peak, pass, strait, waterfall, canyon, gorge and hero spacing are great-circle; the fill's spacing set hashes 3D positions (`NearSet`).
+  - River polylines: `decimateS`, `alongS` (3D interpolation; the label direction comes back in the anchor face's chart).
+- **Oceans** (`water.ts` `splitOceans`): the world ocean (the largest sea body, ≥ 10 % of the planet) is split by the same distance-from-land merge tree as seas: basins holding ≥ 3.5 % of it, whose centre is ≥ 5 % of the equal-area size from land and whose passage to a deeper basin is ≤ 0.7 × that distance, are nuclei (the root always; at most 5). Every world-ocean cell belongs to the nucleus it resolves to, so the oceans partition it; the other kept basins are seas. Seed 7 has 2 oceans, seeds 11 and 42 have 3.
+- **Ranking and budgets:** a globe view shows a hemisphere, so the world-band budgets and the W label cap count 2 W views on spheres (`SPHERE_W_VIEWS`). The world band's metres per pixel is the whole planet fitted into a 700 px view (2.2 R / 700), and continents and oceans always read there. Hero spacing is a quarter of the equal-area size along the surface.
+- **Names:** culture centres are uniform on the planet and a landmark speaks the language of the nearest one along the surface; name identities hash the encoded position, so they include the face.
+- **Traits:** "A temperate world of …" ("ocean world" below 20 % land), a planet bullet ("Planet: 4,096 km around (radius 652 km), 3 oceans, ice caps at both poles (… km² north, … km² south)."), land share of the surface. Fjord coasts are judged per land area, and polar caps (beyond ±60°) do not make an icy world.
+- **Landmark contract** (`shared/landmarks.ts`): sphere landmarks add `face` (x, y are face-local metres) and paths add `pathFace` (one face per point); `angle` is in the anchor face's axes (+u east, −v north). Flat landmarks are unchanged. The registry stage returns the ocean partition as `extra` (`RegistryExtra`) on spheres, for tests.
+- **Labels on the globe** (`render/labels/*`):
+  - `LabelEngine.setLandmarks(list, worldM, radiusM)` places sphere landmarks with `surfaceDir`; anchors are R + the rendered height (the detailed `GlobeDetailGround` where tiles are resident, else the macro height field), path vertices are unit vectors, rotated labels use the tangent of the face-axes angle.
+  - `Projector` takes the camera's own frame (`LabelCamera.axes`, the globe camera's right/up/forward).
+  - Far-side and horizon culling: a point (anchor or path vertex) is drawn only while the eye is above its tangent plane by `GLOBE_MIN_FACING` = 0.3 (cosine). The sea-level sphere lies below every tangent plane above it, so this one test also covers the horizon; 0.3 keeps names from hanging off the limb. A label that turns away goes at once instead of fading at its old screen position.
+  - Zoom bands use the metres per pixel at the anchor (view depth); tilted views keep the terrain occlusion raycast against the globe.
+- **App:** Atlas rows and label taps fly along great circles (`GlobeCamera.flyToDir`) framing the feature; Atlas rows show latitude / longitude on hover; the globe and 2D-map inspectors name the nearest place along the surface (`app/landmarkNav.ts`); the globe notice now only mentions clouds.
+
+**Measurements** (default small planet, earth):
+
+| | Seed 7 | Seed 11 | Seed 42 |
+|---|---|---|---|
+| Preview landmarks / oceans | 1586 / 2 | 1576 / 3 | 1624 / 3 |
+| Preview: seas, gulfs, bays, straits | 2, 5, 20, 3 | 5, 1, 20, 2 | 4, 5, 20, 2 |
+| Preview: continents, islands, peninsulas, capes | 2, 39, 13, 12 | 2, 32, 9, 12 | 4, 40, 10, 12 |
+| Preview: ranges, peaks, hills, passes, volcanoes | 7, 458, 117, 290, 30 | 6, 449, 119, 291, 32 | 6, 433, 128, 286, 30 |
+| Preview: rivers, lakes, waterfalls, deltas, canyons, gorges, fjords | 129, 141, 152, 2, 7, 42, 6 | 142, 125, 152, 6, 7, 43, 6 | 142, 177, 152, 6, 5, 43, 5 |
+| Preview: deserts, forests, grasslands, wetlands, ice caps, glaciers | 3, 11, 3, 53, 3, 8 | 3, 19, 5, 47, 3, 6 | 2, 11, 5, 58, 3, 8 |
+
+- Counts scale with the land area (2.1 M km², about 6× a default flat world), as the caps were tuned to (M8 rec. 9).
+- Registry time: preview 345–375 ms (flat preview ~80–150); build (seed 7) 1.6 s, 4271 landmarks (2616 of them area-band hills). The largest parts are the fills and regions, whose distance fields run as geodesic Dijkstra on spheres.
+- Label engine (node, `tests/labels.test.ts`): 1200 globe landmarks under a camera that spins and zooms every frame, median 0.11 ms per frame; flat worst case unchanged (3000 landmarks, 0.46 ms static, 0.82 ms panning).
+- Flat `npm run bench` against main (2 interleaved alternations, seeds 7 + 11 summed): preview total +1.7 %, build total +0.8 %. The registry stage is +12 % (+15 ms preview, +44 ms build) although its flat code paths compute the same values (goldens byte-identical); the sub-laps point to V8 tiering of the longer detector functions (more Maglev OSR exits). Moving sphere-only closures into helpers brought it down from +17–24 %. Stages the change does not touch move by up to ±15 % between runs at this size.
+
+**Tests:** `tests/sphereRegistry.test.ts` (11 sphere stages; every landmark has an integer face and a position on it, land kinds on land and sea kinds at sea, paths with per-point faces and no jumps; the oceans partition the connected world ocean with areas that add up and one anchor in each; unique names; hero spacing along the surface; determinism in this thread and in 6 fresh isolates, the Maglev pattern of `tests/jitDeterminism.test.ts`). `tests/labels.test.ts` adds a globe suite: no point label is ever drawn on the far side over 240 frames of a turning, zooming globe; projector parity with `GlobeCamera.project`; rotated and path labels on the near side, flat landmarks skipped on a globe, both gone when the globe turns. Flat goldens are byte-identical (`tests/golden.json` untouched); only the sphere fixture was re-recorded (its stages up to biome kept their hashes).
+
+**Verified in the browser:** the default sphere (seed 7, build) from space with its continent and two ocean names; rotating the globe moves the names with it and drops those that reach the limb; an Atlas fly-to (Poho Mountains) along a great circle to a regional view with rotated range names, a river named along its course, bays and a gulf; no console errors.
+
+**Known gaps:**
+- Long names of anchors near the limb can still reach a little past the disc (labels are screen-aligned billboards).
+- The world-band numbers (2 W views, 2.2 R / 700 px) are first cuts; the metrics harness has no globe band (G) yet.
+- Ice and peak counts mirror 4a's gaps: up to ~25 % of land is ice and the highest peaks reach ~8.9 km, so the traits often say "a world of ice".
+- Preview canyons use the 8 km regional cells' 3 × 3 relief, so some are long (hundreds of km).
+- Registry grids use nominal cell areas for merge-tree thresholds (≈ 15 % high on average); reported areas are exact.
+- Labels on the 2D sphere map (equirectangular / cube net) are not drawn; the 2D inspector names the nearest place.
