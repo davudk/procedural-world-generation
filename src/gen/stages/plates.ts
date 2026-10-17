@@ -79,6 +79,11 @@ const DY = [0, 0, 1, -1, 1, -1, 1, -1];
 const RANGE_MIN_KM = 100;
 /** Motion candidates tried per world to steer the 🎯 range and rift targets (CONFIG.md §4). */
 const CANDIDATES = 16;
+/**
+ * Spheres: Euler-pole motions open more continental rifts than the flat motions, and the first 16 rarely
+ * met the rift and range targets (research 11 §6); more candidates are cheap next to the rest of the stage.
+ */
+const SPHERE_CANDIDATES = 64;
 /** Minimum ocean gap between continents before coast noise (km). */
 const CONTINENT_GAP_KM = 100;
 
@@ -137,7 +142,7 @@ export const platesStage: StageDef = {
     // Outside the resolved range costs the distance to it; inside, a small pull toward the drawn value.
     const miss = (v: number, r: readonly [number, number], drawn: number): number =>
       Math.max(0, r[0] - v, v - r[1]) + 0.1 * Math.abs(v - drawn);
-    for (let k = 0; k < CANDIDATES; k++) {
+    for (let k = 0; k < (sphere ? SPHERE_CANDIDATES : CANDIDATES); k++) {
       const motion = sphere
         ? eulerMotion(ctx.rng('motion', k), count, major, activity)
         : randomMotion(ctx.rng('motion', k), count, major, area, cellKm, activity);
@@ -148,6 +153,12 @@ export const platesStage: StageDef = {
       if (score === 0) break;
     }
     const chosen = best!;
+    // Spheres: Euler-pole motions over ~9 plates open more long continental rifts (and ranges) than any
+    // candidate keeps inside the targets; the weakest excess segments become transforms (research 11 §6).
+    if (sphere) {
+      chosen.rifts = trimSegments(chosen, [B.RIFT], Math.min(riftR[1], targetRifts + 1));
+      chosen.ranges = trimSegments(chosen, [B.COLLISION, B.SUBDUCTION], Math.min(rangeR[1], targetRanges + 1));
+    }
     await ctx.checkpoint();
 
     const N = g.cells;
@@ -779,4 +790,22 @@ function spacedPoints(rng: Rng, count: number, margin: number): { xs: Float64Arr
 export function gaussian(rng: Rng): number {
   const u = Math.max(1e-12, rng.float());
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rng.float());
+}
+
+/**
+ * Spheres: turns the weakest (smallest |convergence|) long segments of the given classes into
+ * transforms until at most `max` remain; returns how many remain. Segment classes and the boundary
+ * raster change together, so the uplift of the base stage follows.
+ */
+function trimSegments(c: Classified, classes: readonly number[], max: number): number {
+  const long = c.segments.map((s, id) => ({ s, id })).filter(({ s }) => classes.includes(s.cls) && s.lengthKm >= RANGE_MIN_KM);
+  if (long.length <= max) return long.length;
+  long.sort((a, b) => Math.abs(a.s.conv) - Math.abs(b.s.conv) || a.id - b.id);
+  const drop = new Set<number>();
+  for (const { s, id } of long.slice(0, long.length - Math.max(0, max))) {
+    s.cls = B.TRANSFORM;
+    drop.add(id);
+  }
+  for (let i = 0; i < c.bSeg.length; i++) if (c.bSeg[i] >= 0 && drop.has(c.bSeg[i])) c.bClass[i] = B.TRANSFORM;
+  return long.length - drop.size;
 }
