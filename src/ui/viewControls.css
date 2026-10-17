@@ -26,6 +26,21 @@
   color: var(--accent);
 }
 
+.view-ctl .view-on {
+  flex: none;
+  margin: 0 4px 0 0;
+}
+
+.view-ctl input[type='range']:disabled,
+.view-ctl .view-play:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.view-ctl .view-out.off {
+  color: var(--text-dim);
+}
+
 .view-ctl .view-check input {
   flex: none;
   margin: 0;

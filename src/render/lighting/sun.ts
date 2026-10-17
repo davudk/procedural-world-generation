@@ -13,6 +13,10 @@ export interface ViewSettings {
   time: number;
   /** Fraction of the year from 1 January (northern hemisphere seasons). */
   season: number;
+  /** Time of day applies; off, the light is the fixed cartographic sun of the map modes. */
+  sun: boolean;
+  /** Seasons apply; off, flat maps show the default season and globes the annual mean. */
+  seasons: boolean;
   /** Clouds and cloud shadows on. */
   clouds: boolean;
   /** Time of day advancing on its own. */
@@ -61,7 +65,10 @@ const A0 = ((): number => {
   return Math.atan2(v[0], v[1]);
 })();
 
-export const DEFAULT_VIEW: ViewSettings = { time: DEFAULT_TIME, season: DEFAULT_SEASON, clouds: true, animate: false };
+export const DEFAULT_VIEW: ViewSettings = { time: DEFAULT_TIME, season: DEFAULT_SEASON, sun: true, seasons: true, clouds: true, animate: false };
+
+/** March equinox (declination 0), the season of a globe without seasons. */
+export const EQUINOX_SEASON = 0.22;
 
 /** Lighting derived from the sun model for one frame. */
 export interface SunLight {

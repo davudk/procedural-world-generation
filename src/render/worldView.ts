@@ -25,7 +25,7 @@ import { LabelLayer } from './labels/labelLayer';
 import { DetailMap, type DetailInput } from './terrain/detail/detailMap';
 import { SkyPass } from './lighting/sky';
 import { CloudPass } from './lighting/clouds';
-import { declination, DEFAULT_SEASON, DEFAULT_TIME, DEFAULT_VIEW, seasonPhase, sunLight, type ViewSettings } from './lighting/sun';
+import { declination, DEFAULT_SEASON, DEFAULT_TIME, DEFAULT_VIEW, EQUINOX_SEASON, seasonPhase, sunLight, type ViewSettings } from './lighting/sun';
 import { TerrainPass, type SurfaceLayers } from './terrain/terrainPass';
 import { CreekManager } from './water/creeks/creekManager';
 import { GlobeRiverPass } from './water/globeRivers';
@@ -577,7 +577,9 @@ export class WorldView {
     gl.viewport(0, 0, W, H);
     // Map modes keep the default light; time of day, season, clouds and fog belong to the realistic view.
     const realistic = this.terrain.realistic;
-    const sun = realistic ? sunLight(this.view.time, this.view.season, this.cam.bearing) : sunLight(DEFAULT_TIME, DEFAULT_SEASON, this.cam.bearing);
+    // Either can be switched off, which keeps its default (the pre-M9 look).
+    const flatSeason = realistic && this.view.seasons ? this.view.season : DEFAULT_SEASON;
+    const sun = sunLight(realistic && this.view.sun ? this.view.time : DEFAULT_TIME, flatSeason, this.cam.bearing);
     const haze = sun.skyHorizon;
     const dt = this.lastTime < 0 ? 0 : Math.min(0.1, Math.max(0, timeSec - this.lastTime));
     this.lastTime = timeSec;
@@ -611,7 +613,7 @@ export class WorldView {
       gl.disable(gl.DEPTH_TEST);
       this.sky.draw(this.viewProj, { horizon: haze, zenith: sun.skyZenith, glow: sun.glow }, sun.sunDir, this.reversedZ);
       gl.enable(gl.DEPTH_TEST);
-      const ph = seasonPhase(this.view.season);
+      const ph = seasonPhase(flatSeason);
       // Valley fog: low sun, a little more in the cold half of the year.
       const fogK = realistic ? 0.5 * sun.fog * (1 + 0.3 * Math.max(0, -ph.cos)) : 0;
       const atmos = {
@@ -717,10 +719,14 @@ export class WorldView {
         this.globeGround.pxFoot = Math.max(Number.isFinite(mpp) ? mpp : 1e6, faceM / 2 ** maxDepth / GRID);
       }
       const realistic = this.globe.realistic;
-      const time = realistic ? this.view.time : DEFAULT_TIME;
-      const season = realistic ? this.view.season : DEFAULT_SEASON;
+      // Without time of day the light is the map modes' cartographic sun everywhere (no night side);
+      // without seasons the globe shows the annual mean under an equinox sun.
+      const sunOn = realistic && this.view.sun;
+      const seasonsOn = realistic && this.view.seasons;
+      const time = sunOn ? this.view.time : DEFAULT_TIME;
+      const season = seasonsOn ? this.view.season : sunOn ? EQUINOX_SEASON : DEFAULT_SEASON;
       const [lat, lon] = cam.latLon();
-      const local = sunLight(realistic ? (((time + lon / 15) % 24) + 24) % 24 : time, season, cam.bearing, (lat * Math.PI) / 180);
+      const local = sunOn ? sunLight((((time + lon / 15) % 24) + 24) % 24, season, cam.bearing, (lat * Math.PI) / 180) : sunLight(time, DEFAULT_SEASON, cam.bearing);
       // Cartographic sun in screen coordinates (right, up, local up).
       const b = cam.bearing;
       const sd = local.dir;
@@ -737,8 +743,8 @@ export class WorldView {
       const lonS = (-(time - 12) / 24) * 2 * Math.PI;
       const sunReal = [Math.cos(dec) * Math.cos(lonS), Math.cos(dec) * Math.sin(lonS), Math.sin(dec)] as const;
       const altitude = cam.clearance();
-      const realK = realistic ? smoothstep(0.03 * R, 0.4 * R, cam.altitude()) : 0;
-      const atmos: GlobeAtmosFrame = { eye, radius: R, sun: realistic ? sunReal : cartoWorld, sunI: 1.0 };
+      const realK = sunOn ? smoothstep(0.03 * R, 0.4 * R, cam.altitude()) : 0;
+      const atmos: GlobeAtmosFrame = { eye, radius: R, sun: sunOn ? sunReal : cartoWorld, sunI: 1.0 };
       gl.disable(gl.DEPTH_TEST);
       this.globeSky.draw(this.viewProj, this.reversedZ, atmos, atmos.sun);
       gl.enable(gl.DEPTH_TEST);
@@ -758,7 +764,7 @@ export class WorldView {
         light: local.light,
         ambient: local.ambient,
         realistic,
-        season: realistic ? [ph.cos, ph.sin] : [1, 0],
+        season: seasonsOn ? [ph.cos, ph.sin] : realistic ? [0, 0] : [1, 0],
         time: timeSec,
         atmos,
         detail: this.globeDetailU,
