@@ -27,7 +27,7 @@ import {
   boxCountDimensionFaces, capView, clarkEvansSphere, geodesic, globeView, maxInDisk, pickWeighted, randomDir, type ViewProj,
 } from './lib/sphere';
 import {
-  bandsFor, BORING, sphereCountRange, CLUTTER_W_MAX, COUNT_TARGETS, CONTRAST, contrastFor, CV_GRID, DISK_CLUSTER_CAP, GLOBE_MIN_FACING, globeMpp, LABEL_CAP,
+  bandsFor, BORING, sphereCountRange, CLUTTER_W_MAX, COUNT_TARGETS, CONTRAST, contrastFor, CV_GRID, DISK_CLUSTER_CAP, GLOBE_MIN_FACING, globeLandMinKm2, globeMpp, LABEL_CAP,
   OCEAN_VIEW_LAND, QUIET, SCREEN_PX, VIEW_ASPECT, WINDOW_HI, WINDOW_LO, type BandDef, type BandId,
 } from './targets';
 
@@ -633,8 +633,17 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
       landList.push(i);
       maxArea = Math.max(maxArea, grid.area(i));
     }
+    // Band G reads land only on landmasses that are themselves distinct at the globe scale (≥ 20 px
+    // across, `globeLandMinKm2`): islets of a few cells far out at sea were the 300–500 km empty disks
+    // of band G, and no feature of globe size can stand on them (research 11 §5, Sphere polish).
+    const masses = gridComponents(isLand, grid);
+    const massArea = new Float64Array(masses.sizes.length);
+    for (let i = 0; i < N; i++) if (masses.label[i] >= 0) massArea[masses.label[i]] += areaKm2(i);
+    const minKm2 = globeLandMinKm2(R);
+    const isLandG = new Uint8Array(N);
+    for (let i = 0; i < N; i++) if (isLand[i] && massArea[masses.label[i]] >= minKm2) isLandG[i] = 1;
     const ctx: SphereBandCtx = {
-      R, grid, isLand, landList, maxArea, all, hy, bio, seed: job.seed, views,
+      R, grid, isLand, isLandG, landList, maxArea, all, hy, bio, seed: job.seed, views,
       labelled: landmarks.map((l) => ({ maxMpp: l.maxMpp, d: dirOf(l.face, l.x, l.y) })),
       bigLakes: lakes.filter((l) => l.areaKm2 >= 100).map((l) => dirOf(l.face, l.cx, l.cy)),
     };
@@ -957,6 +966,8 @@ interface SphereBandCtx {
   R: number;
   grid: CubeGrid;
   isLand: Uint8Array;
+  /** Land on landmasses distinct at the globe scale (band G's land). */
+  isLandG: Uint8Array;
   landList: number[];
   /** Largest land cell area (m²), for area-weighted centres. */
   maxArea: number;
@@ -975,9 +986,10 @@ interface SphereBandCtx {
  * area-uniform directions; no clamping. Features are projected into the view and measured as on flat maps.
  */
 function sampleBandSphere(band: BandDef, c: SphereBandCtx): BandResult {
-  const { R, grid, isLand } = c;
+  const { R, grid } = c;
   const n = grid.n;
   const globe = band.globe === true;
+  const isLand = globe ? c.isLandG : c.isLand;
   const viewW = globe ? 2 * R : band.nominalKm * 1000;
   const viewH = globe ? 2 * R : viewW * VIEW_ASPECT;
   const capKm = globe ? (band.emptyCapKm * (2 * R)) / 1024000 : band.emptyCapKm;

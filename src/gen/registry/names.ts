@@ -142,6 +142,8 @@ const PATTERNS: Record<string, [string[], string[]]> = {
   atoll: [[], ['{X} Atoll']],
   plain: [[], ['{X} Plain', '{X} Plains']],
   'plain:lowlands': [[], ['{X} Lowlands']],
+  'plain:uplands': [[], ['{X} Uplands']],
+  'plateau:highlands': [[], ['{X} Highlands']],
   hill: [['Mount {X}'], ['{X} Hill', '{X} Knob', '{X} Fell']],
   'hill:rise': [[], ['{X} Rise', '{X} Knoll', '{X} Downs']],
   grassland: [[], ['{X} Steppe', '{X} Grasslands']],

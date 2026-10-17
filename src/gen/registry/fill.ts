@@ -367,6 +367,15 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[], scale?:
     }
     let k = -1;
     for (let j = 0; j < covers.length; j++) if (k < 0 || sum[j] > sum[k]) k = j;
+    if (scale && geo.sphere && landSum > 0 && (k < 0 || sum[k] < W_FILL_MIN_SHARE * landSum)) {
+      // The globe pass names mixed country by its relief instead of leaving it quiet: those quiet
+      // interiors were the 250–450 km empty disks of band G (research 11 §5).
+      out.push(terrainRegion(I, S, best, rad, landSum * rKm2));
+      mark(out[out.length - 1].x, out[out.length - 1].y);
+      if (sphereDist) lowerAround(R, sphereDist, cellAtM(R, out[out.length - 1].x, out[out.length - 1].y), 2 * need);
+      added++;
+      continue;
+    }
     if (k < 0 || landSum <= 0 || sum[k] < W_FILL_MIN_SHARE * landSum) {
       // Nothing dominant here: leave it (and its neighbourhood) quiet.
       covered[best] = 1;
@@ -397,6 +406,35 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[], scale?:
     added++;
   }
   return added;
+}
+
+/** Mean elevation (m) above which the globe fill calls mixed country uplands, and highlands. */
+const UPLANDS_M = 400;
+const HIGHLANDS_M = 1200;
+
+/**
+ * Spheres, globe fill: mixed country around regional cell c (no cover holds W_FILL_MIN_SHARE of the
+ * disc) named by its mean elevation over land: lowlands, uplands or highlands.
+ */
+function terrainRegion(I: RegistryInput, S: Shared, c: number, rad: number, areaKm2: number): Candidate {
+  const R = S.reg;
+  let hs = 0;
+  let ws = 0;
+  R.chart(R.point(c), rad * R.cellM, (q) => {
+    hs += S.hSmooth[q] * S.landShare[q];
+    ws += S.landShare[q];
+  });
+  const h = ws > 0 ? hs / ws : 0;
+  const fc = nearestWhereM(I.fine, cellX(R, c), cellY(R, c), 3 * S.f, (q) => !I.sea[q]);
+  const x = fc >= 0 ? cellX(I.fine, fc) : cellX(R, c);
+  const y = fc >= 0 ? cellY(I.fine, fc) : cellY(R, c);
+  const kind: LandmarkKind = h >= HIGHLANDS_M ? 'plateau' : 'plain';
+  const variant = h >= HIGHLANDS_M ? 'highlands' : h >= UPLANDS_M ? 'uplands' : 'lowlands';
+  return candidate({
+    kind, x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000, mag: Math.min(1, areaKm2 / 200000),
+    data: { areaKm2: Math.round(areaKm2), elevationM: Math.round(h), wFill: 1, gFill: 1 }, idX: x, idY: y, variant, tier: 'common',
+    landmass: fc >= 0 ? S.masses.label[fc] : -1,
+  });
 }
 
 /** Spheres: lowers a distance field (nominal cells) to the great-circle distance from cell c, within radiusCells of it. */

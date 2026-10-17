@@ -39,6 +39,20 @@ export const SPHERE_W_CAP_M = 1_024_000;
 const SPHERE_W_LOCAL_RADIUS_M = SPHERE_W_CAP_M / 2;
 const SPHERE_W_LOCAL_CAP = 40;
 
+/**
+ * Spheres, band G (research 11 §5): a globe view reads every feature of ≥ 20 px at the whole-planet
+ * scale (`globeScaleM`), and a hemisphere holds ~2.4 W views of land, so W-scale features that large
+ * crowded it (p95 of 61–67 against 1.5 × 40). A globe-scale candidate is also only kept while fewer than
+ * SPHERE_G_LOCAL_CAP kept globe-scale features lie within SPHERE_G_LOCAL_RADIUS_R × R of it.
+ */
+const SPHERE_G_LOCAL_RADIUS_R = 1.0;
+const SPHERE_G_LOCAL_CAP = 24;
+
+/** Spheres: the smallest feature that reads on the whole globe (20 px at the registry's 2.2 R / 700 m/px). */
+export function globeScaleM(R: number): number {
+  return ((2.2 * R) / 700) * 20;
+}
+
 /** View width (m) of band W and how many such views the world's area holds (flat: the world, 1). */
 export function wBand(worldM: number, geo: Geo): { viewM: number; views: number } {
   if (!geo.sphere) return { viewM: worldM, views: 1 };
@@ -64,22 +78,25 @@ const SEA_KINDS: ReadonlySet<LandmarkKind> = new Set<LandmarkKind>(['ocean', 'se
 const W_RIVER_ORDER = 6;
 
 /** W-scale features the registry does not own: big lakes, trunk rivers and landform places. */
-export function externalWScale(I: RegistryInput, S: Shared): { count: number; xs: number[]; ys: number[] } {
+export function externalWScale(I: RegistryInput, S: Shared): External {
   const lo = wBand(I.worldKm * 1000, S.geo).viewM * W_SCALE_FRAC;
   let n = 0;
   const xs: number[] = [];
   const ys: number[] = [];
+  const ext: number[] = [];
   for (const l of I.lakes) {
     if (l.type === 'playa' || Math.sqrt(l.areaKm2) * 1000 < lo) continue;
     n++;
     xs.push(S.geo.enc(l.face, l.cx));
     ys.push(l.cy);
+    ext.push(Math.sqrt(l.areaKm2) * 1000);
   }
   for (const f of I.landforms.features) {
     if (!LANDFORM_PLACES.has(f.type) || f.size < lo) continue;
     n++;
     xs.push(S.geo.enc(f.face, f.x));
     ys.push(f.y);
+    ext.push(f.size);
   }
   // Rivers: one per maximal run of one Strahler order ≥ W_RIVER_ORDER.
   const g = I.rivers;
@@ -95,9 +112,19 @@ export function externalWScale(I: RegistryInput, S: Shared): { count: number; xs
       n++;
       xs.push(S.rivX[i]);
       ys.push(S.rivY[i]);
+      // Trunk rivers run for hundreds of km: globe-scale wherever they are counted.
+      ext.push(Infinity);
     }
   }
-  return { count: n, xs, ys };
+  return { count: n, xs, ys, ext };
+}
+
+/** W-scale features the registry does not own (positions and characteristic sizes, m). */
+export interface External {
+  count: number;
+  xs: number[];
+  ys: number[];
+  ext: number[];
 }
 
 /**
@@ -106,7 +133,7 @@ export function externalWScale(I: RegistryInput, S: Shared): { count: number; xs
  */
 export function applyWBudget(
   cands: Candidate[], imp: Map<Candidate, number>, protectedSet: ReadonlySet<Candidate>, worldM: number,
-  external: { count: number; xs: number[]; ys: number[] }, geo: Geo,
+  external: External, geo: Geo,
 ): { kept: Candidate[]; dropped: Candidate[]; quota: number } {
   const { viewM, views } = wBand(worldM, geo);
   const lo = viewM * W_SCALE_FRAC;
@@ -131,6 +158,7 @@ export function applyWBudget(
     }
   };
   const crowd = geo.sphere ? new LocalCrowd(geo, wScale, external, SPHERE_W_LOCAL_RADIUS_M) : null;
+  const gCrowd = geo.sphere ? globeCrowd(geo, wScale, external) : null;
   const keep = new Set<Candidate>();
   // A kind with many world-scale instances characterises the world (fjords of a fjordland, islands of
   // an archipelago): its best SIGNATURE_KEEP always stay.
@@ -147,6 +175,7 @@ export function applyWBudget(
       keep.add(c);
       place(c);
       crowd?.add(c);
+      gCrowd?.add(c);
     }
   }
   for (const c of wScale) {
@@ -165,6 +194,7 @@ export function applyWBudget(
     for (let i = 0; i < rest.length; i++) {
       const c = rest[i];
       if (crowd && crowd.full(c, SPHERE_W_LOCAL_CAP)) continue;
+      if (gCrowd && gCrowd.full(c, SPHERE_G_LOCAL_CAP)) continue;
       const s = imp.get(c)! * KIND_DECAY ** (perKind.get(c.kind) ?? 0) * spread(c);
       if (s > bs || (s === bs && tieLess(c, rest[bi]))) (bs = s), (bi = i);
     }
@@ -174,6 +204,7 @@ export function applyWBudget(
     keep.add(c);
     place(c);
     crowd?.add(c);
+    gCrowd?.add(c);
     perKind.set(c.kind, (perKind.get(c.kind) ?? 0) + 1);
   }
   const drop = new Set(rest);
@@ -182,6 +213,20 @@ export function applyWBudget(
 
 function tieLess(a: Candidate, b: Candidate): boolean {
   return a.kind < b.kind || (a.kind === b.kind && (a.idX < b.idX || (a.idX === b.idX && a.idY < b.idY)));
+}
+
+/** Spheres: the band-G crowd over the globe-scale candidates (see SPHERE_G_LOCAL_CAP); others never fill up. */
+function globeCrowd(geo: Geo, wScale: readonly Candidate[], external: External): LocalCrowd {
+  const lo = globeScaleM(geo.R);
+  const big = wScale.filter((c) => c.extentM >= lo);
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (let i = 0; i < external.xs.length; i++) {
+    if (external.ext[i] < lo) continue;
+    xs.push(external.xs[i]);
+    ys.push(external.ys[i]);
+  }
+  return new LocalCrowd(geo, big, { xs, ys }, SPHERE_G_LOCAL_RADIUS_R * geo.R);
 }
 
 /** Spheres: how many kept W-scale features lie within a radius of each candidate (see SPHERE_W_LOCAL_CAP). */
@@ -201,11 +246,14 @@ class LocalCrowd {
     }
   }
 
+  /** Counts a kept feature; one outside the crowd's own candidates (too small for it) does not count. */
   add(c: Candidate): void {
+    if (!this.n.has(c)) return;
     for (const o of this.cands) if (this.geo.dist(c.x, c.y, o.x, o.y) <= this.radiusM) this.n.set(o, this.n.get(o)! + 1);
   }
 
   full(c: Candidate, cap: number): boolean {
-    return this.n.get(c)! >= cap;
+    const k = this.n.get(c);
+    return k !== undefined && k >= cap;
   }
 }

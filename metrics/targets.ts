@@ -55,6 +55,11 @@ export const bandsFor = (shape: 'flat' | 'sphere'): readonly BandDef[] => (shape
 export const GLOBE_MIN_FACING = 0.3;
 /** Band G metres per pixel: the registry's world-band scale, the planet fitted into 700 px (src/gen/registry/rank.ts). */
 export const globeMpp = (radiusM: number): number => (2.2 * radiusM) / 700;
+/**
+ * Smallest landmass (km²) that band G treats as land: one 20 px across at the globe scale, the size of a
+ * distinct feature there (WINDOW_LO of the 1600 px screen at globeMpp).
+ */
+export const globeLandMinKm2 = (radiusM: number): number => ((globeMpp(radiusM) * SCREEN_PX * WINDOW_LO) / 1000) ** 2;
 
 /** Screen assumed by research 05 §3.2: ~1600 px wide; height at a 16:10 aspect. */
 export const SCREEN_PX = 1600;

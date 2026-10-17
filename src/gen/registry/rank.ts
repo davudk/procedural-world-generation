@@ -1,6 +1,6 @@
 import type { Landmark, LandmarkKind, Tier } from '../../shared/landmarks';
 import { hashMix, hashString } from '../../shared/hash';
-import { applyWBudget, SPHERE_W_CAP_M } from './budget';
+import { applyWBudget, SPHERE_W_CAP_M, type External } from './budget';
 import { own } from './candidate';
 import type { Namer } from './names';
 import type { Candidate, HeroCat, Shared } from './types';
@@ -74,7 +74,7 @@ export interface Ranked {
  * ordered by importance (ids are list indices).
  */
 export function rankAndName(
-  all: Candidate[], S: Shared, namer: Namer, worldM: number, heroCount: number, externalW: { count: number; xs: number[]; ys: number[] },
+  all: Candidate[], S: Shared, namer: Namer, worldM: number, heroCount: number, externalW: External,
   afterBudget?: (kept: Candidate[], dropped: readonly Candidate[]) => void,
 ): Ranked {
   const imp = new Map<Candidate, number>();
