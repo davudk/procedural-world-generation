@@ -42,7 +42,7 @@ for (const archetype of ['earth', 'fjordland', 'desert']) {
     CASES.push({ name: `${archetype}-${seed}-build512`, seed, archetype, mode: 'build', pins: BUILD_PINS });
   }
 }
-// Spheres: previews of the default small planet (6 × 128² erosion grid), plus one fjordland world.
+// Spheres: previews of the default small planet (6 × 160² erosion grid), plus one fjordland world.
 const SPHERE_CASES: Case[] = [
   ...[7, 11, 42].map((seed) => ({ name: `sphere-earth-${seed}-preview`, seed, archetype: 'earth', mode: 'preview' as const, pins: { worldShape: 'sphere' } })),
   { name: 'sphere-fjordland-7-preview', seed: 7, archetype: 'fjordland', mode: 'preview', pins: { worldShape: 'sphere' } },

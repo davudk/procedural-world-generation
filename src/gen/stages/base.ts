@@ -97,8 +97,9 @@ export const baseStage: StageDef = {
   async run(ctx) {
     const P = ctx.input('plates').extra as PlatesExtra;
     const sphere = ctx.str('worldShape') === 'sphere';
-    // Sphere: the erosion grid has half the macro face size (6 × 128² in previews).
-    const n = sphere ? (ctx.mode === 'preview' ? 128 : Number(ctx.str('faceGrid')) / 2) : ctx.mode === 'preview' ? 256 : Number(ctx.str('lemGrid'));
+    // Sphere: the erosion grid has half the macro face size; previews 6 × 160² (6.4 km cells on the
+    // default planet; 6 × 128² took 0.67× the time but under-resolved band R, Sphere polish in PLAN.md).
+    const n = sphere ? (ctx.mode === 'preview' ? 160 : Number(ctx.str('faceGrid')) / 2) : ctx.mode === 'preview' ? 256 : Number(ctx.str('lemGrid'));
     const g = ctx.grid(n);
     const worldKm = ctx.num('worldSize');
     const cellKm = sphere ? g.cellKm : worldKm / n;

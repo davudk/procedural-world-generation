@@ -104,8 +104,8 @@ export const platesStage: StageDef = {
   ],
   async run(ctx) {
     const sphere = ctx.str('worldShape') === 'sphere';
-    // Sphere: 6 × 64² / 6 × 128² cells (8 km faces at the default 4,096 km circumference).
-    const n = sphere ? (ctx.mode === 'preview' ? 64 : 128) : ctx.mode === 'preview' ? 128 : 256;
+    // Sphere: 6 × 80² / 6 × 128² cells (12.8 / 8 km at the default 4,096 km circumference).
+    const n = sphere ? (ctx.mode === 'preview' ? 80 : 128) : ctx.mode === 'preview' ? 128 : 256;
     const g = ctx.grid(n);
     const worldKm = ctx.num('worldSize');
     const cellKm = g.cellKm;
