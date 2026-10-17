@@ -27,7 +27,7 @@ The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 - SDF map labels with cartographic styles, priority placement and labels along rivers and ranges; an Atlas panel (A) that flies to any place;
 - a 2D raster debug viewer;
 - a metrics harness (`npm run metrics`) that scores density, targets and boring/cluttered worlds over many seeds, archetypes and sizes, on flat maps and on spheres (spherical-cap viewports, a whole-globe band, planet-size sweeps and equal-area flat comparisons);
-- time of day, seasons, drifting clouds with shadows, valley fog and shader tree crowns;
+- time of day and seasons (each can be switched off), drifting clouds with shadows, valley fog and shader tree crowns;
 - quality tiers for phones, recovery after a lost graphics context, and export (screenshot, 16-bit heightmap, colour map, world JSON, share link).
 - a 3D globe for sphere worlds: six-root CDLOD terrain without seams, an atmosphere with a limb glow and a day/night terminator, and a globe camera that grab-pans the planet under the cursor and zooms from the whole planet down to the surface.
 

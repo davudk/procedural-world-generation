@@ -200,3 +200,13 @@ Land precipitation (earth, mm/yr, p99.9 / max): small planet 11,100 / 12,500 →
 - Sphere `npm run bench -- --shape sphere` (seeds 7 + 11, 3 runs) against main:
   - preview 3.59 → 3.65 s: plates +20 ms for 64 motion candidates, hydro +56 ms, registry −19 ms;
   - build 33.8 → 33.5 s.
+
+## 7. Addendum: band G after the Sphere polish (2026-10-17)
+
+§5's diagnosis of band G was wrong.
+- **Empty disks.** The 300–500 km empty disks lay on islets of 64–384 km² (1–6 preview cells) far out at sea, not in continent interiors. A probe that rebuilt the painted mask on the cube grid found every worst gap there (12 of 12 on earth seeds 1–3).
+- **Land.** Band G now counts as land only landmasses at least 20 px across at the globe scale (`globeLandMinKm2` in `metrics/targets.ts`, ≈ 1,700 km² on the small planet). That is the same size that makes a feature distinct at G.
+- **Counts.** The registry caps globe-scale features at 24 within R of each other. Where no cover dominates, the globe fill names the terrain.
+- **Result.** G passes on 95–100 % of seeds of every archetype and on all builds. Full numbers are in PLAN.md, "Sphere polish".
+
+Sphere previews now run on 6 × 160² cells (6.4 km on the default planet). Preview figures in §3 and §5 are for 6 × 128².

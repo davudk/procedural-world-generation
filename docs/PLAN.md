@@ -1302,3 +1302,75 @@ Full write-up, with baseline and tuned tables per archetype and band: [research 
 - **Equal-area flat comparison:** spheres now match the default flat world, not flat worlds of 1,155–2,311 km, whose untuned AUTO formulas over-build relief at 9 km cells.
 - **Remaining zonal spread:** precipitation on a water world still varies by ±15 % between longitudes. This is first-order upwind transport.
 - **Flat registry:** the +12 % on builds since 4c (≈ 45 ms) is unchanged. It is spread over the rivers and naming sub-laps.
+
+### Sphere polish — sea ice, globe colours, band G and the preview grid (2026-10-17)
+
+**What landed:**
+- **Sea ice** (`render/globe/globePass.ts` `seaIce`). The old cover was a narrow smoothstep of the water's temperature, so from space it showed a hard-edged, flat-white octagon around the pole: a climate contour, sharpened twice.
+  - The ice is now a concentration that ramps from −2.5 to −11 °C. Domain-warped 3D fBm (up to ±4.5 °C at ~170 km, warped by up to ±90 km) moves its threshold, so the edge is ragged and follows no contour.
+  - The margin breaks into floes (fBm at ~16 km) that fade to the mean concentration as their pixel footprint grows. Thin marginal ice is grey; the pack is blue-white with patches of thicker and thinner ice.
+  - All noise is 3D in planet space, so it is continuous across cube faces. The edge width comes from the footprint, not `fwidth`, because the function runs inside the water branch.
+  - Lakes use the same function 4.5 °C warmer (they freeze sooner).
+- **Time of day and seasons can be switched off** (`ui/viewControls.ts`, `render/worldView.ts`): a checkbox in front of each slider, stored with the other view settings.
+  - Time of day off: the map modes' cartographic sun everywhere; globes have no night side or terminator and the air is lit by that light.
+  - Seasons off: flat maps show the default season (the pre-M9 look); globes show the annual mean under an equinox sun, so both hemispheres look alike.
+- **Globe colours at regional zoom.** Dry and open land looked beige-white. Three causes, measured:
+  - **Haze.** The stylised air's nadir path radiance was (0.12, 0.19, 0.35), several times Earth's. On tan land (0.54, 0.50, 0.36) the result was a neutral (0.53, 0.54, 0.53). Terrain and rivers now integrate the same atmosphere with the scattering scaled by `TERRAIN_AIR_K` = 0.25: (0.03, 0.05, 0.10) at nadir, while long slant paths still saturate to the sky colour (low tilted views and the limb stay hazy). The sky pass keeps the full air.
+  - **Tone curve.** The terrain used the sky's 1 − exp(−1.2 c), which darkened mid-tones by ~10 % and flattened saturation. Terrain and rivers now use `terrainTone`: identity up to 0.8 (the flat terrain's response), then a soft shoulder.
+  - **The zonal table alone.** The (temperature, aridity) colour table is Gaussian-blurred, so near ai ≈ 1 savanna and tropical dry forest mix into one tan, and the biome stage's forests (named "… Jungle" on the map) read as open land. The colour is now blended halfway to the biome stage's own biome colour (`vegMasksSphere`: 3×3-blurred across seams, in the current palette; ice, rock, sand and water biomes fall back to the zonal colour). Dense canopy darkens by up to 10 %, as on flat maps.
+  - Result on seed 11: savanna at regional zoom went from (151, 144, 117) to (184–200, 172–187, 121–131), close to the (176, 166, 101) that the flat path's formula gives for the same table colour.
+- **Band G** (research 11 §5):
+  - **The diagnosis was wrong.** The 300–500 km empty disks were not continent interiors. A probe that rebuilds the metric's painted mask on the cube grid found every worst gap (12 of 12, seeds 1–3) on an islet of 64–384 km² (1–6 preview cells) far out at sea. No feature of globe size can stand on such an islet. Band G now treats as land only landmasses at least 20 px across at the globe scale (`globeLandMinKm2`, (2.2 R/700 · 20)² ≈ 1,700 km² on the small planet).
+  - **A globe-scale crowd cap** (`registry/budget.ts`). In the W budget, a candidate at least 20 px across on the globe (`globeScaleM`) is only kept while fewer than 24 kept globe-scale features (registry and external) lie within R of it. Flat worlds never reach this code.
+  - **Mixed country gets a name.** Where the globe fill finds no dominant cover, it now names the terrain instead of leaving the land quiet: lowlands, uplands (≥ 400 m mean) or highlands (≥ 1,200 m), new name variants `plain:uplands` and `plateau:highlands`.
+- **Sphere previews on 6 × 160²** (`stages/base.ts`, plates 6 × 80²): 6.4 km cells on the default planet instead of 8 km.
+- **Metrics runner:** with fewer jobs than workers the pool resolved before any worker reported ("0 worlds").
+
+**Measurements:**
+- **Band G** (`npm run metrics -- --shape sphere --seeds 20 --build-seeds 3`): share of seeds passing count, empty disk and entropy. Research 11 "tuned" → this phase (6 × 160² previews):
+
+| archetype | G | G count p5/p50/p95 | G empty p95 (km, cap 255) | W | R count | quiet land |
+|---|---|---|---|---|---|---|
+| earth | 0 → **100** | 27/42/54 | 164 | 100 → 100 | 50 → 70 | 0 → 100 |
+| archipelago | 5 → **100** | 27/40/52 | 164 | 90 → 75 | 50 → 85 | 15 → 80 |
+| pangaea | 0 → **95** | 34/45/54 | 173 | 100 → 100 | 20 → 65 | 0 → 95 |
+| rift | 40 → **100** | 31/44/52 | 168 | 100 → 100 | 25 → 40 | 0 → 95 |
+| fjordland | 0 → **95** | 23/38/51 | 166 | 85 → 90 | 70 → 100 | 5 → 70 |
+| desert | 20 → **100** | 34/44/54 | 164 | 100 → 100 | 5 → 45 | 5 → 100 |
+| volcanic | 15 → **100** | 25/38/49 | 172 | 70 → 85 | 45 → 80 | 55 → 100 |
+| iceage | 10 → **100** | 26/38/50 | 170 | 85 → 85 | 30 → 65 | 5 → 100 |
+| hothouse | 5 → **100** | 25/41/55 | 165 | 100 → 100 | 10 → 55 | 0 → 100 |
+| craton | 25 → **100** | 28/42/54 | 164 | 95 → 100 | 75 → 95 | 10 → 100 |
+| builds (earth, fjordland, desert) | 0 / 0 / 0 → **100 / 100 / 100** | 23–33 / 42–47 / 53–55 | 163–177 | 100 | as before | as before |
+
+  - Separately, at 6 × 128²: the metric change alone gives G 30–95 % (every failure is the count, p95 61–67). With the crowd cap and the terrain fill, G is 95–100 % with W unchanged. A cap of 20 brings the G p50 to 37–43 but drops more W-scale content from every zoom; 24 was kept.
+  - Count rows hold, except canyons where the cap drops some in crowded views: archipelago 10 → 5 %, desert 65 → 60 %, iceage 100 → 95 %, earth builds 3 → 2 of 3 seeds. The generation targets cannot change (registry and metric only).
+- **Preview grid** (`npm run bench -- --shape sphere`, seeds 7 + 11, median of 3; flat preview 1.64 s for the pair):
+
+| preview grid | cells | preview (two seeds) | vs 6 × 128² |
+|---|---|---|---|
+| 6 × 128² (before) | 8 km | 3.74 s | 1× |
+| **6 × 160²** | 6.4 km | 5.55 s | 1.48× |
+| 6 × 192² | 5.3 km | 7.68 s | 2.05× |
+
+  - On 6 archetypes × 8 seeds, 192² raises R count passes to 88–100 % and R empty disks to 0–63 %. 160² gets 38–100 % and 0–50 % (128²: 13–75 % and 0–13 %). Both take quiet land to ~100 %. G holds on both.
+  - 160² was chosen: most of the gain for +0.9 s per preview (2.8 s against 1.9 s), where 192² costs +1.9 s on every slider change. The build follows anyway.
+  - At 160² the land above 2 km and the ice share rise by ≤ 0.02, and the highest summit falls by 30–160 m.
+- **Timing against main** (`npm run bench`, seeds 7 + 11):
+  - Flat, two alternations: preview totals +3.4 % / −1.8 %, builds −0.3 % / −0.7 % (noise). The flat registry stage is +5 % in previews (≈ 7 ms).
+  - Sphere: preview 3.87 → 5.88 s (the grid), build 34.6 → 34.6 s.
+- **Flat goldens** (`tests/golden.json`) are byte-identical. Only `tests/golden-sphere.json` was re-recorded: twice for the registry, then for the preview grid.
+
+**Verified in the browser** (seed 11 sphere, build):
+- The north polar ice from space is a ragged pack with floes, polynyas and grey thin ice at the margin, with no polygon.
+- With seasons off (annual mean) the cap grows evenly; with time of day off the globe is evenly lit.
+- At regional zoom around Hequapa Jungle the savanna is golden-olive and the dry forest green.
+- A straight edge east of 50° E turned out to be the hydrology's wetland plain (marsh and swamp biomes), not a render seam.
+
+**Known gaps:**
+- The browser pane was mostly hidden while this was checked, so the screenshots came from scripted frames; no frame times were measured.
+- Band G counts now sit at p50 38–45 against the 15–40 target. They pass on the p95 rule (≤ 60), not on the median.
+- R and A still fail in previews (R empty disks 0–50 % at 6.4 km cells). Builds are as before.
+- W on archipelago fell from 90 to 75 % at 160² (more islands and lakes resolve). Volcanic rose from 70 to 85 %.
+- Flat maps still use the zonal table alone and no biome-colour blend. Porting the blend would change the flat look, so it was left for a separate decision.
+- A straight wetland edge on seed 11 comes from the hydrology's wetland classification, not from rendering. It was not investigated further.

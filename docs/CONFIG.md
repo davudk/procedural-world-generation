@@ -132,7 +132,7 @@ Levels are evaluated top-down: **L0 → L1 → L2 → L3**. L4 (view) never affe
 
 ### L4 — View (never changes the world; shader-only or UI-only)
 
-- map mode, palette, vertical exaggeration (AUTO ← zoom), sun / time of day, season
+- map mode, palette, vertical exaggeration (AUTO ← zoom), sun / time of day, season (each with an on/off checkbox)
 - labels, rivers, haze, minimap, water animation
 
 ---
