@@ -65,7 +65,7 @@ const label = (a: ArchAgg): string => `${a.archetype}${a.group === 'preview' ? '
 function headline(as: ArchAgg[]): string {
   const ids = bandIds(as);
   const bandCols = ids.map((id) => `<th>${id}</th>`).join('');
-  let s = `<table><thead><tr><th rowspan="2">archetype</th><th rowspan="2">seeds</th><th colspan="${ids.length}">band pass (seeds, all three)</th><th colspan="5">🎯 targets met</th><th colspan="4">contrast</th><th rowspan="2">heroes 3–5</th><th rowspan="2">boring</th><th rowspan="2">cluttered</th></tr>`;
+  let s = `<table><thead><tr><th rowspan="2">archetype</th><th rowspan="2">seeds</th><th colspan="${ids.length}">band pass (seeds, all three)</th><th colspan="5">🎯 targets met</th><th colspan="4">contrast</th><th rowspan="2">heroes in range<br><small>3–5; spheres 5–8</small></th><th rowspan="2">boring</th><th rowspan="2">cluttered</th></tr>`;
   s += `<tr>${bandCols}<th>contin.</th><th>ranges</th><th>rifts</th><th>river dens.</th><th>wetland</th><th>&lt;300 m</th><th>&gt;2 km</th><th>king</th><th>W view</th></tr></thead><tbody>`;
   for (const a of as) {
     s += `<tr><th>${label(a)}</th><td>${a.seeds}</td>`;
@@ -154,7 +154,7 @@ function miscTable(as: ArchAgg[]): string {
   row('W views with ≥ 2 contrasts', '100 %', (a) => cell(a.contrast.wViewOk));
   row('quiet land share', `${QUIET.share[0]}–${QUIET.share[1]}`, (a) => cell(a.quiet.passRate, `${fmt(a.quiet.summary.p50)}<br><small>${pct(a.quiet.passRate)}</small>`));
   row('largest biome share', '≤ 0.7 (boring)', (a) => `<td>${fmt(a.biomeMax.p50)} <small>[${fmt(a.biomeMax.p95)}]</small></td>`);
-  row('heroes (p50)', '3–5, spacing ≥ ¼ world', (a) => cell(Math.min(a.heroes.inRange, a.heroes.spacingOk), `${fmt(a.heroes.count.p50, 0)}<br><small>in range ${pct(a.heroes.inRange)}, spaced ${pct(a.heroes.spacingOk)}</small>`));
+  row('heroes (p50)', '3–5 (spheres 5–8), spacing ≥ ¼ world', (a) => cell(Math.min(a.heroes.inRange, a.heroes.spacingOk), `${fmt(a.heroes.count.p50, 0)}<br><small>in range ${pct(a.heroes.inRange)}, spaced ${pct(a.heroes.spacingOk)}</small>`));
   for (const t of ['common', 'uncommon', 'rare', 'legendary']) row(`tier ${t} (p50)`, t === 'rare' ? 'P(≥1) 0.6–0.9' : '', (a) => `<td>${fmt(a.tiers[t].p50, 0)}${t === 'rare' ? `<br><small>P(≥1) ${pct(a.rareAtLeastOne)}</small>` : ''}</td>`);
   for (const [k, r] of Object.entries(GEOMORPH)) row(esc(k), `${r[0]}–${r[1]}`, (a) => cell(a.geomorph[k].passRate, `${fmt(a.geomorph[k].summary.p50)}<br><small>${pct(a.geomorph[k].passRate)}</small>`));
   for (const [k, r] of Object.entries(CLARK_EVANS)) row(`Clark–Evans ${esc(k)}`, `${r[0]}–${r[1]}`, (a) => cell(a.clarkEvans[k].passRate, `${fmt(a.clarkEvans[k].summary.p50)}<br><small>n ${a.clarkEvans[k].summary.n}, ${pct(a.clarkEvans[k].passRate)}</small>`));

@@ -197,7 +197,11 @@ export function aggregateArch(ws: WorldMetrics[]): ArchAgg {
     rareAtLeastOne: share(ws.map((w) => (w.tiers.rare ?? 0) >= 1)),
     heroes: {
       count: summarize(ws.map((w) => w.heroes.count)),
-      inRange: share(ws.map((w) => w.heroes.count >= 3 && w.heroes.count <= 5)),
+      // The world's own hero range: 3–5 on the default flat world, the AUTO [5, 8] on spheres.
+      inRange: share(ws.map((w) => {
+        const [lo, hi] = w.countRanges?.heroes ?? [3, 5];
+        return w.heroes.count >= lo && w.heroes.count <= hi;
+      })),
       spacingOk: share(ws.map((w) => w.heroes.count < 2 || w.heroes.minSpacingFrac >= 0.25 - 1e-6)),
     },
     contrast: {
