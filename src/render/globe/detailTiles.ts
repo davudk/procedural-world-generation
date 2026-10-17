@@ -2,7 +2,7 @@ import type { RiverGraph } from '../../shared/protocol';
 import { FACE_C, faceDir } from '../../shared/cube';
 import type { Vec3 } from '../camera/ground';
 import {
-  DG, chartAngles, chartGrad, fbm3, globeDetailParams, tileCentre, tileKey, tileOfKey, tileStride,
+  DG, wetLevel, chartAngles, chartGrad, fbm3, globeDetailParams, tileCentre, tileKey, tileOfKey, tileStride,
   type GlobeDetailParams, type TileLattice, type TileSource,
 } from '../height/globeHeightFn';
 import { DN, bicubicQ, bilinearQ, detailParams, smoothstep, type DetailParams } from '../height/heightFn';
@@ -40,10 +40,21 @@ export interface GlobeDetailWorld {
   seed: number;
   /** Raw elevation (m): the macro the tiles amplify. */
   elevation: ArrayLike<number>;
-  /** Prepared water levels (> DRY: water surface, as heightField.prepareWater), or null: the sea at 0. */
+  /**
+   * Prepared water levels (> DRY: water surface, spread past the shores as prepareWaterSphere does), or
+   * null: the sea at 0. Leave river cells out (dry, then spread): rivers are carved channels under their
+   * ribbons, and a river level would flood the detailed valley floor. The shader must sample the same
+   * levels (GlobePass's u_wlevelD).
+   */
   waterLevel?: ArrayLike<number> | null;
   /** Water class (0 land, 1 ocean, 2 lake, 3 river, 4 wetland, 5 playa, 6 salt lake), with the levels. */
   waterClass?: ArrayLike<number> | null;
+  /**
+   * Raw (unspread) water levels, to tell real water cells from the dry cells the spread rings reach: a
+   * dry cell lower than a neighbouring lake keeps its spread level for a smooth shore, but its detail
+   * stays land. Null: every cell with a level counts as water (the flat rule).
+   */
+  waterRaw?: ArrayLike<number> | null;
   /** The view's padded water-lid surface (GlobeHeightField.padded = the GPU's u_surf), for the TS height function. */
   surfacePad?: Float32Array | null;
   /** log10 discharge (m³/s): large rivers damp the amplification, as on flat maps. */
@@ -60,13 +71,20 @@ export interface PreparedGlobe {
   /** Padded (6 × (n + 2·PAD)²) raw macro, water level, coastal band (0/1) and RGBA8 control. */
   macroPad: Float32Array;
   waterPad: Float32Array;
-  /** The prepared levels as the shader samples them (river cells included), or null: the sea at 0. */
+  /** `waterPad` when the world has water levels (what the shader samples), else null: the sea at 0. */
   levelPad: Float32Array | null;
   surfacePad: Float32Array | null;
   coastPad: Float32Array;
+  /** Padded real-water mask (1: a cell with its own level, not a river; 0: dry or reached only by spreading). */
+  wetPad: Float32Array;
   controlPad: Uint8Array;
   /** River node directions (3 per node) and attributes, or null. */
   riverDirs: Float32Array | null;
+  /** River nodes bucketed by the tile they fall in: node indices sorted by tile, and per-tile offsets (count + 1). */
+  riverOrder: Int32Array | null;
+  riverStart: Int32Array | null;
+  /** Scratch node → compact index map (−1), reused by tileRiverSegments. */
+  riverMap: Int32Array | null;
   rivers: SphereRivers | null;
 }
 
@@ -90,17 +108,9 @@ export function* prepareGlobe(world: GlobeDetailWorld, lattice: TileLattice): Ge
     return out;
   };
   const macroPad = yield* padded(world.elevation, 1);
-  const levelPad = world.waterLevel ? yield* padded(world.waterLevel, 1) : null;
-  // River cells (class 3) are ribbons over carved channels, not a water body: dry for the bounds, so a
-  // river cell is not forced under its level (the carve puts the channel floor at the water surface).
-  let water = world.waterLevel ?? null;
-  const wc = world.waterClass ?? null;
-  if (water && wc && wc.length === water.length) {
-    const w = Float32Array.from(water);
-    for (let i = 0; i < w.length; i++) if (wc[i] === 3) w[i] = -10000;
-    water = w;
-  }
+  const water = world.waterLevel ?? null;
   const waterPad = water ? yield* padded(water, 1) : new Float32Array(6 * m * m);
+  const levelPad = water ? waterPad : null;
   const cellM = (world.radius * Math.PI) / 2 / n;
   const coast = new Float32Array(N6);
   const ctl = new Float32Array(N6 * 4);
@@ -146,6 +156,10 @@ export function* prepareGlobe(world: GlobeDetailWorld, lattice: TileLattice): Ge
     }
   }
   const coastPad = yield* padded(coast, 1);
+  const raw = world.waterRaw ?? null;
+  const wetCell = new Float32Array(N6);
+  for (let i = 0; i < N6; i++) wetCell[i] = raw ? (raw[i] > DRY && !(cls && cls[i] === 3) ? 1 : 0) : 1;
+  const wetPad = yield* padded(wetCell, 1);
   const cp = yield* padded(ctl, 4);
   const controlPad = new Uint8Array(cp.length);
   for (let i = 0; i < cp.length; i++) {
@@ -153,20 +167,36 @@ export function* prepareGlobe(world: GlobeDetailWorld, lattice: TileLattice): Ge
     if ((i & 0xfffff) === 0xfffff) yield 0;
   }
   let riverDirs: Float32Array | null = null;
+  let riverOrder: Int32Array | null = null;
+  let riverStart: Int32Array | null = null;
   const rv = world.rivers ?? null;
   if (rv && rv.graph.n > 0) {
-    riverDirs = new Float32Array(rv.graph.n * 3);
+    const rn = rv.graph.n;
+    riverDirs = new Float32Array(rn * 3);
+    const tileOf = new Int32Array(rn);
+    const tiles = 6 * lattice.T * lattice.T;
+    riverStart = new Int32Array(tiles + 1);
     const d = new Float64Array(3);
-    for (let i = 0; i < rv.graph.n; i++) {
+    for (let i = 0; i < rn; i++) {
       rv.nodeDir(i, d);
       riverDirs[i * 3] = d[0];
       riverDirs[i * 3 + 1] = d[1];
       riverDirs[i * 3 + 2] = d[2];
+      const key = tileAtDir(lattice, d[0], d[1], d[2]);
+      tileOf[i] = key;
+      riverStart[key + 1]++;
+      if ((i & 0x7fff) === 0x7fff) yield 0;
     }
+    for (let t = 0; t < tiles; t++) riverStart[t + 1] += riverStart[t];
+    const fill = riverStart.slice(0, tiles);
+    riverOrder = new Int32Array(rn);
+    for (let i = 0; i < rn; i++) riverOrder[fill[tileOf[i]]++] = i;
+    yield 0;
   }
   return {
     lattice, params: globeDetailParams(lattice, world.seed), n, radius: world.radius, macroPad, waterPad, levelPad,
-    surfacePad: world.surfacePad ?? null, coastPad, controlPad, riverDirs, rivers: rv,
+    surfacePad: world.surfacePad ?? null, coastPad, wetPad, controlPad, riverDirs, riverOrder, riverStart,
+    riverMap: riverDirs ? new Int32Array(rv!.graph.n).fill(-1) : null, rivers: rv,
   };
 }
 
@@ -188,6 +218,7 @@ export function sampleCube(pad: ArrayLike<number>, n: number, x: number, y: numb
 }
 
 const sTmp = new Float64Array(3);
+const tTmp = new Float64Array(3);
 
 /** Everything one tile build reads: local rasters in the tile's face chart (row = b), and river segments. */
 export interface TilePrep {
@@ -213,6 +244,8 @@ export interface TilePrep {
   macro: Float32Array;
   water: Float32Array;
   coast: Float32Array;
+  /** Real-water mask on the local grid (0..1 bilinear: water bounds only where > 0). */
+  wet: Float32Array;
   /** RGBA8 control on the local macro grid. */
   control: Uint8Array;
   slope: Float32Array;
@@ -235,6 +268,7 @@ export function prepareTile(pg: PreparedGlobe, key: number): TilePrep {
   const macro = new Float32Array(nl * nl);
   const water = new Float32Array(nl * nl);
   const coast = new Float32Array(nl * nl);
+  const wet = new Float32Array(nl * nl);
   const control = new Uint8Array(nl * nl * 4);
   const d = new Float64Array(3);
   const cellAng = k * l.delta;
@@ -248,6 +282,7 @@ export function prepareTile(pg: PreparedGlobe, key: number): TilePrep {
         macro[o] = pg.macroPad[p];
         water[o] = pg.waterPad[p];
         coast[o] = pg.coastPad[p];
+        wet[o] = pg.wetPad[p];
         for (let c = 0; c < 4; c++) control[o * 4 + c] = pg.controlPad[p * 4 + c];
         continue;
       }
@@ -255,6 +290,7 @@ export function prepareTile(pg: PreparedGlobe, key: number): TilePrep {
       macro[o] = sampleCube(pg.macroPad, n, d[0], d[1], d[2]);
       water[o] = sampleCube(pg.waterPad, n, d[0], d[1], d[2]);
       coast[o] = sampleCube(pg.coastPad, n, d[0], d[1], d[2]);
+      wet[o] = sampleCube(pg.wetPad, n, d[0], d[1], d[2]);
       for (let c = 0; c < 4; c++) control[o * 4 + c] = Math.round(sampleCube(pg.controlPad, n, d[0], d[1], d[2], 4, c));
     }
   }
@@ -274,7 +310,7 @@ export function prepareTile(pg: PreparedGlobe, key: number): TilePrep {
   const { segs, count } = tileRiverSegments(pg, face, ox, oy, D, slope, nl, params);
   return {
     key, face, D, nl, k, ox, oy, a0: -Q + ox * l.delta, b0: -Q + oy * l.delta, delta: l.delta, texelM, radius: l.radius,
-    seed: pg.params.seed, globe: pg.params, params, macro, water, coast, control, slope, segs, segCount: count,
+    seed: pg.params.seed, globe: pg.params, params, macro, water, coast, wet, control, slope, segs, segCount: count,
   };
 }
 
@@ -287,35 +323,83 @@ export function tileRiverSegments(
 ): { segs: Float32Array; count: number } {
   const rv = pg.rivers;
   const dirs = pg.riverDirs;
-  if (!rv || !dirs) return { segs: new Float32Array(0), count: 0 };
+  const order = pg.riverOrder;
+  const start = pg.riverStart;
+  const map = pg.riverMap;
+  if (!rv || !dirs || !order || !start || !map) return { segs: new Float32Array(0), count: 0 };
   const g = rv.graph;
   const l = pg.lattice;
   const size = D * l.texelM;
   const reach = 0.25 * size + 20 * l.k * l.texelM;
-  const x = new Float32Array(g.n).fill(Number.NaN);
-  const y = new Float32Array(g.n).fill(Number.NaN);
-  const k = face * 3;
+  // Candidate nodes: those in this tile and in the tiles around it (also across seams), plus each one's
+  // downstream node so every edge has both ends; a compact graph keeps the work per tile small.
+  const own = tileKey(face, Math.floor((ox + l.A) / l.N), Math.floor((oy + l.A) / l.N), l.T);
+  const c0 = new Float64Array(3);
+  const c1 = new Float64Array(3);
+  const rho = tileCentre(l, own, c0);
+  const nodes: number[] = [];
+  const add = (i: number): void => {
+    if (map[i] >= 0) return;
+    map[i] = nodes.length;
+    nodes.push(i);
+  };
+  for (let key = 0; key < start.length - 1; key++) {
+    if (start[key + 1] === start[key]) continue;
+    const r = tileCentre(l, key, c1);
+    if (Math.acos(Math.min(1, c0[0] * c1[0] + c0[1] * c1[1] + c0[2] * c1[2])) > rho + r + reach / l.radius) continue;
+    for (let k = start[key]; k < start[key + 1]; k++) add(order[k]);
+  }
+  const first = nodes.length;
+  for (let k = 0; k < first; k++) {
+    const j = g.down[nodes[k]];
+    if (j >= 0 && j < g.n) add(j);
+  }
+  const n = nodes.length;
+  const x = new Float32Array(n).fill(Number.NaN);
+  const y = new Float32Array(n).fill(Number.NaN);
+  const zWater = new Float32Array(n);
+  const zBed = new Float32Array(n);
+  const width = new Float32Array(n);
+  const down = new Int32Array(n).fill(-1);
+  const k3 = face * 3;
   const ang = new Float64Array(2);
-  for (let i = 0; i < g.n; i++) {
+  for (let k = 0; k < n; k++) {
+    const i = nodes[k];
+    zWater[k] = g.zWater[i];
+    zBed[k] = g.zBed[i];
+    width[k] = g.width[i];
+    // Only nodes from the buckets start edges (downstream extras only end them).
+    if (k < first) {
+      const j = g.down[i];
+      down[k] = j >= 0 && j < g.n ? map[j] : -1;
+    }
     const dx = dirs[i * 3], dy = dirs[i * 3 + 1], dz = dirs[i * 3 + 2];
-    if (dx * FACE_C[k] + dy * FACE_C[k + 1] + dz * FACE_C[k + 2] < 0.3) continue;
+    if (dx * FACE_C[k3] + dy * FACE_C[k3 + 1] + dz * FACE_C[k3 + 2] < 0.3) continue;
     chartAngles(face, dx, dy, dz, ang);
     const px = ((ang[0] + Q) / l.delta - ox) * l.texelM;
     const py = ((ang[1] + Q) / l.delta - oy) * l.texelM;
     if (px < -reach || py < -reach || px > size + reach || py > size + reach) continue;
-    x[i] = px;
-    y[i] = py;
+    x[k] = px;
+    y[k] = py;
   }
-  const local = { n: g.n, x, y, zWater: g.zWater, zBed: g.zBed, width: g.width, down: g.down } as unknown as RiverGraph;
+  for (const i of nodes) map[i] = -1;
+  const local = { n, x, y, zWater, zBed, width, down } as unknown as RiverGraph;
   return riverSegments(local, slope, nl, params);
 }
 
 // ---- CPU build (reference of the GPU passes; fallback without float render targets) -----------------
 
-/** Water bounds of a tile texel (mirrors the tile head's bBounds): flat's rule, relaxed in the coastal band. */
-export function tileBounds(hb: number, wl: number, coast: number): [number, number] {
+/**
+ * Water bounds of a tile texel (mirrors the tile head's bBounds): flat's rule, relaxed in the coastal
+ * band, against the effective level (wetLevel): dry cells lower than a nearby lake's spread level and
+ * carved valley floors there are neither forced under water nor above the lake.
+ */
+export function tileBounds(hb: number, wlPrepared: number, coast: number, wet = 1): [number, number] {
   const c = coast * DG.COAST_RELAX;
-  if (wl > DN.DRY) return hb < wl ? [-1e30, wl - 0.5 + c] : [wl + 0.5 - c, 1e30];
+  if (wlPrepared > DN.DRY) {
+    const wl = wetLevel(wlPrepared, wet);
+    return hb < wl ? [-1e30, wl - 0.5 + c] : [wl + 0.5 - c, 1e30];
+  }
   return [hb >= 0.5 ? 0.5 - c : -1e30, 1e30];
 }
 
@@ -368,7 +452,7 @@ export function* buildTileCpu(tp: TilePrep, thermalSteps: number, opts: { talus:
       const hb = bilinearQ(tp.macro, nl, qx, qy, t3)[0];
       const wl = bilinearQ(tp.water, nl, qx, qy, t3)[0];
       const co = bilinearQ(tp.coast, nl, qx, qy, t3)[0];
-      const [l, hi] = tileBounds(hb, wl, co);
+      const [l, hi] = tileBounds(hb, wl, co, bilinearQ(tp.wet, nl, qx, qy, t3)[0]);
       controlAt(tp.control, nl, (x + 0.5) / D, (y + 0.5) / D, ctl);
       chartGrad(tp.face, a, b, b5[1] / cellAng, b5[2] / cellAng, R, g0);
       acc.fill(0);
@@ -388,6 +472,10 @@ export function* buildTileCpu(tp: TilePrep, thermalSteps: number, opts: { talus:
     }
     if ((y & 3) === 3) yield 0;
   }
+  if (tp.segCount > 0) {
+    const floor = channelFloor(tp);
+    for (let i = 0; i < D * D; i++) if (floor[i] > lo[i]) lo[i] = floor[i];
+  }
   for (let s = 0; s < tp.segCount; s++) carveSegmentCpu(tp, s, lo, cap);
   for (let i = 0; i < D * D; i++) h[i] = Math.min(Math.max(h[i], lo[i]), cap[i]);
   yield 0;
@@ -401,6 +489,47 @@ export function* buildTileCpu(tp: TilePrep, thermalSteps: number, opts: { talus:
     [src, dst] = [dst, src];
   }
   return src;
+}
+
+/**
+ * Channel floors of a tile raster (mirrors the GPU floor pass): per texel the lowest of the segments'
+ * channels covering it (parabolic bed to the water surface, then the flat floor) minus 1 m, −1e30 where
+ * none does. The build keeps the terrain at or above it, so erosion cannot dig under a channel's bed;
+ * the lowest, so overlapping segments of one river never lift each other.
+ */
+export function channelFloor(tp: TilePrep): Float32Array {
+  const D = tp.D;
+  const tx = tp.texelM;
+  const out = new Float32Array(D * D).fill(Infinity);
+  const g = tp.segs;
+  for (let s = 0; s < tp.segCount; s++) {
+    const o = s * 12;
+    const ax = g[o], ay = g[o + 1], bx = g[o + 2], by = g[o + 3];
+    const half = 0.5 * g[o + 8];
+    const reach = half + g[o + 9];
+    const x0 = Math.max(0, Math.floor((Math.min(ax, bx) - reach) / tx));
+    const x1 = Math.min(D - 1, Math.ceil((Math.max(ax, bx) + reach) / tx));
+    const y0 = Math.max(0, Math.floor((Math.min(ay, by) - reach) / tx));
+    const y1 = Math.min(D - 1, Math.ceil((Math.max(ay, by) + reach) / tx));
+    const dx = bx - ax, dy = by - ay;
+    const L2 = dx * dx + dy * dy;
+    for (let y = y0; y <= y1; y++) {
+      const py = (y + 0.5) * tx;
+      for (let x = x0; x <= x1; x++) {
+        const px = (x + 0.5) * tx;
+        const t = L2 > 0 ? Math.min(1, Math.max(0, ((px - ax) * dx + (py - ay) * dy) / L2)) : 0;
+        const r = Math.hypot(px - ax - t * dx, py - ay - t * dy);
+        if (r >= reach) continue;
+        const zb = g[o + 4] + (g[o + 5] - g[o + 4]) * t;
+        const zw = g[o + 6] + (g[o + 7] - g[o + 6]) * t;
+        const u = r / half;
+        const z = (r < half ? zb + (zw - zb) * u * u : zw) - 1;
+        if (z < out[y * D + x]) out[y * D + x] = z;
+      }
+    }
+  }
+  for (let i = 0; i < out.length; i++) if (out[i] === Infinity) out[i] = -1e30;
+  return out;
 }
 
 /** The stored part of a tile raster: core plus margin, stride² texels. */
@@ -669,7 +798,7 @@ export class TileCache implements TileSource {
 
 /** Tile key of the tile containing a direction (tests and tools). */
 export function tileAtDir(l: TileLattice, x: number, y: number, z: number): number {
-  const fa = new Float64Array(3);
+  const fa = tTmp;
   dirToFaceAngles(x, y, z, fa);
   const ix = Math.min(l.T - 1, Math.max(0, Math.floor((fa[1] + Q) / (l.N * l.delta))));
   const iy = Math.min(l.T - 1, Math.max(0, Math.floor((fa[2] + Q) / (l.N * l.delta))));

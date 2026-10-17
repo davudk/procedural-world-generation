@@ -43,7 +43,19 @@ export const DG = {
   COAST_MAX: 60,
   /** How far (m) the water bounds relax inside the coastal band (×band weight). */
   COAST_RELAX: 1000,
+  /**
+   * Effective water level: the prepared level where real water (a cell with its own level, not a river)
+   * is within reach of the bilinear mask, sinking by WET_DROP m as the mask falls from WET_FADE to 0. The
+   * spread rings keep shores smooth but don't flood dry valley floors or carved channels next to a lake.
+   */
+  WET_FADE: 0.05,
+  WET_DROP: 1000,
 } as const;
+
+/** The effective water level for a prepared level `wl` (< DRY: dry) and the real-water mask `wet` (0..1). */
+export function wetLevel(wl: number, wet: number): number {
+  return wl - DG.WET_DROP * (1 - Math.min(1, Math.max(0, wet / DG.WET_FADE)));
+}
 
 // ---- Tile lattice -----------------------------------------------------------------------------------
 
@@ -289,8 +301,10 @@ export interface GlobeHeightSources {
   macroPad: Float32Array;
   /** Rendered macro surface (the water lid), padded: GlobeHeightField.padded = the GPU's u_surf. Null: max(h, 0) of macroPad. */
   surfacePad?: Float32Array | null;
-  /** Prepared water levels, padded (< DRY: dry), as the GPU's u_wlevel; null: the sea at 0 everywhere. */
+  /** Prepared water levels, padded (< DRY: dry), as the GPU's u_wlevelD; null: the sea at 0 everywhere. */
   waterPad?: Float32Array | null;
+  /** Real-water mask, padded (the GPU's u_wetD); null: 1 everywhere. */
+  wetPad?: Float32Array | null;
   /** Control (RGBA8, padded like the macro): roughness, rock, water proximity, unused. */
   control: Uint8Array | null;
   params: GlobeDetailParams | null;
@@ -311,34 +325,61 @@ const crd = (t: number, k: number): number =>
   k === 0 ? (-1.5 * t + 2) * t - 0.5 : k === 1 ? (4.5 * t - 5) * t : k === 2 ? (-4.5 * t + 4) * t + 0.5 : (1.5 * t - 1) * t;
 
 /** Catmull-Rom on a row-major raster (offset `base`, width w) at (qx, qy): [v, gx, gy, min, max of the 4 nearest]. Caller keeps 1 ≤ ix ≤ w − 3. */
+const blk = new Float64Array(16);
+const cmx = new Float64Array(9);
+const cmn = new Float64Array(9);
+
+/**
+ * Catmull-Rom on a row-major raster (offset `base`, width w) at (qx, qy): [v, gx, gy, min, max]. Caller
+ * keeps 1 ≤ ix ≤ w − 3. The value is clamped to a continuous envelope of the cell (2×2 texel) extremes:
+ * the 3×3 cells around the point interpolated on the dual grid of cell centres, so at a cell centre it
+ * is the flat maps' four-texel clamp, and it never jumps at texel edges (min, max = that envelope).
+ */
 function bicubicAt(d: ArrayLike<number>, base: number, w: number, qx: number, qy: number, out: Float64Array): Float64Array {
   const ix = Math.floor(qx);
   const iy = Math.floor(qy);
   const fx = qx - ix;
   const fy = qy - iy;
-  let v = 0, gx = 0, gy = 0, lo = Infinity, hi = -Infinity;
+  let v = 0, gx = 0, gy = 0;
   for (let y = 0; y < 4; y++) {
     const row = base + (iy + y - 1) * w + ix - 1;
     let rv = 0, rd = 0;
     for (let x = 0; x < 4; x++) {
       const h = d[row + x];
+      blk[y * 4 + x] = h;
       rv += cr(fx, x) * h;
       rd += crd(fx, x) * h;
-      if (x >= 1 && x <= 2 && y >= 1 && y <= 2) {
-        lo = Math.min(lo, h);
-        hi = Math.max(hi, h);
-      }
     }
     v += cr(fy, y) * rv;
     gx += cr(fy, y) * rd;
     gy += crd(fy, y) * rv;
   }
-  out[0] = v;
+  envelope(fx, fy, out);
+  out[0] = Math.min(out[4], Math.max(out[3], v));
   out[1] = gx;
   out[2] = gy;
-  out[3] = lo;
-  out[4] = hi;
   return out;
+}
+
+/** Continuous min/max envelope of the 2×2-texel cell extremes over `blk` (see bicubicAt) into out[3], out[4]. */
+function envelope(fx: number, fy: number, out: Float64Array): void {
+  for (let cy = 0; cy < 3; cy++) {
+    for (let cx = 0; cx < 3; cx++) {
+      const a = blk[cy * 4 + cx], b = blk[cy * 4 + cx + 1], c = blk[cy * 4 + cx + 4], e = blk[cy * 4 + cx + 5];
+      cmx[cy * 3 + cx] = Math.max(a, b, c, e);
+      cmn[cy * 3 + cx] = Math.min(a, b, c, e);
+    }
+  }
+  const sx = fx < 0.5 ? 0 : 1, sy = fy < 0.5 ? 0 : 1;
+  const tx = fx < 0.5 ? fx + 0.5 : fx - 0.5, ty = fy < 0.5 ? fy + 0.5 : fy - 0.5;
+  const k = sy * 3 + sx;
+  const lerp2 = (m: Float64Array): number => {
+    const top = m[k] + (m[k + 1] - m[k]) * tx;
+    const bot = m[k + 3] + (m[k + 4] - m[k + 3]) * tx;
+    return top + (bot - top) * ty;
+  };
+  out[3] = lerp2(cmn);
+  out[4] = lerp2(cmx);
 }
 
 /** Bilinear value and texel gradient on a row-major raster at (qx, qy), indices clamped to [0, w − 1]. */
@@ -404,19 +445,18 @@ export class GlobeHeightFn {
     return top + (bot - top) * fy;
   }
 
-  /** Catmull-Rom of the macro (the base where no tile is resident) with its tangent gradient. */
+  /** Catmull-Rom of the macro (the base where no tile is resident, envelope-clamped) with its tangent gradient. */
   macroCubic(face: number, a: number, b: number, out: Float64Array): Float64Array {
     const m = this.m;
     const px = Math.min(m - 2.001, Math.max(1, (a + Q) / this.delta - 0.5 + PAD));
     const py = Math.min(m - 2.001, Math.max(1, (b + Q) / this.delta - 0.5 + PAD));
     bicubicAt(this.src.macroPad, face * m * m, m, px, py, tB);
-    // Unclamped: clamping to the four nearest cells (as flat maps do) jumps where that set changes.
     out[0] = tB[0];
     chartGrad(face, a, b, tB[1] / this.delta, tB[2] / this.delta, this.radius, out);
     return out;
   }
 
-  /** Water surface (= GLSL gWaterLevel): bilinear prepared level (< DRY dry), or the sea at 0. */
+  /** Water surface (= GLSL gWaterLevel): the effective level (wetLevel) of the bilinear prepared level (< DRY dry), or the sea at 0. */
   waterLevel(face: number, a: number, b: number): number {
     const w = this.src.waterPad;
     if (!w) return 0;
@@ -424,7 +464,11 @@ export class GlobeHeightFn {
     const px = Math.min(m - 1.001, Math.max(0, (a + Q) / this.delta - 0.5 + PAD));
     const py = Math.min(m - 1.001, Math.max(0, (b + Q) / this.delta - 0.5 + PAD));
     bilinearAt(w, face * m * m, m, px, py, tA);
-    return tA[0];
+    const wl = tA[0];
+    const wet = this.src.wetPad;
+    if (!wet || wl <= DN.DRY) return wl;
+    bilinearAt(wet, face * m * m, m, px, py, tA);
+    return wetLevel(wl, tA[0]);
   }
 
   /** Share of the detail (tiles + octaves) at a footprint: 1 below one texel per pixel, 0 above two. */

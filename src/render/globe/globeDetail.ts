@@ -81,6 +81,8 @@ ${GLOBE_NOISE_GLSL}
 uniform sampler2D u_macro;   // R32F local macro (nl x nl), row = chart b
 uniform sampler2D u_wl;      // R32F local water level, < -9000 dry
 uniform sampler2D u_coast;   // R32F local coastal band (0..1)
+uniform sampler2D u_wet;     // R32F local real-water mask (effective water level)
+uniform sampler2D u_floor;   // R32F per texel: river channel floor − 1 m (min of capsules), 1e30 where none
 uniform int u_hasWater;
 uniform int u_n;
 uniform float u_size;
@@ -94,8 +96,14 @@ vec2 bBounds(vec2 pm) {
   float hb = dnBilinear(u_macro, u_n, q).x;
   float wl = u_hasWater == 1 ? dnBilinear(u_wl, u_n, q).x : 0.0;
   float c = dnBilinear(u_coast, u_n, q).x * G_COAST_RELAX;
-  if (wl > DN_DRY) return hb < wl ? vec2(-1e30, wl - 0.5 + c) : vec2(wl + 0.5 - c, 1e30);
-  return vec2(hb >= 0.5 ? 0.5 - c : -1e30, 1e30);
+  // Erosion may not dig carved channels deeper than their bed (ribbons would float above them).
+  float fl = texelFetch(u_floor, clamp(ivec2(pm / bTexel()), ivec2(0), ivec2(u_D - 1)), 0).r;
+  if (fl > 1e29) fl = -1e30;
+  if (wl > DN_DRY) {
+    wl = gWetLevel(wl, dnBilinear(u_wet, u_n, q).x);
+    return hb < wl ? vec2(fl, wl - 0.5 + c) : vec2(max(wl + 0.5 - c, fl), 1e30);
+  }
+  return vec2(max(hb >= 0.5 ? 0.5 - c : -1e30, fl), 1e30);
 }
 float bDepth(float z) { return clamp((z - (${Z_LO}.0)) / (${Z_HI - Z_LO}.0), 0.0, 1.0); }
 `;
@@ -135,6 +143,29 @@ void main() {
   o = min(max(m.x + nz + cz, b.x), texelFetch(u_cap, ivec2(gl_FragCoord.xy), 0).r);
 }`;
 
+// Channel floors (mirrors detailTiles.channelFloor): the parabolic channel and its flat floor, 1 m of
+// slack below; composited with depth-test MIN (overlapping segments of one river never lift each other),
+// so erosion keeps channels at most 1 m under their bed.
+const TFLOOR_FS = `${TILE_HEAD}
+flat in vec4 v_seg;
+flat in vec4 v_z;
+flat in vec4 v_w;
+out float o;
+void main() {
+  vec2 p = gl_FragCoord.xy * bTexel();
+  vec2 a = v_seg.xy, ab = v_seg.zw - v_seg.xy;
+  float L2 = dot(ab, ab);
+  float t = L2 > 0.0 ? clamp(dot(p - a, ab) / L2, 0.0, 1.0) : 0.0;
+  float r = length(p - a - t * ab);
+  float half_ = 0.5 * v_w.x;
+  if (r >= half_ + v_w.y) discard;
+  float zb = mix(v_z.x, v_z.y, t), zw = mix(v_z.z, v_z.w, t);
+  float u = r / half_;
+  float z = (r < half_ ? zb + (zw - zb) * u * u : zw) - 1.0;
+  o = z;
+  gl_FragDepth = bDepth(z);
+}`;
+
 const TEXTRACT_FS = `${TILE_HEAD}
 uniform sampler2D u_h;
 uniform int u_off;
@@ -150,7 +181,7 @@ void main() {
   o = vec4(texelFetch(u_h, b, 0).r, texelFetch(u_h, b + ivec2(1, 0), 0).r, texelFetch(u_h, b + ivec2(2, 0), 0).r, texelFetch(u_h, b + ivec2(3, 0), 0).r);
 }`;
 
-type TileProg = 'cap' | 'carve' | 'thermal' | 'copy' | 'hinit' | 'hflux' | 'hwater' | 'hadvect' | 'hwrite' | 'adown' | 'ablur' | 'afinal' | 'tbase' | 'textract' | 'tpack';
+type TileProg = 'tfloor' | 'cap' | 'carve' | 'thermal' | 'copy' | 'hinit' | 'hflux' | 'hwater' | 'hadvect' | 'hwrite' | 'adown' | 'ablur' | 'afinal' | 'tbase' | 'textract' | 'tpack';
 
 const FLAT = detailBuildSources(TILE_HEAD);
 
@@ -158,7 +189,7 @@ const FLAT = detailBuildSources(TILE_HEAD);
 export const GLOBE_TILE_SOURCES: Readonly<Record<TileProg, readonly [string, string]>> = {
   cap: FLAT.cap, carve: FLAT.carve, thermal: FLAT.thermal, copy: FLAT.copy, hinit: FLAT.hinit, hflux: FLAT.hflux,
   hwater: FLAT.hwater, hadvect: FLAT.hadvect, hwrite: FLAT.hwrite, adown: FLAT.adown, ablur: FLAT.ablur, afinal: FLAT.afinal,
-  tbase: [QUAD_VS, TBASE_FS], textract: [QUAD_VS, TEXTRACT_FS], tpack: [QUAD_VS, TPACK_FS],
+  tfloor: [FLAT.carve[0], TFLOOR_FS], tbase: [QUAD_VS, TBASE_FS], textract: [QUAD_VS, TEXTRACT_FS], tpack: [QUAD_VS, TPACK_FS],
 };
 
 const WAIT = -1;
@@ -189,8 +220,10 @@ interface Scratch {
   macro: WebGLTexture;
   wl: WebGLTexture;
   coast: WebGLTexture;
+  wet: WebGLTexture;
   ctl: WebGLTexture;
   cap: WebGLTexture;
+  floor: WebGLTexture;
   depth: WebGLRenderbuffer;
   hA: WebGLTexture;
   hB: WebGLTexture;
@@ -339,7 +372,7 @@ export class GlobeDetail implements GlobeDetailSource {
     const control = this.controlTex ? 6 * m * m * 4 : 0;
     const s = this.scratch;
     const D2 = s ? s.D * s.D : 0;
-    const scratch = s ? D2 * (4 * 3 + 4 + 16 * 4 + 8) + s.nl * s.nl * (4 * 5 + 4) + W * W * 4 * 2 : 0;
+    const scratch = s ? D2 * (4 * 4 + 4 + 16 * 4 + 8) + s.nl * s.nl * (4 * 6 + 4) + W * W * 4 * 2 : 0;
     let cpu = 0;
     if (this.cache) for (const d of this.cache.data) if (d) cpu += d.byteLength;
     if (this.prepared) cpu += this.prepared.macroPad.byteLength * 3 + this.prepared.controlPad.byteLength;
@@ -465,6 +498,7 @@ export class GlobeDetail implements GlobeDetailSource {
     this.boundsPad = globeBoundsPad(pg.params, this.opts.anchorMetres);
     this.fn = new GlobeHeightFn({
       n: pg.n, radius: pg.radius, macroPad: pg.macroPad, surfacePad: pg.surfacePad, waterPad: pg.levelPad,
+      wetPad: pg.levelPad ? pg.wetPad : null,
       control: pg.controlPad, params: pg.params, tiles: this.cache,
     });
     this.stats.prepMs = performance.now() - t;
@@ -603,8 +637,8 @@ export class GlobeDetail implements GlobeDetailSource {
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
     const s: Scratch = {
       D, nl,
-      macro: r32(nl), wl: r32(nl), coast: r32(nl), ctl: this.tex2d(gl.RGBA8, nl, true),
-      cap: r32(D), depth, hA: r32(D), hB: r32(D),
+      macro: r32(nl), wl: r32(nl), coast: r32(nl), wet: r32(nl), ctl: this.tex2d(gl.RGBA8, nl, true),
+      cap: r32(D), floor: r32(D), depth, hA: r32(D), hB: r32(D),
       A0: rgba32(), A1: rgba32(), F0: rgba32(), F1: rgba32(), V: this.tex2d(gl.RG32F, D),
       low: r32(nl), low2: r32(nl), pack, pbo, segBuf: gl.createBuffer(), segVao: gl.createVertexArray(),
     };
@@ -616,7 +650,7 @@ export class GlobeDetail implements GlobeDetailSource {
     const s = this.scratch;
     if (!s) return;
     const gl = this.gl;
-    for (const t of [s.macro, s.wl, s.coast, s.ctl, s.cap, s.hA, s.hB, s.A0, s.A1, s.F0, s.F1, s.V, s.low, s.low2, s.pack]) gl.deleteTexture(t);
+    for (const t of [s.macro, s.wl, s.coast, s.wet, s.ctl, s.cap, s.floor, s.hA, s.hB, s.A0, s.A1, s.F0, s.F1, s.V, s.low, s.low2, s.pack]) gl.deleteTexture(t);
     gl.deleteRenderbuffer(s.depth);
     gl.deleteBuffer(s.pbo);
     gl.deleteBuffer(s.segBuf);
@@ -633,7 +667,7 @@ export class GlobeDetail implements GlobeDetailSource {
     gl.uniform1i(this.loc(p, 'u_n'), tp.nl);
     gl.uniform1f(this.loc(p, 'u_size'), tp.D * tp.texelM);
     gl.uniform1i(this.loc(p, 'u_D'), tp.D);
-    const all: Record<string, WebGLTexture> = { u_macro: s.macro, u_wl: s.wl, u_coast: s.coast, ...textures };
+    const all: Record<string, WebGLTexture> = { u_macro: s.macro, u_wl: s.wl, u_coast: s.coast, u_wet: s.wet, u_floor: s.floor, ...textures };
     let unit = 0;
     for (const [k, t] of Object.entries(all)) {
       gl.activeTexture(gl.TEXTURE0 + unit);
@@ -684,7 +718,42 @@ export class GlobeDetail implements GlobeDetailSource {
     upload(s.macro, tp.macro, gl.RED, gl.FLOAT);
     upload(s.wl, tp.water, gl.RED, gl.FLOAT);
     upload(s.coast, tp.coast, gl.RED, gl.FLOAT);
+    upload(s.wet, tp.wet, gl.RED, gl.FLOAT);
     upload(s.ctl, tp.control, gl.RGBA, gl.UNSIGNED_BYTE);
+
+    // 0. Channel floors (depth-test MIN), read by every bound below.
+    this.target([s.floor], D, D, s.depth);
+    gl.clearBufferfv(gl.COLOR, 0, [1e30, 0, 0, 0]);
+    if (tp.segCount > 0) {
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LESS);
+      gl.depthMask(true);
+      gl.clearBufferfv(gl.DEPTH, 0, [1]);
+      gl.bindVertexArray(s.segVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, s.segBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, tp.segs, gl.STREAM_DRAW);
+      gl.bindVertexArray(null);
+      const CHUNK = 16384;
+      for (let first = 0; first < tp.segCount; first += CHUNK) {
+        const count = Math.min(CHUNK, tp.segCount - first);
+        this.target([s.floor], D, D, s.depth);
+        gl.enable(gl.DEPTH_TEST);
+        gl.depthFunc(gl.LESS);
+        // The floor target is being drawn: no sampler may read it (u_floor → an idle texture).
+        this.use('tfloor', tp, s, { u_floor: s.low });
+        gl.bindVertexArray(s.segVao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, s.segBuf);
+        for (let a = 0; a < 3; a++) {
+          gl.enableVertexAttribArray(a);
+          gl.vertexAttribPointer(a, 4, gl.FLOAT, false, SEG_FLOATS * 4, first * SEG_FLOATS * 4 + a * 16);
+          gl.vertexAttribDivisor(a, 1);
+        }
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+        gl.bindVertexArray(null);
+        yield this.est(count * 4096, 2);
+      }
+      gl.disable(gl.DEPTH_TEST);
+    }
 
     // 1. cap = min(water upper bound, carve profiles), depth-test MIN.
     const minDepth = (): void => {
@@ -700,10 +769,6 @@ export class GlobeDetail implements GlobeDetailSource {
     this.quad();
     yield this.est(D * D, 1);
     if (tp.segCount > 0) {
-      gl.bindVertexArray(s.segVao);
-      gl.bindBuffer(gl.ARRAY_BUFFER, s.segBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, tp.segs, gl.STREAM_DRAW);
-      gl.bindVertexArray(null);
       const CHUNK = 16384;
       for (let first = 0; first < tp.segCount; first += CHUNK) {
         const count = Math.min(CHUNK, tp.segCount - first);

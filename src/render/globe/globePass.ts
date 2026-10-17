@@ -7,6 +7,9 @@ import { GRID } from '../terrain/cdlod';
 import { SPHERE_INSTANCE_FLOATS, SPHERE_MAX_NODES } from '../terrain/cdlodSphere';
 import { bindGlobeAtmos, GLOBE_ATMOS_GLSL, type GlobeAtmosFrame } from './atmosphere';
 import { GLOBE_DETAIL_GLSL, type GlobeDetailUniforms } from '../glsl/globeDetail';
+import { DG } from '../height/globeHeightFn';
+
+const f1 = (x: number): string => (Number.isInteger(x) ? `${x}.0` : `${x}`);
 import type { Vec3 } from '../camera/ground';
 import { FACE_C, FACE_E, FACE_S, faceDir } from '../../shared/cube';
 import { acrossCell, arrayTexture, PAD, padFaces, SIDE_E, SIDE_N, SIDE_S, SIDE_W, uploadArray } from './cubeTex';
@@ -70,8 +73,31 @@ float waterClassAt(int f, vec2 ang) {
   ivec2 t = ivec2(floor((ang + QUARTER) / delta)) + PAD;
   return texelFetch(u_wclass, ivec3(clamp(t, ivec2(0), ivec2(u_hn + 2 * PAD - 1)), f), 0).r;
 }
-// Water level the detail respects (globeDetail.ts): the hydrology's prepared levels, or the sea at 0.
-float gWaterLevel(int f, vec2 ang) { return u_hasWater == 1 ? waterLevelAt(f, ang) : 0.0; }`;
+// Water level the close-zoom detail respects (globeDetail.ts): the prepared levels without river cells
+// (rivers are ribbons over carved channels; their levels would flood the detailed valley floors), or the
+// sea at 0. Same addressing as waterLevelAt.
+uniform highp sampler2DArray u_wlevelD;
+uniform highp sampler2DArray u_wetD;   // R32F padded real-water mask (cells with their own level, not rivers)
+float gWaterLevel(int f, vec2 ang) {
+  if (u_hasWater == 0) return 0.0;
+  float delta = 1.5707963267948966 / float(u_hn);
+  int m = u_hn + 2 * PAD;
+  vec2 p = clamp((ang + QUARTER) / delta - 0.5 + float(PAD), vec2(0.0), vec2(float(m) - 1.001));
+  ivec2 i = ivec2(floor(p));
+  vec2 fr = p - vec2(i);
+  float a = texelFetch(u_wlevelD, ivec3(i, f), 0).r;
+  float b = texelFetch(u_wlevelD, ivec3(i + ivec2(1, 0), f), 0).r;
+  float c = texelFetch(u_wlevelD, ivec3(i + ivec2(0, 1), f), 0).r;
+  float d = texelFetch(u_wlevelD, ivec3(i + ivec2(1, 1), f), 0).r;
+  float wl = mix(mix(a, b, fr.x), mix(c, d, fr.x), fr.y);
+  if (wl <= -9000.0) return wl;
+  a = texelFetch(u_wetD, ivec3(i, f), 0).r;
+  b = texelFetch(u_wetD, ivec3(i + ivec2(1, 0), f), 0).r;
+  c = texelFetch(u_wetD, ivec3(i + ivec2(0, 1), f), 0).r;
+  d = texelFetch(u_wetD, ivec3(i + ivec2(1, 1), f), 0).r;
+  float wet = mix(mix(a, b, fr.x), mix(c, d, fr.x), fr.y);
+  return wl - ${f1(DG.WET_DROP)} * (1.0 - clamp(wet / ${f1(DG.WET_FADE)}, 0.0, 1.0));   // = globeHeightFn.wetLevel
+}`;
 
 const VS = /* glsl */ `#version 300 es
 precision highp float;
@@ -266,7 +292,8 @@ void main() {
   vec4 ds = tD > 0.0 ? globeSample(f, ang, v_relSea, pxFoot) : vec4(hs.x, 0.0, 0.0, 0.0);
   float h = u_gOn == 1 ? ds.x : smoothK > 0.0 ? mix(hs.x, heightSmooth(f, ang), smoothK) : hs.x;
   // Water: the sea, plus lakes from the hydrology stage's levels (as the flat terrain's water lid).
-  float wl = u_hasWater == 1 ? waterLevelAt(f, ang) : -10000.0;
+  // With detail the level fades to the riverless one the detailed surface was built against.
+  float wl = u_hasWater == 1 ? mix(waterLevelAt(f, ang), gWaterLevel(f, ang), tD) : -10000.0;
   float cls = u_hasWater == 1 ? waterClassAt(f, ang) : 0.0;
   // Lakes by class, or by a level above the sea where the spread rings meet other classes.
   bool lake = cls > 1.5 && cls < 2.5 || cls > 5.5 || wl > 0.05;
@@ -419,6 +446,8 @@ export class GlobePass {
   private readonly coverTex: WebGLTexture;
   private readonly surfTex: WebGLTexture;
   private readonly wlevelTex: WebGLTexture;
+  private readonly wlevelDTex: WebGLTexture;
+  private readonly wetDTex: WebGLTexture;
   private readonly wclassTex: WebGLTexture;
   private hasCover = 0;
   private hasWater = 0;
@@ -441,7 +470,7 @@ export class GlobePass {
       'u_viewProj', 'u_radius', 'u_exag', 'u_normalExag', 'u_faceC', 'u_faceE', 'u_faceS', 'u_height', 'u_hn', 'u_grad',
       'u_climate', 'u_cn', 'u_hasClimate', 'u_lut', 'u_palette', 'u_layer', 'u_ln', 'u_layerMode', 'u_layerMin', 'u_layerMax',
       'u_sunCarto', 'u_camRight', 'u_camUp', 'u_sunReal', 'u_realK', 'u_lightCol', 'u_ambient', 'u_realistic', 'u_season', 'u_time',
-      'u_surf', 'u_cover', 'u_hasCover', 'u_wlevel', 'u_wclass', 'u_hasWater', 'u_pxScale',
+      'u_surf', 'u_cover', 'u_hasCover', 'u_wlevel', 'u_wclass', 'u_hasWater', 'u_pxScale', 'u_wlevelD', 'u_wetD',
     ] as const);
 
     const verts = new Float32Array((GRID + 1) * (GRID + 1) * 2);
@@ -488,6 +517,8 @@ export class GlobePass {
     this.coverTex = arrayTexture(gl, 'rgba8');
     this.surfTex = arrayTexture(gl, 'r32f');
     this.wlevelTex = arrayTexture(gl, 'r32f');
+    this.wlevelDTex = arrayTexture(gl, 'r32f');
+    this.wetDTex = arrayTexture(gl, 'r32f');
     this.wclassTex = arrayTexture(gl, 'r32f');
     this.layerTex = arrayTexture(gl, 'r32f');
     this.lutTex = gl.createTexture();
@@ -502,9 +533,14 @@ export class GlobePass {
   /**
    * Elevation (six faces), its CPU-built 3D gradients and the rendered surface of the CPU height field
    * (`hf.padded`: the water lid). `water`: prepared levels and classes (prepareWaterSphere) on the
-   * same grid, or null (the sea only).
+   * same grid, or null (the sea only). `detailLevel`: the same levels prepared without river cells, which
+   * the close-zoom detail uses, and `detailWet` its padded real-water mask (PreparedGlobe.wetPad).
+   * Defaults: `water.level`, and 1 everywhere.
    */
-  setTerrain(layer: Layer, hf: GlobeHeightField, water: { level: Float32Array; cls: Float32Array } | null = null): void {
+  setTerrain(
+    layer: Layer, hf: GlobeHeightField, water: { level: Float32Array; cls: Float32Array } | null = null,
+    detailLevel: Float32Array | null = null, detailWet: Float32Array | null = null,
+  ): void {
     const gl = this.gl;
     const n = layer.w;
     const radiusM = hf.radius;
@@ -515,6 +551,8 @@ export class GlobePass {
     this.hasWater = water ? 1 : 0;
     if (water) {
       uploadArray(gl, this.wlevelTex, padFaces(water.level, n), n + 2 * PAD, 'r32f');
+      uploadArray(gl, this.wlevelDTex, padFaces(detailLevel ?? water.level, n), n + 2 * PAD, 'r32f');
+      uploadArray(gl, this.wetDTex, detailWet ?? padFaces(new Float32Array(6 * n * n).fill(1), n), n + 2 * PAD, 'r32f');
       uploadArray(gl, this.wclassTex, padFaces(water.cls, n), n + 2 * PAD, 'r32f');
     }
     // Gradient mips per layer (a texture array's levels must all hold 6 layers).
@@ -647,6 +685,8 @@ export class GlobePass {
     bindArr(5, this.surfTex, u.u_surf);
     bindArr(6, this.coverTex, u.u_cover);
     bindArr(7, this.wlevelTex, u.u_wlevel);
+    bindArr(12, this.wlevelDTex, u.u_wlevelD);
+    bindArr(13, this.wetDTex, u.u_wetD);
     bindArr(8, this.wclassTex, u.u_wclass);
     gl.uniform1i(u.u_hasCover, this.hasCover);
     gl.uniform1i(u.u_hasWater, this.hasWater);

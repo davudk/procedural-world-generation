@@ -2,12 +2,12 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { GLOBE_DETAIL_GLSL, GLOBE_NOISE_GLSL, noiseOrigin } from '../src/render/glsl/globeDetail';
 import {
-  DG, GlobeDetailGround, GlobeHeightFn, chartAngles, chartGrad, hash3U, noise3, tileKey, tileLattice, tileOfKey, tileStride,
+  DG, GlobeDetailGround, GlobeHeightFn, wetLevel, chartAngles, chartGrad, hash3U, noise3, tileKey, tileLattice, tileOfKey, tileStride,
   tileWeight1, type TileLattice, type TileSource,
 } from '../src/render/height/globeHeightFn';
 import { DN } from '../src/render/height/heightFn';
 import {
-  TileCache, buildTileCpu, extractTile, prepareGlobe, prepareTile, runSync, tileAtDir, type GlobeDetailWorld, type PreparedGlobe,
+  TileCache, buildTileCpu, tileBounds, extractTile, prepareGlobe, prepareTile, runSync, tileAtDir, type GlobeDetailWorld, type PreparedGlobe,
 } from '../src/render/globe/detailTiles';
 import { GLOBE_TILE_SOURCES } from '../src/render/globe/globeDetail';
 import { DETAIL_BUILD_SOURCES } from '../src/render/terrain/detail/detailMap';
@@ -368,7 +368,7 @@ describe('globe detail tiles (CPU reference of the GPU build)', () => {
     const key = tileAtDir(pg.lattice, d0[0], d0[1], d0[2]);
     const tp = prepareTile(pg, key);
     expect(tp.segCount).toBeGreaterThan(0);
-    const raster = runSync(buildTileCpu(tp, 2, { talus: 0.75, thermalRate: 0.5 }));
+    const raster = runSync(buildTileCpu(tp, 12, { talus: 0.75, thermalRate: 0.5 }));
     // The centreline: every segment's midpoint sits at or below its water surface.
     let checked = 0;
     for (let s = 0; s < tp.segCount; s++) {
@@ -379,6 +379,10 @@ describe('globe detail tiles (CPU reference of the GPU build)', () => {
       const h = raster[Math.round(y) * tp.D + Math.round(x)];
       // The nearest texel centre can sit up to 0.7 texel along the segment: allow its full water drop.
       expect(h).toBeLessThanOrEqual(Math.max(tp.segs[o + 6], tp.segs[o + 7]) + 1);
+      // …and erosion never digs it more than 1 m under the bed (ribbons don't float over a gorge).
+      // (The nearest texel may sit up to a segment past its end, one more drop down the river.)
+      const zb = Math.min(tp.segs[o + 4], tp.segs[o + 5]);
+      expect(h).toBeGreaterThanOrEqual(zb - Math.abs(tp.segs[o + 4] - tp.segs[o + 5]) - 1.01);
       checked++;
     }
     expect(checked).toBeGreaterThan(5);
@@ -386,12 +390,25 @@ describe('globe detail tiles (CPU reference of the GPU build)', () => {
 });
 
 describe('globe detail with the sphere hydrology', () => {
-  it('keeps lakes under their level and shores dry, treats river cells as land, and the octaves never cross a lake level', () => {
+  it('keeps dry cells reached only by a lake\'s spread level as land (no ponds along valleys)', () => {
+    // Below the spread level but with no real water nearby: not water, and free to lie below the level
+    // (the effective level has sunk away, so the shader neither floods nor lids it).
+    const [lo, hi] = tileBounds(59, 62.7, 0, 0);
+    expect(hi).toBe(1e30);
+    expect(lo).toBeLessThan(0);
+    expect(wetLevel(62.7, 0)).toBeLessThan(-900);
+    expect(wetLevel(62.7, 0.05)).toBe(62.7);
+    // Next to real water the macro contour decides, as on flat maps.
+    expect(tileBounds(59, 62.7, 0, 0.4)[1]).toBeCloseTo(62.2, 6);
+    expect(tileBounds(64, 62.7, 0, 1)[0]).toBeCloseTo(63.2, 6);
+  });
+
+  it('keeps lakes under their level and shores dry, and the octaves never cross a lake level', () => {
     const world = planet();
     const elev = world.elevation as Float32Array;
     const level = new Float32Array(elev.length).fill(-10000);
     const cls = new Uint8Array(elev.length);
-    // A lake at 300 m over all low land cells, the sea elsewhere below 0, and a river cell.
+    // A lake at 300 m over all low land cells and the sea elsewhere below 0.
     for (let i = 0; i < elev.length; i++) {
       if (elev[i] > 0 && elev[i] < 300) {
         level[i] = 300;
@@ -401,9 +418,6 @@ describe('globe detail with the sphere hydrology', () => {
         cls[i] = 1;
       }
     }
-    const ri = (2 * N + 8) * N + 8;
-    level[ri] = elev[ri] + 5;
-    cls[ri] = 3;
     world.waterLevel = level;
     world.waterClass = cls;
     const pg = runSync(prepareGlobe(world, tileLattice(N, R, TILE_N)));
@@ -456,10 +470,8 @@ describe('globe detail with the sphere hydrology', () => {
     }
     expect(lake).toBeGreaterThan(0);
     expect(dry).toBeGreaterThan(10);
-    // The river cell is land for the bounds (its level is not a lid the tiles must stay under).
-    const m = N + 4;
-    expect(pg.waterPad[2 * m * m + (8 + 2) * m + 8 + 2]).toBeLessThan(-9000);
-    expect(pg.levelPad![2 * m * m + (8 + 2) * m + 8 + 2]).toBeCloseTo(level[ri], 4);
+    // The bounds and the height function read the same levels as the shader.
+    expect(pg.levelPad).toBe(pg.waterPad);
   });
 });
 

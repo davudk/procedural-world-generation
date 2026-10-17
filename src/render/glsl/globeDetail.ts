@@ -40,6 +40,9 @@ const float G_COAST_DISP = ${f(DG.COAST_DISP)};
 const float G_COAST_MIN = ${f(DG.COAST_MIN)};
 const float G_COAST_MAX = ${f(DG.COAST_MAX)};
 const float G_COAST_RELAX = ${f(DG.COAST_RELAX)};
+const float G_WET_FADE = ${f(DG.WET_FADE)};
+const float G_WET_DROP = ${f(DG.WET_DROP)};
+float gWetLevel(float wl, float wet) { return wl - G_WET_DROP * (1.0 - clamp(wet / G_WET_FADE, 0.0, 1.0)); }
 
 uint gHash(ivec3 c, uint s) {
   uint h = (uint(c.x) * G_M1) ^ (uint(c.y) * G_M2) ^ (uint(c.z) * G_M4) ^ (s * G_M3);
@@ -161,8 +164,28 @@ vec4 gMacroBil(int f, vec2 ang) {
 vec4 gCr(float t) { return vec4(((-0.5 * t + 1.0) * t - 0.5) * t, (1.5 * t - 2.5) * t * t + 1.0, ((-1.5 * t + 2.0) * t + 0.5) * t, (0.5 * t - 0.5) * t * t); }
 vec4 gCrd(float t) { return vec4((-1.5 * t + 2.0) * t - 0.5, (4.5 * t - 5.0) * t, (-4.5 * t + 4.0) * t + 0.5, (1.5 * t - 1.0) * t); }
 
-// Catmull-Rom of the macro (the base where no tile is resident). Unclamped: clamping to the four nearest
-// cells (as flat maps do) jumps where that set changes at cell edges; the tiles start from this cubic too.
+// Continuous clamp envelope for a Catmull-Rom over the 4×4 block h (row-major): the 2×2-texel cell
+// extremes of the 3×3 cells around the point, interpolated on the dual grid of cell centres. At a cell
+// centre this is the flat maps' four-texel clamp; unlike that clamp it never jumps at texel edges.
+vec2 gEnvelope(float h[16], vec2 fr) {
+  float mn[9], mx[9];
+  for (int cy = 0; cy < 3; cy++) {
+    for (int cx = 0; cx < 3; cx++) {
+      int k = cy * 4 + cx;
+      mn[cy * 3 + cx] = min(min(h[k], h[k + 1]), min(h[k + 4], h[k + 5]));
+      mx[cy * 3 + cx] = max(max(h[k], h[k + 1]), max(h[k + 4], h[k + 5]));
+    }
+  }
+  int sx = fr.x < 0.5 ? 0 : 1, sy = fr.y < 0.5 ? 0 : 1;
+  vec2 t = vec2(fr.x < 0.5 ? fr.x + 0.5 : fr.x - 0.5, fr.y < 0.5 ? fr.y + 0.5 : fr.y - 0.5);
+  int k = sy * 3 + sx;
+  float lo = mix(mix(mn[k], mn[k + 1], t.x), mix(mn[k + 3], mn[k + 4], t.x), t.y);
+  float hi = mix(mix(mx[k], mx[k + 1], t.x), mix(mx[k + 3], mx[k + 4], t.x), t.y);
+  return vec2(lo, hi);
+}
+
+// Catmull-Rom of the macro (the base where no tile is resident), envelope-clamped; the tiles start from
+// this cubic too (unclamped there: the water bounds do that job).
 vec4 gMacroCubic(int f, vec2 ang) {
   float delta = 1.5707963267948966 / float(u_hn);
   int m = u_hn + 2 * PAD;
@@ -171,10 +194,12 @@ vec4 gMacroCubic(int f, vec2 ang) {
   vec2 fr = p - vec2(i);
   vec4 wx = gCr(fr.x), wy = gCr(fr.y), dx = gCrd(fr.x), dy = gCrd(fr.y);
   float v = 0.0, gx = 0.0, gy = 0.0;
+  float hb[16];
   for (int y = 0; y < 4; y++) {
     float rv = 0.0, rd = 0.0;
     for (int x = 0; x < 4; x++) {
       float h = gMacroFetch(i + ivec2(x - 1, y - 1), f);
+      hb[y * 4 + x] = h;
       rv += wx[x] * h;
       rd += dx[x] * h;
     }
@@ -182,13 +207,14 @@ vec4 gMacroCubic(int f, vec2 ang) {
     gx += wy[y] * rd;
     gy += dy[y] * rv;
   }
-  return vec4(v, gChartGrad(f, ang, vec2(gx, gy) / delta));
+  vec2 env = gEnvelope(hb, fr);
+  return vec4(clamp(v, env.x, env.y), gChartGrad(f, ang, vec2(gx, gy) / delta));
 }
 
 float gTileFetch(ivec2 t, int slot) { int W = u_tN + 2 * u_tM; return texelFetch(u_tiles, ivec3(clamp(t, ivec2(0), ivec2(W - 1)), slot), 0).r; }
 
 // Tile height and texel gradient at stored coordinates q (texel centres at integers): bilinear, and the
-// Catmull-Rom blended in by tb (unclamped, so the surface stays continuous at texel edges).
+// envelope-clamped Catmull-Rom blended in by tb (continuous at texel edges, no overshoot over channels).
 vec3 gTileSample(int slot, vec2 q, float tb) {
   ivec2 i = ivec2(floor(q));
   vec2 fr = q - vec2(i);
@@ -197,10 +223,12 @@ vec3 gTileSample(int slot, vec2 q, float tb) {
   if (tb > 0.0) {
     vec4 wx = gCr(fr.x), wy = gCr(fr.y), dx = gCrd(fr.x), dy = gCrd(fr.y);
     float v = 0.0, gx = 0.0, gy = 0.0;
+    float hb[16];
     for (int y = 0; y < 4; y++) {
       float rv = 0.0, rd = 0.0;
       for (int x = 0; x < 4; x++) {
         float h = gTileFetch(i + ivec2(x - 1, y - 1), slot);
+        hb[y * 4 + x] = h;
         rv += wx[x] * h;
         rd += dx[x] * h;
       }
@@ -208,7 +236,8 @@ vec3 gTileSample(int slot, vec2 q, float tb) {
       gx += wy[y] * rd;
       gy += dy[y] * rv;
     }
-    r = mix(r, vec3(v, gx, gy), tb);
+    vec2 env = gEnvelope(hb, fr);
+    r = mix(r, vec3(clamp(v, env.x, env.y), gx, gy), tb);
   }
   return r;
 }
