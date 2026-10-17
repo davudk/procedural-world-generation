@@ -3,7 +3,7 @@ import type { Layer, RiverGraph } from '../shared/protocol';
 import type { GroundQuery, Vec3 } from './camera/ground';
 import { OrbitCamera } from './camera/orbitCamera';
 import { GlobeCamera } from './camera/globeCamera';
-import type { ViewCamera } from './camera/viewCamera';
+import { applyViewSize, type ViewCamera } from './camera/viewCamera';
 import { GlobeSkyPass, type GlobeAtmosFrame } from './globe/atmosphere';
 import { GlobeHeightField, SphereGround } from './globe/globeGround';
 import { GlobePass, type GlobeSurface } from './globe/globePass';
@@ -424,8 +424,8 @@ export class WorldView {
     this.dpr = pixelRatio(this.quality, window.devicePixelRatio || 1);
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
-    this.cam.viewW = this.globeCam.viewW = w;
-    this.cam.viewH = this.globeCam.viewH = h;
+    // A hidden page reports 0 × 0: keep the last real size (a zero side makes the cameras NaN).
+    if (!applyViewSize([this.cam, this.globeCam], w, h)) return;
     const bw = Math.max(1, Math.round(w * this.dpr));
     const bh = Math.max(1, Math.round(h * this.dpr));
     if (this.canvas.width !== bw || this.canvas.height !== bh) {

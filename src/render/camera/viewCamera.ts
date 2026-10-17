@@ -29,3 +29,18 @@ export interface ViewCamera {
   fitWorld(): void;
   metresPerPixel(): number;
 }
+
+/**
+ * Hands the canvas's CSS size to the cameras. A hidden or collapsed page reports 0 × 0 (or one zero
+ * side); the cameras divide by both sides (aspect, metres per pixel, fit distance), so a zero would
+ * turn the distance and target into NaN and, through the footprint, every detailed ground height.
+ * Such sizes are skipped and the cameras keep the last real one. Returns true when a size was applied.
+ */
+export function applyViewSize(cams: readonly ViewCamera[], w: number, h: number): boolean {
+  if (!(w >= 1 && h >= 1 && Number.isFinite(w) && Number.isFinite(h))) return false;
+  for (const c of cams) {
+    c.viewW = w;
+    c.viewH = h;
+  }
+  return true;
+}
