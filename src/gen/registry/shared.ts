@@ -2,7 +2,8 @@ import { BIOME } from '../../shared/biomes';
 import { WATER } from '../stages/hydro';
 import { cellIndex, coarser, cellX as colOf, cellY as rowOf } from '../grid/grid';
 import { boxBlur, chamferDistance } from '../grid/ops';
-import { coarseFactor, label, type GridSpec } from './grid';
+import { Geo } from './geo';
+import { coarseFactor, compKm2, label, type GridSpec } from './grid';
 import type { RegistryInput, Shared } from './types';
 
 /** Regional grid cell size (m). */
@@ -37,8 +38,19 @@ export function groupOf(b: number, water: number): number {
   }
 }
 
-/** Unit direction of the gradient of a distance field at a cell (cells; y down). */
+/** Unit direction of the gradient of a distance field at a cell (cells; y down; spheres: in the cell's face chart). */
 export function gradAt(d: Float32Array, g: GridSpec, c: number): [number, number] {
+  if (g.faces !== 1) {
+    // Raster neighbours W, E, N, S (across a seam: the mirror cell, which continues the face's chart).
+    const v = (k: number): number => {
+      const j = g.nbr(c, k);
+      return d[j >= 0 ? j : c];
+    };
+    const gx = v(4) - v(3);
+    const gy = v(6) - v(1);
+    const l = Math.hypot(gx, gy);
+    return l > 1e-9 ? [gx / l, gy / l] : [1, 0];
+  }
   const x = colOf(g, c);
   const y = rowOf(g, c);
   const at = (i: number, j: number): number => d[cellIndex(g, Math.min(g.n - 1, Math.max(0, i)), Math.min(g.n - 1, Math.max(0, j)))];
@@ -63,6 +75,7 @@ export function computeShared(I: RegistryInput): Shared {
   const inv = 1 / (f * f);
   const landFine = new Uint8Array(fine.cells);
   let landCells = 0;
+  let landM2 = 0;
   let tempSum = 0;
   let iceCells = 0;
   for (let face = 0; face < fine.faces; face++) {
@@ -76,6 +89,7 @@ export function computeShared(I: RegistryInput): Shared {
         const h = Math.max(0, I.h[c]);
         landFine[c] = 1;
         landCells++;
+        if (!fine.uniform) landM2 += fine.area(c);
         landShare[k] += inv;
         hMean[k] += h * inv;
         if (h > hMax[k]) hMax[k] = h;
@@ -110,13 +124,23 @@ export function computeShared(I: RegistryInput): Shared {
   const dSea = chamferDistance(seaR, reg);
   const comps = label(landFine, fine, true);
   const cellKm2 = (cellM / 1000) ** 2;
-  const landKm2 = landCells * cellKm2;
+  const geo = new Geo(fine);
+  // River node positions in the registry's convention (spheres: encoded with the node's face).
+  let rivX: Float32Array | Float64Array = I.rivers.x;
+  const rivY = I.rivers.y;
+  const rf = I.rivers.face;
+  if (geo.sphere && rf) {
+    rivX = new Float64Array(I.rivers.n);
+    for (let i = 0; i < I.rivers.n; i++) rivX[i] = geo.enc(rf[i], I.rivers.x[i]);
+  }
+  // Spheres: exact cell areas, and the world area is the planet's (worldKm is the equal-area size there).
+  const landKm2 = fine.uniform ? landCells * cellKm2 : landM2 / 1e6;
   const continents = new Set<number>();
   const minCont = Math.max(CONTINENT_WORLD_SHARE * I.worldKm * I.worldKm, CONTINENT_LAND_SHARE * landKm2);
-  for (let k = 0; k < comps.count; k++) if (comps.size[k] * cellKm2 >= minCont) continents.add(k);
+  for (let k = 0; k < comps.count; k++) if (compKm2(comps, k, cellKm2) >= minCont) continents.add(k);
   return {
     reg, f, landShare, hMean, hMax, relief, hSmooth, land, dLand, dSea, groupShare,
     totals: { landCells, tempMean: tempSum / Math.max(1, landCells), iceCells, groupCells },
-    masses: comps, continents, landKm2,
+    masses: comps, continents, landKm2, geo, sphere: geo.sphere, rivX, rivY,
   };
 }

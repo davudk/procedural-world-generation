@@ -1,6 +1,7 @@
 import type { LandmarkKind } from '../../shared/landmarks';
 import { RIVER } from '../../shared/protocol';
-import type { Candidate, RegistryInput } from './types';
+import type { Geo } from './geo';
+import type { Candidate, RegistryInput, Shared } from './types';
 
 /**
  * Interest budget of the world band (research 05 §3.2): a W view (the whole world width) should hold
@@ -21,6 +22,11 @@ export const W_SCALE_FRAC = 1 / 80;
 const W_WORLD_BUDGET = 50;
 /** The registry keeps at least this many W-scale landmarks whatever hydrology and landforms add. */
 const W_MIN_OWN = 18;
+/**
+ * A globe view shows one hemisphere of a planet (research 10 §7 band G), so the per-world budgets of a
+ * sphere are this many W views' worth.
+ */
+export const SPHERE_W_VIEWS = 2;
 /** Importance multiplier per earlier pick of the same kind. */
 const KIND_DECAY = 0.72;
 /** Kinds with at least SIGNATURE_MIN world-scale candidates keep their SIGNATURE_KEEP best. */
@@ -41,7 +47,7 @@ const SEA_KINDS: ReadonlySet<LandmarkKind> = new Set<LandmarkKind>(['ocean', 'se
 const W_RIVER_ORDER = 6;
 
 /** W-scale features the registry does not own: big lakes, trunk rivers and landform places. */
-export function externalWScale(I: RegistryInput): { count: number; xs: number[]; ys: number[] } {
+export function externalWScale(I: RegistryInput, S: Shared): { count: number; xs: number[]; ys: number[] } {
   const worldM = I.worldKm * 1000;
   const lo = worldM * W_SCALE_FRAC;
   let n = 0;
@@ -50,13 +56,13 @@ export function externalWScale(I: RegistryInput): { count: number; xs: number[];
   for (const l of I.lakes) {
     if (l.type === 'playa' || Math.sqrt(l.areaKm2) * 1000 < lo) continue;
     n++;
-    xs.push(l.cx);
+    xs.push(S.geo.enc(l.face, l.cx));
     ys.push(l.cy);
   }
   for (const f of I.landforms.features) {
     if (!LANDFORM_PLACES.has(f.type) || f.size < lo) continue;
     n++;
-    xs.push(f.x);
+    xs.push(S.geo.enc(f.face, f.x));
     ys.push(f.y);
   }
   // Rivers: one per maximal run of one Strahler order ≥ W_RIVER_ORDER.
@@ -71,8 +77,8 @@ export function externalWScale(I: RegistryInput): { count: number; xs: number[];
     const s = g.strahler[i];
     if (s >= W_RIVER_ORDER && maxIn[i] < s) {
       n++;
-      xs.push(g.x[i]);
-      ys.push(g.y[i]);
+      xs.push(S.rivX[i]);
+      ys.push(S.rivY[i]);
     }
   }
   return { count: n, xs, ys };
@@ -84,16 +90,17 @@ export function externalWScale(I: RegistryInput): { count: number; xs: number[];
  */
 export function applyWBudget(
   cands: Candidate[], imp: Map<Candidate, number>, protectedSet: ReadonlySet<Candidate>, worldM: number,
-  external: { count: number; xs: number[]; ys: number[] },
+  external: { count: number; xs: number[]; ys: number[] }, geo: Geo,
 ): { kept: Candidate[]; dropped: Candidate[]; quota: number } {
   const lo = worldM * W_SCALE_FRAC;
-  const quota = Math.max(W_MIN_OWN, W_WORLD_BUDGET - external.count);
+  const views = geo.sphere ? SPHERE_W_VIEWS : 1;
+  const quota = Math.max(W_MIN_OWN * views, W_WORLD_BUDGET * views - external.count);
   const px = external.xs.slice();
   const py = external.ys.slice();
   const d0 = SPREAD * worldM;
   const near = (c: Candidate): number => {
     let d = Infinity;
-    for (let i = 0; i < px.length; i++) d = Math.min(d, Math.hypot(px[i] - c.x, py[i] - c.y));
+    for (let i = 0; i < px.length; i++) d = Math.min(d, geo.dist(px[i], py[i], c.x, c.y));
     return d;
   };
   const spread = (c: Candidate): number => 0.2 + 0.8 * (SEA_KINDS.has(c.kind) ? 0.5 : Math.min(1, near(c) / d0));

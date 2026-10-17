@@ -27,8 +27,8 @@ export const STAGE_ORDER = [
 ] as const;
 export type StageId = (typeof STAGE_ORDER)[number];
 
-/** Stages a spherical world runs so far (research 10 §8, Phase 4a: everything but the registry); the pipeline stops after the last. */
-export const SPHERE_STAGES: readonly StageId[] = ['plates', 'base', 'stamps', 'lem', 'refine', 'climate', 'glacial', 'landforms', 'hydro', 'biome'];
+/** Stages a spherical world runs (research 10 §8, Phase 4c: every generation stage; the flat GPU stage is skipped). */
+export const SPHERE_STAGES: readonly StageId[] = ['plates', 'base', 'stamps', 'lem', 'refine', 'climate', 'glacial', 'landforms', 'hydro', 'biome', 'registry'];
 
 /** World shape (research 10 §3): a flat square map or a cube-sphere planet. */
 export type WorldShape = 'flat' | 'sphere';

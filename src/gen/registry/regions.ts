@@ -1,6 +1,6 @@
 import { BIOME } from '../../shared/biomes';
 import { candidate } from './candidate';
-import { cellAtM, cellX, cellY, insideDistance, label, nearestWhere, pca } from './grid';
+import { cellAtM, cellX, cellY, compKm2, insideDistance, label, nearestWhere, nearestWhereM, pca } from './grid';
 import { G, groupOf } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
 
@@ -30,7 +30,7 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
     const cellsOf: number[][] = Array.from({ length: comps.count }, () => []);
     for (let i = 0; i < MM; i++) if (comps.label[i] >= 0) cellsOf[comps.label[i]].push(i);
     for (let k = 0; k < comps.count; k++) {
-      const areaKm2 = comps.size[k] * rKm2;
+      const areaKm2 = compKm2(comps, k, rKm2);
       if (areaKm2 < minKm2) continue;
       let pole = cellsOf[k][0];
       for (const c of cellsOf[k]) if (inside[c] > inside[pole]) pole = c;
@@ -42,7 +42,7 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
   const anchor = (pole: number): [number, number] => {
     const px = cellX(R, pole);
     const py = cellY(R, pole);
-    const fc = nearestWhere(fine, px / I.fine.cellM, py / I.fine.cellM, 3 * f, (c) => !I.sea[c]);
+    const fc = nearestWhereM(fine, px, py, 3 * f, (c) => !I.sea[c]);
     return fc >= 0 ? [cellX(I.fine, fc), cellY(I.fine, fc)] : [px, py];
   };
   const tempAt = (c: number): number => I.climate.temp[cellAtM(I.fine, cellX(R, c), cellY(R, c))];
@@ -124,14 +124,15 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
   }
 
   // Ergs (sand seas).
+  const X = (e: (typeof I.landforms.features)[number]): number => S.geo.enc(e.face, e.x);
   const ergs = I.landforms.features.filter((e) => e.type === 'erg' && (e.data?.areaKm2 ?? 0) >= 1500)
     .sort((a, b) => (b.data?.areaKm2 ?? 0) - (a.data?.areaKm2 ?? 0)).slice(0, 3);
   for (const e of ergs) {
     const a = e.data?.areaKm2 ?? 0;
     out.push(candidate({
-      kind: 'erg', x: e.x, y: e.y, angle: NaN, extentM: e.size, mag: Math.min(1, a / 40000), data: { areaKm2: Math.round(a) },
-      idX: e.x, idY: e.y, hero: { cat: 'sand-sea', score: a / 20000 }, tier: a >= 20000 ? 'rare' : 'uncommon',
-      landmass: S.masses.label[cellAtM(I.fine, e.x, e.y)],
+      kind: 'erg', x: X(e), y: e.y, angle: NaN, extentM: e.size, mag: Math.min(1, a / 40000), data: { areaKm2: Math.round(a) },
+      idX: X(e), idY: e.y, hero: { cat: 'sand-sea', score: a / 20000 }, tier: a >= 20000 ? 'rare' : 'uncommon',
+      landmass: S.masses.label[cellAtM(I.fine, X(e), e.y)],
     }));
   }
 
@@ -147,14 +148,21 @@ export function detectRegions(I: RegistryInput, S: Shared, out: Candidate[]): vo
   for (let k = 0; k < comps.count; k++) if (comps.size[k] >= 2 && comps.size[k] * cellKm2 >= 15) ids.push(k);
   ids.sort((a, b) => comps.size[b] - comps.size[a] || a - b);
   for (const k of ids) {
-    const areaKm2 = comps.size[k] * cellKm2;
+    const areaKm2 = compKm2(comps, k, cellKm2);
     const cap = areaKm2 >= 3000;
     if ((cap ? caps : glaciers).length >= (cap ? 3 : 10)) continue;
     const cx = comps.sx[k] / comps.size[k] + 0.5;
     const cy = comps.sy[k] / comps.size[k] + 0.5;
-    const fc = nearestWhere(fine, cx, cy, Math.max(4, Math.sqrt(comps.size[k])), (c) => comps.label[c] === k);
-    const x = fc >= 0 ? cellX(I.fine, fc) : cx * I.fine.cellM;
-    const y = fc >= 0 ? cellY(I.fine, fc) : cy * I.fine.cellM;
+    const rad = Math.max(4, Math.sqrt(comps.size[k]));
+    let fc: number;
+    let x0 = cx * I.fine.cellM;
+    let y0 = cy * I.fine.cellM;
+    if (comps.dir) {
+      [x0, y0] = S.geo.fromDir(comps.dir[3 * k], comps.dir[3 * k + 1], comps.dir[3 * k + 2]);
+      fc = nearestWhereM(fine, x0, y0, rad, (c) => comps.label[c] === k);
+    } else fc = nearestWhere(fine, cx, cy, rad, (c) => comps.label[c] === k);
+    const x = fc >= 0 ? cellX(I.fine, fc) : x0;
+    const y = fc >= 0 ? cellY(I.fine, fc) : y0;
     (cap ? caps : glaciers).push(candidate({
       kind: cap ? 'icecap' : 'glacier', x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000 * (cap ? 1 : 1.5),
       mag: Math.min(1, Math.log10(areaKm2) / 5), data: { areaKm2: Math.round(areaKm2) }, idX: x, idY: y,

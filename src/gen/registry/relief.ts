@@ -1,7 +1,8 @@
 import { cellIndex, cellX as colOf, cellY as rowOf } from '../grid/grid';
+import { axesDir, axesXY, compKm2 } from './grid';
 import { B } from '../stages/plates';
 import { candidate, own } from './candidate';
-import { cellAtM, cellX, cellY, insideDistance, label, labelAngle, mergeTree, nearestWhere, pca, resolveOwners, type MergeTree } from './grid';
+import { cellAtM, cellX, cellY, insideDistance, label, labelAngle, mergeTree, nearestWhereM, pca, resolveOwners, type MergeTree } from './grid';
 import { G } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
 
@@ -60,17 +61,19 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
 
   // Volcanic features first: they claim the summit they sit on.
   const fs = I.landforms.features;
+  const geo = S.geo;
   const volcanoes: Candidate[] = [];
   for (const f of fs) {
     if (f.type !== 'stratovolcano' && f.type !== 'shield-volcano' && f.type !== 'caldera' && f.type !== 'crater') continue;
     const fx = f.x / cellM;
     const fy = f.y / cellM;
+    const FX = geo.enc(f.face, f.x);
     const rad = Math.max(f.size / 2 / cellM, 1.5);
     if (f.type === 'crater') {
       const D = f.data?.diameter ?? f.size;
       const c: Candidate = candidate({
-        kind: 'crater', x: f.x, y: f.y, angle: NaN, extentM: D, mag: Math.min(1, D / 40000),
-        data: { diameterKm: Math.round(D / 100) / 10, depthM: Math.round(f.data?.depth ?? 0) }, idX: f.x, idY: f.y,
+        kind: 'crater', x: FX, y: f.y, angle: NaN, extentM: D, mag: Math.min(1, D / 40000),
+        data: { diameterKm: Math.round(D / 100) / 10, depthM: Math.round(f.data?.depth ?? 0) }, idX: FX, idY: f.y,
         hero: { cat: 'crater', score: D / 20000 }, tier: D >= 50000 ? 'legendary' : 'rare',
       });
       volcanoes.push(c);
@@ -78,26 +81,32 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
     }
     // Highest prominent summit inside the edifice.
     let best = -1;
-    const r = Math.ceil(rad);
-    const x0 = Math.floor(fx);
-    const y0 = Math.floor(fy);
-    const xb = Math.min(n - 1, x0 + r);
-    const yb = Math.min(n - 1, y0 + r);
-    for (let y = Math.max(0, y0 - r); y <= yb; y++) {
-      for (let x = Math.max(0, x0 - r); x <= xb; x++) {
-        const dx = x - x0;
-        const dy = y - y0;
-        if (dx * dx + dy * dy > rad * rad) continue;
-        const c = cellIndex(fine, x, y);
-        if (!land[c]) continue;
-        if (best < 0 || I.h[c] > I.h[best]) best = c;
+    if (S.sphere) {
+      fine.chart({ face: f.face ?? 0, u: f.x, v: f.y }, rad * cellM, (c) => {
+        if (land[c] && (best < 0 || I.h[c] > I.h[best])) best = c;
+      });
+    } else {
+      const r = Math.ceil(rad);
+      const x0 = Math.floor(fx);
+      const y0 = Math.floor(fy);
+      const xb = Math.min(n - 1, x0 + r);
+      const yb = Math.min(n - 1, y0 + r);
+      for (let y = Math.max(0, y0 - r); y <= yb; y++) {
+        for (let x = Math.max(0, x0 - r); x <= xb; x++) {
+          const dx = x - x0;
+          const dy = y - y0;
+          if (dx * dx + dy * dy > rad * rad) continue;
+          const c = cellIndex(fine, x, y);
+          if (!land[c]) continue;
+          if (best < 0 || I.h[c] > I.h[best]) best = c;
+        }
       }
     }
     if (f.type === 'caldera') {
       volcanoes.push(candidate({
-        kind: 'caldera', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 30000),
+        kind: 'caldera', x: FX, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 30000),
         data: { diameterKm: Math.round(f.size / 100) / 10, depthM: Math.round(f.data?.depth ?? 0), rimM: Math.round(f.data?.rim ?? 0) },
-        idX: f.x, idY: f.y, tier: 'rare',
+        idX: FX, idY: f.y, tier: 'rare',
       }));
       continue;
     }
@@ -106,7 +115,9 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
     let k = t.owner[best];
     if (k >= 0) {
       const pc = t.peak[k];
-      if ((colOf(fine, pc) + 0.5 - fx) ** 2 + (rowOf(fine, pc) + 0.5 - fy) ** 2 > (rad + 1) ** 2) k = -1;
+      if (S.sphere) {
+        if (geo.dist(cellX(fine, pc), cellY(fine, pc), FX, f.y) > (rad + 1) * cellM) k = -1;
+      } else if ((colOf(fine, pc) + 0.5 - fx) ** 2 + (rowOf(fine, pc) + 0.5 - fy) ** 2 > (rad + 1) ** 2) k = -1;
     }
     if (k >= 0) used[k] = 1;
     const hgt = I.h[best];
@@ -115,7 +126,7 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
     volcanoes.push(candidate({
       kind: 'volcano', x, y, angle: NaN, extentM: f.size, mag: 0.7 * Math.min(1, hgt / Math.max(kingH, 1)) + 0.3 * Math.min(1, f.size / 40000),
       data: { heightM: Math.round(hgt), ...(k >= 0 ? { prominenceM: Math.round(prom[k]) } : {}), diameterKm: Math.round(f.size / 100) / 10, shield: f.type === 'shield-volcano' ? 1 : 0 },
-      idX: f.x, idY: f.y, variant: f.type === 'shield-volcano' ? 'shield' : 'strato', visM: Math.max(f.size, 3000),
+      idX: FX, idY: f.y, variant: f.type === 'shield-volcano' ? 'shield' : 'strato', visM: Math.max(f.size, 3000),
       ...(k >= 0 ? { summit: k } : {}),
     }));
   }
@@ -149,17 +160,19 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
   for (const k of cand) {
     if (peaks.length >= cap) break;
     const c = t.peak[k];
-    const x = colOf(fine, c);
-    const y = rowOf(fine, c);
+    // Spheres: positions and great-circle distances (taken holds metres there).
+    const x = S.sphere ? cellX(fine, c) : colOf(fine, c);
+    const y = S.sphere ? cellY(fine, c) : rowOf(fine, c);
     let near = false;
-    for (let i = 0; i < taken.length && !near; i += 2) near = (taken[i] - x) ** 2 + (taken[i + 1] - y) ** 2 < sp * sp;
+    if (S.sphere) for (let i = 0; i < taken.length && !near; i += 2) near = geo.d2(taken[i], taken[i + 1], x, y) < (sp * cellM) ** 2;
+    else for (let i = 0; i < taken.length && !near; i += 2) near = (taken[i] - x) ** 2 + (taken[i + 1] - y) ** 2 < sp * sp;
     if (near) continue;
     const ext = Math.max(cellM, Math.min(prom[k] * 6, PEAK_MAX_EXTENT_M));
     if (ext >= PEAK_R_LO_M && k !== kingK) {
       const px = cellX(I.fine, c);
       const py = cellY(I.fine, c);
       let near = 0;
-      for (let i = 0; i < rVis.length; i += 2) if ((rVis[i] - px) ** 2 + (rVis[i + 1] - py) ** 2 < rr2) near++;
+      for (let i = 0; i < rVis.length; i += 2) if (geo.d2(rVis[i], rVis[i + 1], px, py) < rr2) near++;
       if (near >= PEAK_R_MAX) continue;
     }
     if (ext >= PEAK_R_LO_M) rVis.push(cellX(I.fine, c), cellY(I.fine, c));
@@ -185,7 +198,7 @@ export function detectRelief(I: RegistryInput, S: Shared, out: Candidate[]): Rel
   const rangeOf = detectRanges(I, S, out, peaks);
   detectFlats(I, S, out, rangeOf);
   detectRifts(I, S, out);
-  landformAreas(I, out);
+  landformAreas(I, S, out);
   const king = kingK >= 0 ? { x: cellX(I.fine, t.peak[kingK]), y: cellY(I.fine, t.peak[kingK]), h: kingH } : null;
   return { rangeOf, king, tree: t, prom, used };
 }
@@ -234,9 +247,11 @@ function detectRanges(I: RegistryInput, S: Shared, out: Candidate[], peaks: Cand
     const bestC = new Int32Array(bins).fill(-1);
     let maxH = 0;
     let sumRel = 0;
+    const q = new Float64Array(3);
     for (const c of cells) {
-      const dx = colOf(R, c) - ax.cx;
-      const dy = rowOf(R, c) - ax.cy;
+      axesXY(ax, R, c, q);
+      const dx = q[0] - ax.cx;
+      const dy = q[1] - ax.cy;
       const s = dx * ax.ux + dy * ax.uy;
       const b = Math.min(bins - 1, Math.max(0, Math.floor(((s + half) / ax.length) * bins)));
       if (bestC[b] < 0 || S.hSmooth[c] > S.hSmooth[bestC[b]]) bestC[b] = c;
@@ -245,23 +260,34 @@ function detectRanges(I: RegistryInput, S: Shared, out: Candidate[], peaks: Cand
     }
     const pts: number[] = [];
     for (let b = 0; b < bins; b++) if (bestC[b] >= 0) pts.push(bestC[b]);
-    const path = new Float32Array(pts.length * 2);
+    const path = S.sphere ? new Float64Array(pts.length * 2) : new Float32Array(pts.length * 2);
     for (let i = 0; i < pts.length; i++) {
-      // 3-point smoothing of the crest.
+      // 3-point smoothing of the crest (spheres: of the unit vectors).
       let sx = 0;
       let sy = 0;
+      let sz = 0;
       let w = 0;
       for (let j = Math.max(0, i - 1); j <= Math.min(pts.length - 1, i + 1); j++) {
         const wj = j === i ? 2 : 1;
-        sx += wj * cellX(R, pts[j]);
-        sy += wj * cellY(R, pts[j]);
+        if (S.sphere) {
+          R.position(pts[j], q);
+          sx += wj * q[0];
+          sy += wj * q[1];
+          sz += wj * q[2];
+        } else {
+          sx += wj * cellX(R, pts[j]);
+          sy += wj * cellY(R, pts[j]);
+        }
         w += wj;
       }
-      path[2 * i] = sx / w;
-      path[2 * i + 1] = sy / w;
+      if (S.sphere) [path[2 * i], path[2 * i + 1]] = S.geo.fromDir(sx, sy, sz);
+      else {
+        path[2 * i] = sx / w;
+        path[2 * i + 1] = sy / w;
+      }
     }
     const mid = pts[Math.floor(pts.length / 2)];
-    const fa = nearestWhere(I.fine, cellX(R, mid) / I.fine.cellM, cellY(R, mid) / I.fine.cellM, 3 * S.f, (c) => !I.sea[c]);
+    const fa = nearestWhereM(I.fine, cellX(R, mid), cellY(R, mid), 3 * S.f, (c) => !I.sea[c]);
     const x = fa >= 0 ? cellX(I.fine, fa) : cellX(R, mid);
     const y = fa >= 0 ? cellY(I.fine, fa) : cellY(R, mid);
     const meanRel = sumRel / cells.length;
@@ -270,7 +296,7 @@ function detectRanges(I: RegistryInput, S: Shared, out: Candidate[], peaks: Cand
     ranges.push({
       id,
       c: candidate({
-        kind: 'range', x, y, angle: labelAngle(ax.ux, ax.uy), extentM: lenKm * 1000, mag: 0.5 * Math.min(1, lenKm / 600) + 0.5 * Math.min(1, maxH / 6000),
+        kind: 'range', x, y, angle: ax.plane ? S.geo.angleOf(x, y, ...axesDir(ax, ax.ux, ax.uy)) : labelAngle(ax.ux, ax.uy), extentM: lenKm * 1000, mag: 0.5 * Math.min(1, lenKm / 600) + 0.5 * Math.min(1, maxH / 6000),
         data: { lengthKm: Math.round(lenKm), widthKm: Math.round(widthKm), maxHeightM: Math.round(maxH), areaKm2: Math.round(areaKm2) },
         idX: cellX(R, t.peak[id]), idY: cellY(R, t.peak[id]), path, variant, hero: { cat: 'massif', score: maxH / 5000 },
         landmass: fa >= 0 ? S.masses.label[fa] : -1,
@@ -332,7 +358,7 @@ function detectPasses(I: RegistryInput, S: Shared, out: Candidate[], t: MergeTre
     if (kept.length >= cap) break;
     const x = cellX(fine, c);
     const y = cellY(fine, c);
-    if (kept.some((o) => (o.x - x) ** 2 + (o.y - y) ** 2 < sp2)) continue;
+    if (kept.some((o) => S.geo.d2(o.x, o.y, x, y) < sp2)) continue;
     kept.push({ x, y });
     out.push(candidate({
       kind: 'pass', x, y, angle: NaN, extentM: PASS_EXTENT_M, visM: PASS_EXTENT_M, mag: Math.min(1, t.colV[k] / 4000),
@@ -368,11 +394,11 @@ function detectFlats(I: RegistryInput, S: Shared, out: Candidate[], rangeOf: Int
     }
     const list: Candidate[] = [];
     for (let k = 0; k < comps.count; k++) {
-      const areaKm2 = comps.size[k] * rKm2;
+      const areaKm2 = compKm2(comps, k, rKm2);
       if (areaKm2 < minKm2) continue;
       const px = cellX(R, pole[k]);
       const py = cellY(R, pole[k]);
-      const fa = nearestWhere(I.fine, px / I.fine.cellM, py / I.fine.cellM, 3 * S.f, (c) => !I.sea[c]);
+      const fa = nearestWhereM(I.fine, px, py, 3 * S.f, (c) => !I.sea[c]);
       const x = fa >= 0 ? cellX(I.fine, fa) : px;
       const y = fa >= 0 ? cellY(I.fine, fa) : py;
       list.push(candidate({
@@ -412,27 +438,42 @@ function detectRifts(I: RegistryInput, S: Shared, out: Candidate[]): void {
     const bins = Math.max(3, Math.min(16, Math.round(seg.lengthKm / 40)));
     const sx = new Float64Array(bins);
     const sy = new Float64Array(bins);
+    const sz = new Float64Array(bins);
     const cnt = new Int32Array(bins);
     let mid = cs[0];
     let md = Infinity;
+    const q = new Float64Array(3);
     for (const c of cs) {
-      const dx = colOf(pg, c) - ax.cx;
-      const dy = rowOf(pg, c) - ax.cy;
+      axesXY(ax, pg, c, q);
+      const dx = q[0] - ax.cx;
+      const dy = q[1] - ax.cy;
       const t = dx * ax.ux + dy * ax.uy;
       const b = Math.min(bins - 1, Math.max(0, Math.floor(((t + ax.length / 2) / ax.length) * bins)));
-      sx[b] += cellX(pg, c);
-      sy[b] += cellY(pg, c);
+      if (S.sphere) {
+        pg.position(c, q);
+        sx[b] += q[0];
+        sy[b] += q[1];
+        sz[b] += q[2];
+      } else {
+        sx[b] += cellX(pg, c);
+        sy[b] += cellY(pg, c);
+      }
       cnt[b]++;
       const d = dx * dx + dy * dy;
       if (d < md && !I.sea[cellAtM(I.fine, cellX(pg, c), cellY(pg, c))]) (md = d), (mid = c);
     }
     const pts: number[] = [];
-    for (let b = 0; b < bins; b++) if (cnt[b]) pts.push(sx[b] / cnt[b], sy[b] / cnt[b]);
+    for (let b = 0; b < bins; b++) {
+      if (!cnt[b]) continue;
+      if (S.sphere) pts.push(...S.geo.fromDir(sx[b], sy[b], sz[b]));
+      else pts.push(sx[b] / cnt[b], sy[b] / cnt[b]);
+    }
     const x = cellX(pg, mid);
     const y = cellY(pg, mid);
     list.push(candidate({
-      kind: 'rift', x, y, angle: labelAngle(ax.ux, ax.uy), extentM: seg.lengthKm * 1000, mag: Math.min(1, seg.lengthKm / 800),
-      data: { lengthKm: Math.round(seg.lengthKm) }, idX: x, idY: y, path: Float32Array.from(pts), tier: 'uncommon',
+      kind: 'rift', x, y, angle: ax.plane ? S.geo.angleOf(x, y, ...axesDir(ax, ax.ux, ax.uy)) : labelAngle(ax.ux, ax.uy),
+      extentM: seg.lengthKm * 1000, mag: Math.min(1, seg.lengthKm / 800),
+      data: { lengthKm: Math.round(seg.lengthKm) }, idX: x, idY: y, path: S.sphere ? Float64Array.from(pts) : Float32Array.from(pts), tier: 'uncommon',
       landmass: S.masses.label[cellAtM(I.fine, x, y)],
     }));
   }
@@ -441,8 +482,9 @@ function detectRifts(I: RegistryInput, S: Shared, out: Candidate[]): void {
 }
 
 /** Mesa fields, karst and tower karst from the landform features. */
-function landformAreas(I: RegistryInput, out: Candidate[]): void {
+function landformAreas(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const fs = I.landforms.features;
+  const X = (f: (typeof fs)[number]): number => S.geo.enc(f.face, f.x);
   const pick = (type: string, minKm2: number, cap: number): typeof fs => fs
     .filter((f) => f.type === type && (f.data?.areaKm2 ?? 0) >= minKm2)
     .sort((a, b) => (b.data?.areaKm2 ?? 0) - (a.data?.areaKm2 ?? 0))
@@ -450,19 +492,19 @@ function landformAreas(I: RegistryInput, out: Candidate[]): void {
   for (const f of pick('mesa-field', 150, 4)) {
     const a = f.data?.areaKm2 ?? 0;
     out.push(candidate({
-      kind: 'mesa-field', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, a / 5000),
-      data: { areaKm2: Math.round(a), mesas: f.data?.tops ?? 0 }, idX: f.x, idY: f.y, tier: 'uncommon',
+      kind: 'mesa-field', x: X(f), y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, a / 5000),
+      data: { areaKm2: Math.round(a), mesas: f.data?.tops ?? 0 }, idX: X(f), idY: f.y, tier: 'uncommon',
     }));
   }
   for (const f of pick('karst', 300, 3)) {
     const a = f.data?.areaKm2 ?? 0;
-    out.push(candidate({ kind: 'karst', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, a / 10000), data: { areaKm2: Math.round(a) }, idX: f.x, idY: f.y, tier: 'uncommon' }));
+    out.push(candidate({ kind: 'karst', x: X(f), y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, a / 10000), data: { areaKm2: Math.round(a) }, idX: X(f), idY: f.y, tier: 'uncommon' }));
   }
   for (const f of pick('tower-karst', 200, 2)) {
     const a = f.data?.areaKm2 ?? 0;
     out.push(candidate({
-      kind: 'karst', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, a / 5000), data: { areaKm2: Math.round(a), towers: 1 },
-      idX: f.x, idY: f.y, variant: 'towers', tier: 'rare', hero: { cat: 'karst-towers', score: a / 1500 },
+      kind: 'karst', x: X(f), y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, a / 5000), data: { areaKm2: Math.round(a), towers: 1 },
+      idX: X(f), idY: f.y, variant: 'towers', tier: 'rare', hero: { cat: 'karst-towers', score: a / 1500 },
     }));
   }
 }

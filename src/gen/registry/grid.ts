@@ -1,4 +1,5 @@
-import { cellIndex, coarser, cellX as colOf, cellY as rowOf, type Grid } from '../grid/grid';
+import { angle as arc, localFrame } from '../grid/cube';
+import { cellFace, cellIndex, coarser, cellX as colOf, cellY as rowOf, type Grid } from '../grid/grid';
 import { chamferDistance } from '../grid/ops';
 
 /**
@@ -9,18 +10,28 @@ import { chamferDistance } from '../grid/ops';
  * grid's axial-first D8 order (E W S N SE NE SW NW: `off8Axial`, `off4`).
  */
 
-/** A registry grid; positions are map metres (x from the west edge, y from the north edge). */
+/**
+ * A registry grid; positions are map metres (x from the west edge, y from the north edge). On spheres
+ * positions are encoded face-local metres, x = face · π·R + u, y = v (geo.ts `Geo`).
+ */
 export type GridSpec = Grid;
 
-/** Cell centre, map metres. */
-export const cellX = (g: GridSpec, c: number): number => (colOf(g, c) + 0.5) * g.cellM;
+/** Cell centre, map metres (spheres: encoded, geo.ts). */
+export const cellX = (g: GridSpec, c: number): number =>
+  g.faces === 1 ? (colOf(g, c) + 0.5) * g.cellM : cellFace(g, c) * Math.PI * g.radiusM + (colOf(g, c) + 0.5) * g.cellM;
 export const cellY = (g: GridSpec, c: number): number => (rowOf(g, c) + 0.5) * g.cellM;
 
-/** Cell containing a map position (clamped to the grid). */
+/** Cell containing a map position (clamped to the grid; spheres: an encoded position). */
 export function cellAtM(g: GridSpec, x: number, y: number): number {
+  let face = 0;
+  if (g.faces !== 1) {
+    const stride = Math.PI * g.radiusM;
+    face = Math.min(5, Math.max(0, Math.floor(x / stride)));
+    x -= face * stride;
+  }
   const i = Math.min(g.n - 1, Math.max(0, Math.floor(x / g.cellM)));
   const j = Math.min(g.n - 1, Math.max(0, Math.floor(y / g.cellM)));
-  return cellIndex(g, i, j);
+  return cellIndex(g, i, j, face);
 }
 
 /** Largest power-of-two factor ≤ n/16 that brings the cell size of `g` to about `targetM`. */
@@ -53,6 +64,22 @@ export interface Components {
   size: Int32Array;
   sx: Float64Array;
   sy: Float64Array;
+  /** Spheres only: per component the sum of its cells' unit vectors (3 each) and its area (m²). */
+  dir?: Float64Array;
+  areaM2?: Float64Array;
+}
+
+/** Area of component k (km²): exact cell areas on spheres, size · cellKm2 on flat maps. */
+export function compKm2(m: Components, k: number, cellKm2: number): number {
+  return m.areaM2 ? m.areaM2[k] / 1e6 : m.size[k] * cellKm2;
+}
+
+/** Area (km²) of a list of cells: exact on spheres, count · cellKm2 on flat maps. */
+export function cellsKm2(g: GridSpec, cells: ArrayLike<number>, cellKm2: number): number {
+  if (g.uniform) return cells.length * cellKm2;
+  let a = 0;
+  for (let i = 0; i < cells.length; i++) a += g.area(cells[i]);
+  return a / 1e6;
 }
 
 export function label(mask: Uint8Array, g: GridSpec, conn8: boolean): Components {
@@ -97,7 +124,25 @@ export function label(mask: Uint8Array, g: GridSpec, conn8: boolean): Components
       }
     }
   }
-  return { label: lab, count, size: Int32Array.from(sizes), sx, sy };
+  const out: Components = { label: lab, count, size: Int32Array.from(sizes), sx, sy };
+  if (g.faces !== 1) {
+    // Face-local centroids mean nothing across seams: mean directions and exact areas instead.
+    const dir = new Float64Array(count * 3);
+    const areaM2 = new Float64Array(count);
+    const p = new Float64Array(3);
+    for (let i = 0; i < N; i++) {
+      const k = lab[i];
+      if (k < 0) continue;
+      g.position(i, p);
+      dir[3 * k] += p[0];
+      dir[3 * k + 1] += p[1];
+      dir[3 * k + 2] += p[2];
+      areaM2[k] += g.area(i);
+    }
+    out.dir = dir;
+    out.areaM2 = areaM2;
+  }
+  return out;
 }
 
 /**
@@ -257,9 +302,44 @@ export interface Axes {
   /** Lengths along the major and minor axis (cells), √12 σ (exact for a uniform bar). */
   length: number;
   width: number;
+  /**
+   * Spheres: the tangent plane the axes live in (azimuthal equidistant about the weighted mean
+   * direction, x east and y south in nominal cells); `axesXY` places other cells in it.
+   */
+  plane?: { up: Float64Array; east: Float64Array; north: Float64Array; R: number; cellM: number };
+}
+
+/** Position of cell c in the axes' chart (cells; flat: its column and row). */
+export function axesXY(ax: Axes, g: GridSpec, c: number, out: Float64Array): void {
+  if (!ax.plane) {
+    out[0] = colOf(g, c);
+    out[1] = rowOf(g, c);
+    return;
+  }
+  const P = ax.plane;
+  const p = out.length >= 3 ? out : new Float64Array(3);
+  g.position(c, p);
+  planeXY(P, p, out);
+}
+
+function planeXY(P: NonNullable<Axes['plane']>, p: ArrayLike<number>, out: Float64Array): void {
+  const th = arc(P.up, p);
+  const e = p[0] * P.east[0] + p[1] * P.east[1] + p[2] * P.east[2];
+  const nn = p[0] * P.north[0] + p[1] * P.north[1] + p[2] * P.north[2];
+  const l = Math.hypot(e, nn);
+  const s = l > 0 ? (th * P.R) / (l * P.cellM) : 0;
+  out[0] = e * s;
+  out[1] = -nn * s;
+}
+
+/** 3D direction of a chart direction (dx, dy) of the axes' plane (spheres). */
+export function axesDir(ax: Axes, dx: number, dy: number): [number, number, number] {
+  const P = ax.plane!;
+  return [dx * P.east[0] - dy * P.north[0], dx * P.east[1] - dy * P.north[1], dx * P.east[2] - dy * P.north[2]];
 }
 
 export function pca(cells: ArrayLike<number>, g: GridSpec, weight?: (c: number) => number): Axes {
+  if (g.faces !== 1) return pcaSphere(cells, g, weight);
   let sw = 0;
   let sx = 0;
   let sy = 0;
@@ -294,6 +374,63 @@ export function pca(cells: ArrayLike<number>, g: GridSpec, weight?: (c: number) 
   const l2 = Math.max(0, tr / 2 - disc);
   const a = 0.5 * Math.atan2(2 * xy, xx - yy);
   return { cx, cy, ux: Math.cos(a), uy: Math.sin(a), length: Math.sqrt(12 * l1) + 1, width: Math.sqrt(12 * l2) + 1 };
+}
+
+function pcaSphere(cells: ArrayLike<number>, g: GridSpec, weight?: (c: number) => number): Axes {
+  const n = cells.length;
+  const P = new Float64Array(n * 3);
+  const W = new Float64Array(n);
+  const up = new Float64Array(3);
+  const p = new Float64Array(3);
+  let sw = 0;
+  for (let i = 0; i < n; i++) {
+    g.position(cells[i], p);
+    const w = weight ? weight(cells[i]) : 1;
+    W[i] = w;
+    sw += w;
+    P.set(p, 3 * i);
+    for (let k = 0; k < 3; k++) up[k] += w * p[k];
+  }
+  const l = Math.hypot(up[0], up[1], up[2]) || 1;
+  for (let k = 0; k < 3; k++) up[k] /= l;
+  const east = new Float64Array(3);
+  const north = new Float64Array(3);
+  localFrame(up, east, north);
+  const plane = { up, east, north, R: g.radiusM, cellM: g.cellM };
+  const xs = new Float64Array(n);
+  const ys = new Float64Array(n);
+  const q = new Float64Array(2);
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < n; i++) {
+    planeXY(plane, P.subarray(3 * i, 3 * i + 3), q);
+    xs[i] = q[0];
+    ys[i] = q[1];
+    cx += W[i] * q[0];
+    cy += W[i] * q[1];
+  }
+  cx /= Math.max(sw, 1e-9);
+  cy /= Math.max(sw, 1e-9);
+  let xx = 0;
+  let yy = 0;
+  let xy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = xs[i] - cx;
+    const dy = ys[i] - cy;
+    xx += W[i] * dx * dx;
+    yy += W[i] * dy * dy;
+    xy += W[i] * dx * dy;
+  }
+  xx /= Math.max(sw, 1e-9);
+  yy /= Math.max(sw, 1e-9);
+  xy /= Math.max(sw, 1e-9);
+  const tr = xx + yy;
+  const det = xx * yy - xy * xy;
+  const disc = Math.sqrt(Math.max(0, (tr * tr) / 4 - det));
+  const l1 = tr / 2 + disc;
+  const l2 = Math.max(0, tr / 2 - disc);
+  const a = 0.5 * Math.atan2(2 * xy, xx - yy);
+  return { cx, cy, ux: Math.cos(a), uy: Math.sin(a), length: Math.sqrt(12 * l1) + 1, width: Math.sqrt(12 * l2) + 1, plane };
 }
 
 /**
@@ -341,6 +478,27 @@ export function nearestWhere(g: GridSpec, cx: number, cy: number, radius: number
   return best;
 }
 
+/**
+ * nearestWhere about a registry position (metres; encoded on spheres). Flat maps run nearestWhere on
+ * x / cellM, y / cellM (the expression every caller used); spheres search the geodesic disc of
+ * `radius` cells around the point, nearest first by great-circle distance (ties: the first visited).
+ */
+export function nearestWhereM(g: GridSpec, x: number, y: number, radius: number, ok: (c: number) => boolean): number {
+  if (g.faces === 1) return nearestWhere(g, x / g.cellM, y / g.cellM, radius, ok);
+  const stride = Math.PI * g.radiusM;
+  const face = Math.min(5, Math.max(0, Math.floor(x / stride)));
+  let best = -1;
+  let bd = Infinity;
+  g.chart({ face, u: x - face * stride, v: y }, Math.max(radius, 0.75) * g.cellM, (c, e, nn) => {
+    const d = e * e + nn * nn;
+    if (d < bd && ok(c)) {
+      bd = d;
+      best = c;
+    }
+  });
+  return best;
+}
+
 /** Decimates a polyline (x,y pairs) to points at least `minStep` apart, always keeping the ends. */
 export function decimate(xs: number[], ys: number[], minStep: number): Float32Array {
   const out: number[] = [];
@@ -360,14 +518,14 @@ export function decimate(xs: number[], ys: number[], minStep: number): Float32Ar
 }
 
 /** Length of a polyline in its units. */
-export function polylineLength(p: Float32Array): number {
+export function polylineLength(p: ArrayLike<number>): number {
   let L = 0;
   for (let i = 2; i < p.length; i += 2) L += Math.hypot(p[i] - p[i - 2], p[i + 1] - p[i - 1]);
   return L;
 }
 
 /** Point at fraction `t` of a polyline's length, with the local direction (over ±`span` of the length). */
-export function alongPolyline(p: Float32Array, t: number, span = 0.1): { x: number; y: number; dx: number; dy: number } {
+export function alongPolyline(p: ArrayLike<number>, t: number, span = 0.1): { x: number; y: number; dx: number; dy: number } {
   const L = polylineLength(p);
   const at = (s: number): [number, number] => {
     s = Math.min(L, Math.max(0, s));

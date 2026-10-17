@@ -87,13 +87,13 @@ function fill(h: Float32Array, fixed: Uint8Array, g: CubeGrid): Float64Array {
   return F;
 }
 
-describe('sphere pipeline through biomes', () => {
-  it('runs every stage but the registry, with sphere layers and sphere river positions', async () => {
+describe('sphere pipeline', () => {
+  it('runs every stage, with sphere layers and sphere river positions', async () => {
     const w = await sphereWorld(7);
     const done = w.msgs.filter((m) => m.type === 'stage-done').map((m) => (m.type === 'stage-done' ? m.stage : ''));
     expect(done).toEqual([...SPHERE_STAGES]);
     expect(SPHERE_STAGES).toContain('biome');
-    expect(SPHERE_STAGES).not.toContain('registry');
+    expect(SPHERE_STAGES).toContain('registry');
     for (const m of w.msgs) {
       if (m.type !== 'stage-done') continue;
       for (const l of m.layers) {

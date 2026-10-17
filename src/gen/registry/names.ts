@@ -1,6 +1,7 @@
 import type { LandmarkKind } from '../../shared/landmarks';
 import { hashMix, hashString, rngFor } from '../../shared/hash';
 import type { Rng } from '../../shared/rng';
+import type { Geo } from './geo';
 
 /**
  * Procedural place names (PLAN.md §3 S11). Each world picks 3–5 "cultures" from a handful of phoneme
@@ -196,6 +197,7 @@ function word(lang: Language, rng: Rng, minSyl: number): string {
 
 export interface Culture {
   lang: number;
+  /** Centre: map metres (spheres: encoded position, geo.ts). */
   x: number;
   y: number;
 }
@@ -205,7 +207,12 @@ export class Namer {
   private readonly used = new Set<string>();
   private readonly bases = new Set<string>();
 
-  constructor(private readonly seed: number, rng: Rng, worldM: number) {
+  /** Spheres: unit vectors of the culture centres (3 per culture). */
+  private readonly dirs: Float64Array | null = null;
+  private readonly geo: Geo | null;
+  private readonly p = new Float64Array(3);
+
+  constructor(private readonly seed: number, rng: Rng, worldM: number, geo?: Geo) {
     const k = 3 + rng.int(3);
     const ids = LANGUAGES.map((_, i) => i);
     for (let i = ids.length - 1; i > 0; i--) {
@@ -213,12 +220,39 @@ export class Namer {
       [ids[i], ids[j]] = [ids[j], ids[i]];
     }
     this.cultures = [];
+    this.geo = geo?.sphere ? geo : null;
+    if (this.geo) {
+      // Spheres: centres uniform on the planet; regions are the geodesic Voronoi cells.
+      const g = this.geo;
+      const dirs = new Float64Array(3 * k);
+      for (let i = 0; i < k; i++) {
+        const z = rng.range(-1, 1);
+        const lon = rng.range(-Math.PI, Math.PI);
+        const r = Math.sqrt(Math.max(0, 1 - z * z));
+        dirs.set([r * Math.cos(lon), r * Math.sin(lon), z], 3 * i);
+        const [x, y] = g.fromDir(dirs[3 * i], dirs[3 * i + 1], dirs[3 * i + 2]);
+        this.cultures.push({ lang: ids[i], x, y });
+      }
+      this.dirs = dirs;
+      return;
+    }
     for (let i = 0; i < k; i++) this.cultures.push({ lang: ids[i], x: rng.range(0.1, 0.9) * worldM, y: rng.range(0.1, 0.9) * worldM });
   }
 
-  /** Language index of the culture region at a map position. */
+  /** Language index of the culture region at a map position (spheres: nearest centre along the surface). */
   langAt(x: number, y: number): number {
     let best = 0;
+    if (this.geo && this.dirs) {
+      const p = this.p;
+      const D = this.dirs;
+      this.geo.dir(x, y, p);
+      let bd = -Infinity;
+      this.cultures.forEach((c, i) => {
+        const d = p[0] * D[3 * i] + p[1] * D[3 * i + 1] + p[2] * D[3 * i + 2];
+        if (d > bd) (bd = d), (best = c.lang);
+      });
+      return best;
+    }
     let bd = Infinity;
     for (const c of this.cultures) {
       const d = (c.x - x) ** 2 + (c.y - y) ** 2;

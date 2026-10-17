@@ -1,14 +1,15 @@
 import { RIVER } from '../../shared/protocol';
-import { cellIndex } from '../grid/grid';
+import { cellIndex, forWindow } from '../grid/grid';
 import { MinHeap } from '../grid/heap';
 import { candidate } from './candidate';
-import { alongPolyline, cellAtM, cellX, cellY, decimate, labelAngle, nearestWhere } from './grid';
+import { alongS, decimateS } from './geo';
+import { alongPolyline, cellAtM, cellX, cellY, decimate, labelAngle, nearestWhereM } from './grid';
 import type { Candidate, RegistryInput, Shared } from './types';
 
 /** A traced main stem: reaches from the mouth (or confluence) upstream along the largest discharge. */
 export interface Stem {
   reaches: number[];
-  /** Node polyline, source → mouth (map metres). */
+  /** Node polyline, source → mouth (map metres; spheres: encoded, geo.ts). */
   xs: number[];
   ys: number[];
   nodes: number[];
@@ -35,6 +36,9 @@ export interface RiverResult {
  */
 export function detectWaters(I: RegistryInput, S: Shared, out: Candidate[], rangeOf: Int32Array): RiverResult {
   const g = I.rivers;
+  const X = S.rivX;
+  const Y = S.rivY;
+  const geo = S.geo;
   const R = g.reachStart.length;
   const cellKm = I.fine.cellM / 1000;
   const ups: number[][] = Array.from({ length: R }, () => []);
@@ -79,8 +83,8 @@ export function detectWaters(I: RegistryInput, S: Shared, out: Candidate[], rang
     for (let k = reaches.length - 1; k >= 0; k--) {
       const r = reaches[k];
       for (let i = g.reachStart[r]; i < g.reachStart[r] + g.reachLen[r]; i++) {
-        xs.push(g.x[i]);
-        ys.push(g.y[i]);
+        xs.push(X[i]);
+        ys.push(Y[i]);
         nodes.push(i);
       }
     }
@@ -88,11 +92,11 @@ export function detectWaters(I: RegistryInput, S: Shared, out: Candidate[], rang
     const lastNode = nodes[nodes.length - 1];
     const dn = g.down[lastNode];
     if (dn >= 0) {
-      xs.push(g.x[dn]);
-      ys.push(g.y[dn]);
+      xs.push(X[dn]);
+      ys.push(Y[dn]);
     }
     let L = 0;
-    for (let i = 1; i < xs.length; i++) L += Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]);
+    for (let i = 1; i < xs.length; i++) L += geo.dist(xs[i], ys[i], xs[i - 1], ys[i - 1]);
     const id = stems.length;
     for (const r of reaches) stemOfReach[r] = id;
     stems.push({ reaches, xs, ys, nodes, lengthKm: L / 1000, q: lastQ(r0), mouthNode: lastNode, joins: joinsOf.get(r0) ?? -1 });
@@ -114,8 +118,9 @@ export function detectWaters(I: RegistryInput, S: Shared, out: Candidate[], rang
   const hasDelta = new Set<number>();
   for (const a of apexes) if (reachOf[a] >= 0 && stemOfReach[reachOf[a]] >= 0) hasDelta.add(stemOfReach[reachOf[a]]);
   for (const { s, i } of order.slice(0, cap)) {
-    const path = decimate(s.xs, s.ys, Math.max(I.fine.cellM, (s.lengthKm * 1000) / 200));
-    const a = alongPolyline(path, 0.5);
+    const step = Math.max(I.fine.cellM, (s.lengthKm * 1000) / 200);
+    const path = S.sphere ? decimateS(geo, s.xs, s.ys, step) : decimate(s.xs, s.ys, step);
+    const a = S.sphere ? alongS(geo, path, 0.5) : alongPolyline(path, 0.5);
     const mouthFlags = g.flags[s.mouthNode];
     const strahler = g.strahler[s.mouthNode];
     const delta = hasDelta.has(i);
@@ -145,7 +150,7 @@ export function detectWaters(I: RegistryInput, S: Shared, out: Candidate[], rang
       let best = -1;
       let bd = Infinity;
       for (let k = 0; k < apexes.length; k++) {
-        const d = Math.hypot(g.x[i] - g.x[apexes[k]], g.y[i] - g.y[apexes[k]]);
+        const d = geo.dist(X[i], Y[i], X[apexes[k]], Y[apexes[k]]);
         if (d < bd) (bd = d), (best = k);
       }
       if (best >= 0 && bd < 80000) ext[best] = Math.max(ext[best], bd);
@@ -155,9 +160,9 @@ export function detectWaters(I: RegistryInput, S: Shared, out: Candidate[], rang
     if (ext[k] < 2000) return;
     const st = reachOf[a] >= 0 ? stemOfReach[reachOf[a]] : -1;
     const c: Candidate = candidate({
-      kind: 'delta', x: g.x[a], y: g.y[a], angle: NaN, extentM: ext[k] * 1.5, mag: Math.min(1, Math.log1p(g.q[a]) / Math.log1p(5000)),
-      data: { dischargeM3s: Math.round(g.q[a]), lengthKm: Math.round(ext[k] / 100) / 10 }, idX: g.x[a], idY: g.y[a],
-      landmass: S.masses.label[cellAtM(I.fine, g.x[a], g.y[a])],
+      kind: 'delta', x: X[a], y: Y[a], angle: NaN, extentM: ext[k] * 1.5, mag: Math.min(1, Math.log1p(g.q[a]) / Math.log1p(5000)),
+      data: { dischargeM3s: Math.round(g.q[a]), lengthKm: Math.round(ext[k] / 100) / 10 }, idX: X[a], idY: Y[a],
+      landmass: S.masses.label[cellAtM(I.fine, X[a], Y[a])],
     });
     const river = st >= 0 ? named.get(st) : undefined;
     if (river) c.nameFrom = river;
@@ -181,15 +186,16 @@ function detectLakes(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const cap = Math.round(Math.max(5, S.landKm2 / 12000));
   for (const i of idx.slice(0, cap)) {
     const L = I.lakes[i];
-    const fc = nearestWhere(I.fine, L.cx / I.fine.cellM, L.cy / I.fine.cellM, Math.max(4, 2 * Math.sqrt(L.areaKm2 / cellKm2)), (c) => I.hydro.lakeId[c] === i);
-    const x = fc >= 0 ? cellX(I.fine, fc) : L.cx;
+    const lx = S.geo.enc(L.face, L.cx);
+    const fc = nearestWhereM(I.fine, lx, L.cy, Math.max(4, 2 * Math.sqrt(L.areaKm2 / cellKm2)), (c) => I.hydro.lakeId[c] === i);
+    const x = fc >= 0 ? cellX(I.fine, fc) : lx;
     const y = fc >= 0 ? cellY(I.fine, fc) : L.cy;
     const variant = L.type === 'playa' ? 'playa' : L.salinity === 2 || L.type === 'salt' ? 'salt' : L.type === 'crater' ? 'crater' : 'lake';
     const salty = variant === 'playa' || variant === 'salt';
     const c: Candidate = candidate({
       kind: 'lake', x, y, angle: NaN, extentM: Math.sqrt(L.areaKm2) * 1000 * 1.2, mag: Math.min(1, Math.log10(Math.max(1, L.areaKm2)) / 4),
       data: { areaKm2: Math.round(L.areaKm2 * 10) / 10, depthM: Math.round(L.maxDepth), levelM: Math.round(L.level), salinity: L.salinity, ...(L.type === 'playa' ? { playa: 1 } : {}) },
-      idX: L.cx, idY: L.cy, variant, tier: L.areaKm2 >= 10000 ? 'legendary' : L.areaKm2 >= 2000 ? 'rare' : L.areaKm2 >= 100 ? 'uncommon' : 'common',
+      idX: lx, idY: L.cy, variant, tier: L.areaKm2 >= 10000 ? 'legendary' : L.areaKm2 >= 2000 ? 'rare' : L.areaKm2 >= 100 ? 'uncommon' : 'common',
       hero: salty ? { cat: 'salt-basin', score: L.areaKm2 / 500 } : { cat: 'great-lake', score: L.areaKm2 / 2000 },
       landmass: fc >= 0 ? S.masses.label[fc] : -1,
     });
@@ -200,6 +206,9 @@ function detectLakes(I: RegistryInput, S: Shared, out: Candidate[]): void {
 /** Waterfalls: runs of WATERFALL nodes on rivers of ≥ 1 m³/s, by drop × √q, spaced ≥ 8 km. */
 function detectFalls(I: RegistryInput, S: Shared, out: Candidate[], reachOf: Int32Array): void {
   const g = I.rivers;
+  const X = S.rivX;
+  const Y = S.rivY;
+  const geo = S.geo;
   const list: { node: number; drop: number; score: number }[] = [];
   for (let i = 0; i < g.n; i++) {
     if (!(g.flags[i] & RIVER.WATERFALL)) continue;
@@ -221,15 +230,15 @@ function detectFalls(I: RegistryInput, S: Shared, out: Candidate[], reachOf: Int
   for (const f of list) {
     if (kept.length >= cap) break;
     const i = f.node;
-    if (kept.some((k) => Math.hypot(g.x[k] - g.x[i], g.y[k] - g.y[i]) < 8000)) continue;
+    if (kept.some((k) => geo.dist(X[k], Y[k], X[i], Y[i]) < 8000)) continue;
     kept.push(i);
     // Extent: the visible footprint of the fall with its plunge pool and gorge head, which grows with
     // the drop (the same rule as its label band); the channel width alone understates it.
     const visM = 1500 * Math.sqrt(f.drop / 50);
     out.push(candidate({
-      kind: 'waterfall', x: g.x[i], y: g.y[i], angle: NaN, extentM: Math.max(200, g.width[i] * 3, Math.min(visM, 3000)), visM,
-      mag: Math.min(1, f.drop / 500), data: { heightM: Math.round(f.drop), dischargeM3s: Math.round(g.q[i] * 10) / 10 }, idX: g.x[i], idY: g.y[i],
-      landmass: S.masses.label[cellAtM(I.fine, g.x[i], g.y[i])],
+      kind: 'waterfall', x: X[i], y: Y[i], angle: NaN, extentM: Math.max(200, g.width[i] * 3, Math.min(visM, 3000)), visM,
+      mag: Math.min(1, f.drop / 500), data: { heightM: Math.round(f.drop), dischargeM3s: Math.round(g.q[i] * 10) / 10 }, idX: X[i], idY: Y[i],
+      landmass: S.masses.label[cellAtM(I.fine, X[i], Y[i])],
     }));
   }
 }
@@ -240,6 +249,9 @@ function detectFalls(I: RegistryInput, S: Shared, out: Candidate[], reachOf: Int
  */
 function detectCanyons(I: RegistryInput, S: Shared, out: Candidate[], stems: Stem[], named: Map<number, Candidate>, rangeOf: Int32Array): void {
   const g = I.rivers;
+  const X = S.rivX;
+  const Y = S.rivY;
+  const geo = S.geo;
   const R = S.reg;
   const { off8, border } = R;
   // Highest ground of each regional cell and its 8 neighbours.
@@ -258,7 +270,7 @@ function detectCanyons(I: RegistryInput, S: Shared, out: Candidate[], stems: Ste
     if (s.lengthKm < 30) return;
     const flush = (a: number, b: number): void => {
       let lenM = 0;
-      for (let k = a + 1; k <= b; k++) lenM += Math.hypot(g.x[s.nodes[k]] - g.x[s.nodes[k - 1]], g.y[s.nodes[k]] - g.y[s.nodes[k - 1]]);
+      for (let k = a + 1; k <= b; k++) lenM += geo.dist(X[s.nodes[k]], Y[s.nodes[k]], X[s.nodes[k - 1]], Y[s.nodes[k - 1]]);
       if (lenM < 20000) return;
       let sum = 0;
       let mx = 0;
@@ -267,21 +279,22 @@ function detectCanyons(I: RegistryInput, S: Shared, out: Candidate[], stems: Ste
       const ys: number[] = [];
       for (let k = a; k <= b; k++) {
         const i = s.nodes[k];
-        const rc = cellAtM(R, g.x[i], g.y[i]);
+        const rc = cellAtM(R, X[i], Y[i]);
         const d = near[rc] - g.zWater[i];
         sum += d;
         mx = Math.max(mx, d);
         if (rangeOf[rc] >= 0) inR++;
-        xs.push(g.x[i]);
-        ys.push(g.y[i]);
+        xs.push(X[i]);
+        ys.push(Y[i]);
       }
       const cnt = b - a + 1;
       const mean = sum / cnt;
       const inRange = inR / cnt >= 0.5;
       if (inRange && mean < 1500) return;
       const lenKm = lenM / 1000;
-      const path = decimate(xs, ys, Math.max(I.fine.cellM, lenM / 60));
-      const at = alongPolyline(path, 0.5);
+      const step = Math.max(I.fine.cellM, lenM / 60);
+      const path = S.sphere ? decimateS(geo, xs, ys, step) : decimate(xs, ys, step);
+      const at = S.sphere ? alongS(geo, path, 0.5) : alongPolyline(path, 0.5);
       const river = named.get(si);
       const score = Math.sqrt((lenKm / 150) * (mean / 1000));
       const c: Candidate = candidate({
@@ -298,13 +311,13 @@ function detectCanyons(I: RegistryInput, S: Shared, out: Candidate[], stems: Ste
     let gapM = 0;
     for (let k = 0; k < s.nodes.length; k++) {
       const i = s.nodes[k];
-      const deep = near[cellAtM(R, g.x[i], g.y[i])] - g.zWater[i] >= 600;
+      const deep = near[cellAtM(R, X[i], Y[i])] - g.zWater[i] >= 600;
       if (deep) {
         if (a < 0) a = k;
         b = k;
         gapM = 0;
       } else if (a >= 0) {
-        gapM += Math.hypot(g.x[i] - g.x[s.nodes[k - 1]], g.y[i] - g.y[s.nodes[k - 1]]);
+        gapM += geo.dist(X[i], Y[i], X[s.nodes[k - 1]], Y[s.nodes[k - 1]]);
         if (gapM > 3000) {
           flush(a, b);
           a = -1;
@@ -318,7 +331,7 @@ function detectCanyons(I: RegistryInput, S: Shared, out: Candidate[], stems: Ste
   const kept: Candidate[] = [];
   for (const c of found) {
     if (kept.length >= cap) break;
-    if (kept.some((o) => Math.hypot(o.x - c.x, o.y - c.y) < 40000)) continue;
+    if (kept.some((o) => geo.dist(o.x, o.y, c.x, c.y) < 40000)) continue;
     kept.push(c);
   }
   out.push(...kept);
@@ -340,6 +353,9 @@ const GORGE_PER_KM2 = 50000;
 
 function detectGorges(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const g = I.rivers;
+  const X = S.rivX;
+  const Y = S.rivY;
+  const geo = S.geo;
   const fine = I.fine;
   const { n, cellM } = fine;
   const r = Math.max(1, Math.round(GORGE_RADIUS_M / cellM));
@@ -347,19 +363,25 @@ function detectGorges(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const deep = new Uint8Array(g.n);
   for (let i = 0; i < g.n; i++) {
     if (g.strahler[i] < 2 || g.flags[i] & RIVER.DISTRIBUTARY) continue;
-    const cx = Math.min(n - 1, Math.floor(g.x[i] / cellM));
-    const cy = Math.min(n - 1, Math.floor(g.y[i] / cellM));
     let mx = -Infinity;
-    const xb = Math.min(n - 1, cx + r);
-    const yb = Math.min(n - 1, cy + r);
-    for (let y = Math.max(0, cy - r); y <= yb; y++) {
-      const dy = y - cy;
-      const row = cellIndex(fine, 0, y);
-      for (let x = Math.max(0, cx - r); x <= xb; x++) {
-        const dx = x - cx;
-        if (dx * dx + dy * dy > r * r) continue;
-        const h = I.h[row + x];
-        if (h > mx) mx = h;
+    if (S.sphere) {
+      forWindow(fine, cellAtM(fine, X[i], Y[i]), r, (j, dx, dy) => {
+        if (dx * dx + dy * dy <= r * r + 0.5 && I.h[j] > mx) mx = I.h[j];
+      });
+    } else {
+      const cx = Math.min(n - 1, Math.floor(X[i] / cellM));
+      const cy = Math.min(n - 1, Math.floor(Y[i] / cellM));
+      const xb = Math.min(n - 1, cx + r);
+      const yb = Math.min(n - 1, cy + r);
+      for (let y = Math.max(0, cy - r); y <= yb; y++) {
+        const dy = y - cy;
+        const row = cellIndex(fine, 0, y);
+        for (let x = Math.max(0, cx - r); x <= xb; x++) {
+          const dx = x - cx;
+          if (dx * dx + dy * dy > r * r) continue;
+          const h = I.h[row + x];
+          if (h > mx) mx = h;
+        }
       }
     }
     depth[i] = mx - g.zWater[i];
@@ -377,9 +399,9 @@ function detectGorges(I: RegistryInput, S: Shared, out: Candidate[]): void {
     let mx = 0;
     let cnt = 0;
     for (let c = i, guard = 0; c >= 0 && deep[c] && guard < g.n; guard++) {
-      if (xs.length) len += Math.hypot(g.x[c] - xs[xs.length - 1], g.y[c] - ys[ys.length - 1]);
-      xs.push(g.x[c]);
-      ys.push(g.y[c]);
+      if (xs.length) len += geo.dist(X[c], Y[c], xs[xs.length - 1], ys[ys.length - 1]);
+      xs.push(X[c]);
+      ys.push(Y[c]);
       sum += depth[c];
       mx = Math.max(mx, depth[c]);
       cnt++;
@@ -387,8 +409,9 @@ function detectGorges(I: RegistryInput, S: Shared, out: Candidate[]): void {
     }
     const lenKm = len / 1000;
     if (lenKm < GORGE_MIN_KM || lenKm > GORGE_MAX_KM) continue;
-    const path = decimate(xs, ys, Math.max(cellM, len / 30));
-    const at = alongPolyline(path, 0.5);
+    const step = Math.max(cellM, len / 30);
+    const path = S.sphere ? decimateS(geo, xs, ys, step) : decimate(xs, ys, step);
+    const at = S.sphere ? alongS(geo, path, 0.5) : alongPolyline(path, 0.5);
     const mean = sum / cnt;
     found.push(candidate({
       kind: 'gorge', x: at.x, y: at.y, angle: labelAngle(at.dx, at.dy), extentM: len, mag: Math.min(1, mean / 1000),

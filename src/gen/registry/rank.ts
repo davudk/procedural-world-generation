@@ -1,6 +1,6 @@
 import type { Landmark, LandmarkKind, Tier } from '../../shared/landmarks';
 import { hashMix, hashString } from '../../shared/hash';
-import { applyWBudget } from './budget';
+import { applyWBudget, SPHERE_W_VIEWS } from './budget';
 import { own } from './candidate';
 import type { Namer } from './names';
 import type { Candidate, HeroCat, Shared } from './types';
@@ -84,7 +84,7 @@ export function rankAndName(
         if (heroes.length >= heroCount) break;
         if (heroes.includes(c) || c.hero!.score < minScore) continue;
         if (distinct && heroes.some((h) => h.hero!.cat === c.hero!.cat)) continue;
-        if (heroes.some((h) => Math.hypot(h.x - c.x, h.y - c.y) < spacing)) continue;
+        if (heroes.some((h) => S.geo.dist(h.x, h.y, c.x, c.y) < spacing)) continue;
         heroes.push(c);
       }
     }
@@ -94,7 +94,7 @@ export function rankAndName(
   // World-band interest budget (research 05 §3.2, M8 baseline rec. 4).
   const prot = new Set<Candidate>(heroes);
   for (const c of all) if (c.data.worldKing || c.data.wFill) prot.add(c);
-  const budget = applyWBudget(all, imp, prot, worldM, externalW);
+  const budget = applyWBudget(all, imp, prot, worldM, externalW, S.geo);
   const cands = budget.kept;
   // Later passes (the region / area fill) see what the budget left and may add candidates.
   if (afterBudget) {
@@ -110,6 +110,8 @@ export function rankAndName(
     const k = c.landmass ?? -1;
     if (k >= 0 && !S.continents.has(k)) {
       const M = S.masses;
+      // Spheres: the island's mean direction.
+      if (M.dir) return namer.langAt(...S.geo.fromDir(M.dir[3 * k], M.dir[3 * k + 1], M.dir[3 * k + 2]));
       const cell = S.masses.label.length ** 0.5;
       const m = worldM / cell;
       return namer.langAt((M.sx[k] / M.size[k] + 0.5) * m, (M.sy[k] / M.size[k] + 0.5) * m);
@@ -131,17 +133,36 @@ export function rankAndName(
   // important landmarks keep their label; the rest appear from the next zoom step on.
   const wMpp = worldM / 1600;
   let wLabels = 0;
+  const wLabelCap = S.sphere ? W_LABELS * SPHERE_W_VIEWS : W_LABELS;
   for (const c of order) {
     const isHero = heroes.includes(c);
     let maxMpp = Math.min(50000, Math.max(5, (c.visM ?? c.extentM) / PX_TO_READ));
     if (isHero || c.data.worldKing) maxMpp = Math.max(maxMpp, W_BAND_MPP * 1.1, wMpp * 1.1);
-    else if (maxMpp >= wMpp && ++wLabels > W_LABELS) maxMpp = 0.95 * wMpp;
+    // A globe from space always names its continents and oceans.
+    else if (S.sphere && (c.kind === 'continent' || c.kind === 'ocean')) maxMpp = Math.max(maxMpp, wMpp * 1.1);
+    else if (maxMpp >= wMpp && ++wLabels > wLabelCap) maxMpp = 0.95 * wMpp;
     const lm: Landmark = {
       id: landmarks.length, kind: c.kind, name: named.get(c)![0], x: c.x, y: c.y, angle: c.angle, extentM: c.extentM,
       importance: Math.round(imp.get(c)! * 1000) / 1000, maxMpp: Math.round(maxMpp), data: c.data,
       tier: isHero && c.tier !== 'legendary' && c.tier !== 'rare' ? 'rare' : (c.tier ?? DEFAULT_TIER[c.kind]), hero: isHero,
     };
-    if (c.path && c.path.length >= 4) lm.path = c.path;
+    if (S.sphere) {
+      // Decoded: face plus face-local metres (shared/landmarks.ts), per point for paths.
+      lm.face = S.geo.faceOf(c.x);
+      lm.x = S.geo.u(c.x);
+      if (c.path && c.path.length >= 4) {
+        const n = c.path.length >> 1;
+        const path = new Float32Array(2 * n);
+        const pathFace = new Uint8Array(n);
+        for (let i = 0; i < n; i++) {
+          pathFace[i] = S.geo.faceOf(c.path[2 * i]);
+          path[2 * i] = S.geo.u(c.path[2 * i]);
+          path[2 * i + 1] = c.path[2 * i + 1];
+        }
+        lm.path = path;
+        lm.pathFace = pathFace;
+      }
+    } else if (c.path && c.path.length >= 4) lm.path = c.path as Float32Array;
     if (isHero) lm.data = { ...c.data, heroScore: Math.round(c.hero!.score * 100) / 100 };
     index.set(c, lm.id);
     // Kept as a copy of its own, like candidates (candidate.ts: V8 Maglev workaround).

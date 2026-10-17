@@ -5,6 +5,8 @@ import type { ClimateExtra } from '../stages/climate';
 import type { HydroExtra } from '../stages/hydro';
 import type { LandformsExtra } from '../stages/landforms';
 import type { PlatesExtra } from '../stages/plates';
+import type { Geo } from './geo';
+import type { OceanSplit } from './water';
 import type { Components, GridSpec } from './grid';
 
 /** Hero menu categories (research 05 §3.4). */
@@ -18,6 +20,7 @@ export type HeroCat =
  */
 export interface Candidate {
   kind: LandmarkKind;
+  /** Map metres (spheres: encoded face-local metres, geo.ts). */
   x: number;
   y: number;
   angle: number;
@@ -25,7 +28,8 @@ export interface Candidate {
   /** Kind-specific magnitude 0–1 (height, discharge, area… relative to a reference), for importance. */
   mag: number;
   data: Record<string, number>;
-  path?: Float32Array;
+  /** x, y pairs (spheres: encoded positions in a Float64Array). */
+  path?: Float32Array | Float64Array;
   /**
    * Identity for names: a position that is stable for this feature when unrelated parameters change
    * (summit, mouth, basin centre), map metres.
@@ -50,6 +54,7 @@ export interface Candidate {
 /** Everything the detectors read. Map positions are metres; `fine` is the macro grid. */
 export interface RegistryInput {
   seed: number;
+  /** World width; on spheres the equal-area size √(4πR²) (schema `sizeEff`). */
   worldKm: number;
   fine: GridSpec;
   /** The plates stage's grid. */
@@ -93,4 +98,12 @@ export interface Shared {
   /** Landmass ids that count as continents. */
   continents: Set<number>;
   landKm2: number;
+  /** Position helpers (planar on flat maps, great circles on spheres) and the shape. */
+  geo: Geo;
+  sphere: boolean;
+  /** River node positions (RiverGraph x, y; spheres: x encoded with the node's face). */
+  rivX: Float32Array | Float64Array;
+  rivY: Float32Array;
+  /** Spheres: the world ocean split into oceans (set by the water detector). */
+  oceans?: OceanSplit;
 }

@@ -4,9 +4,10 @@ import { RIVER } from '../../shared/protocol';
 import type { LandmarkKind } from '../../shared/landmarks';
 import { BIOME } from '../../shared/biomes';
 import { candidate } from './candidate';
-import { cellAtM, cellX, cellY, label, nearestWhere } from './grid';
+import { cellAtM, cellX, cellY, compKm2, label, nearestWhere, nearestWhereM } from './grid';
 import { G, groupOf } from './shared';
 import type { ReliefResult } from './relief';
+import type { Geo } from './geo';
 import type { Candidate, RegistryInput, Shared } from './types';
 
 /**
@@ -74,9 +75,10 @@ function fillBand(I: RegistryInput, S: Shared, out: Candidate[], relief: ReliefR
     if (c.path && !area) for (let i = 0; i + 1 < c.path.length; i += 2) mark(c.path[i], c.path[i + 1]);
   }
   const g = I.rivers;
-  if (B.riverOrder > 0) for (let i = 0; i < g.n; i++) if (g.strahler[i] >= B.riverOrder && !(g.flags[i] & RIVER.DISTRIBUTARY)) mark(g.x[i], g.y[i]);
-  for (const l of I.lakes) if (Math.sqrt(l.areaKm2) * 1000 >= B.lo) mark(l.cx, l.cy);
-  for (const f of I.landforms.features) if (LANDFORM_PLACES.has(f.type) && f.size >= B.lo) mark(f.x, f.y);
+  const geo = S.geo;
+  if (B.riverOrder > 0) for (let i = 0; i < g.n; i++) if (g.strahler[i] >= B.riverOrder && !(g.flags[i] & RIVER.DISTRIBUTARY)) mark(S.rivX[i], S.rivY[i]);
+  for (const l of I.lakes) if (Math.sqrt(l.areaKm2) * 1000 >= B.lo) mark(geo.enc(l.face, l.cx), l.cy);
+  for (const f of I.landforms.features) if (LANDFORM_PLACES.has(f.type) && f.size >= B.lo) mark(geo.enc(f.face, f.x), f.y);
   const dist = chamferDistance(covered, cg);
   const fillCells = (B.fillKm * 1000) / cg.cellM;
   const far = (c: number): boolean => dist[area ? c : cellAtM(cg, cellX(fine, c), cellY(fine, c))] >= fillCells;
@@ -124,10 +126,20 @@ function fillBand(I: RegistryInput, S: Shared, out: Candidate[], relief: ReliefR
   const nb = Math.ceil((n * cellM) / bucketM);
   const buckets = new Map<number, number[]>();
   const fill2 = bucketM * bucketM;
+  // Spheres: buckets of the 3D cube lattice (a chord shorter than bucketM spans adjacent buckets).
+  const near3 = geo.sphere ? new NearSet(bucketM, geo) : null;
   let added = 0;
   for (const it of items) {
     const x = cellX(fine, it.c);
     const y = cellY(fine, it.c);
+    if (near3) {
+      if (near3.near(x, y)) continue;
+      near3.add(x, y);
+      it.claim?.();
+      added++;
+      out.push(it.make());
+      continue;
+    }
     const bx = Math.floor(x / bucketM);
     const by = Math.floor(y / bucketM);
     let ok = true;
@@ -148,6 +160,41 @@ function fillBand(I: RegistryInput, S: Shared, out: Candidate[], relief: ReliefR
     out.push(it.make());
   }
   return added;
+}
+
+/** Positions on a sphere with a "any point closer than d?" query, hashed on a 3D lattice of d cubes. */
+class NearSet {
+  private readonly cells = new Map<string, number[]>();
+  private readonly p = new Float64Array(3);
+  constructor(private readonly d: number, private readonly geo: Geo) {}
+
+  private key(i: number, j: number, k: number): string {
+    return `${i},${j},${k}`;
+  }
+
+  near(x: number, y: number): boolean {
+    const { p, d, geo } = this;
+    geo.dir(x, y, p);
+    const i0 = Math.floor((p[0] * geo.R) / d), j0 = Math.floor((p[1] * geo.R) / d), k0 = Math.floor((p[2] * geo.R) / d);
+    for (let i = i0 - 1; i <= i0 + 1; i++) {
+      for (let j = j0 - 1; j <= j0 + 1; j++) {
+        for (let k = k0 - 1; k <= k0 + 1; k++) {
+          const pts = this.cells.get(this.key(i, j, k));
+          if (pts) for (let q = 0; q < pts.length; q += 2) if (geo.dist(pts[q], pts[q + 1], x, y) < d) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  add(x: number, y: number): void {
+    const { p, d, geo } = this;
+    geo.dir(x, y, p);
+    const key = this.key(Math.floor((p[0] * geo.R) / d), Math.floor((p[1] * geo.R) / d), Math.floor((p[2] * geo.R) / d));
+    const a = this.cells.get(key);
+    if (a) a.push(x, y);
+    else this.cells.set(key, [x, y]);
+  }
 }
 
 interface FillItem {
@@ -177,9 +224,15 @@ function patches(I: RegistryInput, S: Shared, B: Band, far: (c: number) => boole
     const comps = label(mask, fine, true);
     const list: { k: number; c: number; a: number }[] = [];
     for (let k = 0; k < comps.count; k++) {
-      const a = comps.size[k] * cellKm2;
+      const a = compKm2(comps, k, cellKm2);
       if (Math.sqrt(a) * 1000 < B.lo || a > PATCH_MAX_KM2) continue;
-      const c = nearestWhere(fine, comps.sx[k] / comps.size[k] + 0.5, comps.sy[k] / comps.size[k] + 0.5, Math.max(4, Math.sqrt(comps.size[k])), (q) => comps.label[q] === k);
+      const rad = Math.max(4, Math.sqrt(comps.size[k]));
+      const own = (q: number): boolean => comps.label[q] === k;
+      let c: number;
+      if (comps.dir) {
+        const [x, y] = S.geo.fromDir(comps.dir[3 * k], comps.dir[3 * k + 1], comps.dir[3 * k + 2]);
+        c = nearestWhereM(fine, x, y, rad, own);
+      } else c = nearestWhere(fine, comps.sx[k] / comps.size[k] + 0.5, comps.sy[k] / comps.size[k] + 0.5, rad, own);
       if (c < 0 || !far(c)) continue;
       list.push({ k, c, a });
     }
@@ -231,9 +284,10 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number
     if (c.path) for (let i = 0; i + 1 < c.path.length; i += 2) mark(c.path[i], c.path[i + 1]);
   }
   const g = I.rivers;
-  for (let i = 0; i < g.n; i++) if (g.strahler[i] >= 6 && !(g.flags[i] & RIVER.DISTRIBUTARY)) mark(g.x[i], g.y[i]);
-  for (const l of I.lakes) if (l.type !== 'playa' && Math.sqrt(l.areaKm2) * 1000 >= lo) mark(l.cx, l.cy);
-  for (const f of I.landforms.features) if (LANDFORM_PLACES.has(f.type) && f.size >= lo) mark(f.x, f.y);
+  const geo = S.geo;
+  for (let i = 0; i < g.n; i++) if (g.strahler[i] >= 6 && !(g.flags[i] & RIVER.DISTRIBUTARY)) mark(S.rivX[i], S.rivY[i]);
+  for (const l of I.lakes) if (l.type !== 'playa' && Math.sqrt(l.areaKm2) * 1000 >= lo) mark(geo.enc(l.face, l.cx), l.cy);
+  for (const f of I.landforms.features) if (LANDFORM_PLACES.has(f.type) && f.size >= lo) mark(geo.enc(f.face, f.x), f.y);
   const rad = (W_FILL_RADIUS_FRAC * worldM) / R.cellM;
   const need = (W_FILL_FRAC * worldM) / R.cellM;
   const rKm2 = (R.cellM / 1000) ** 2;
@@ -254,18 +308,23 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number
     const r = Math.ceil(rad);
     const sum = new Float64Array(covers.length);
     let landSum = 0;
-    const xb = Math.min(R.n - 1, bx + r);
-    const yb = Math.min(R.n - 1, by + r);
-    for (let y = Math.max(0, by - r); y <= yb; y++) {
-      for (let x = Math.max(0, bx - r); x <= xb; x++) {
-        const dx = x - bx;
-        const dy = y - by;
-        if (dx * dx + dy * dy > rad * rad) continue;
-        const c = cellIndex(R, x, y);
-        landSum += S.landShare[c];
-        covers.forEach(([, , gs], k) => {
-          for (const gg of gs) sum[k] += S.groupShare[gg][c];
-        });
+    const visit = (c: number): void => {
+      landSum += S.landShare[c];
+      covers.forEach(([, , gs], k) => {
+        for (const gg of gs) sum[k] += S.groupShare[gg][c];
+      });
+    };
+    if (geo.sphere) R.chart(R.point(best), rad * R.cellM, visit);
+    else {
+      const xb = Math.min(R.n - 1, bx + r);
+      const yb = Math.min(R.n - 1, by + r);
+      for (let y = Math.max(0, by - r); y <= yb; y++) {
+        for (let x = Math.max(0, bx - r); x <= xb; x++) {
+          const dx = x - bx;
+          const dy = y - by;
+          if (dx * dx + dy * dy > rad * rad) continue;
+          visit(cellIndex(R, x, y));
+        }
       }
     }
     let k = -1;
@@ -277,7 +336,7 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number
     }
     const [kind, v] = covers[k];
     const areaKm2 = sum[k] * rKm2;
-    const fc = nearestWhere(I.fine, cellX(R, best) / I.fine.cellM, cellY(R, best) / I.fine.cellM, 3 * S.f, (q) => !I.sea[q]);
+    const fc = nearestWhereM(I.fine, cellX(R, best), cellY(R, best), 3 * S.f, (q) => !I.sea[q]);
     const x = fc >= 0 ? cellX(I.fine, fc) : cellX(R, best);
     const y = fc >= 0 ? cellY(I.fine, fc) : cellY(R, best);
     let variant = v;

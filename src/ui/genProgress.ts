@@ -20,7 +20,7 @@ type StepState = 'pending' | 'running' | 'done' | 'cached';
  * Generation timeline under the top bar: one segment per pipeline stage, sized by its expected
  * duration (last measured run per mode), plus a short status ("Erosion · 4 of 11"). The running
  * segment fills over its expected time. The bar fades out shortly after the world is ready. Spherical
- * worlds run only the stages that exist for them so far (SPHERE_STAGES); the others are hidden.
+ * worlds run the stages listed in SPHERE_STAGES; the others are hidden.
  */
 export class GenProgress {
   private readonly bar: HTMLElement;
@@ -31,7 +31,6 @@ export class GenProgress {
   private readonly measured: Record<GenMode, Partial<Record<StageId, number>>> = { preview: {}, build: {} };
   private mode: GenMode = 'build';
   private steps: readonly (readonly [StageId, string])[] = STEPS;
-  private shape: WorldShape = 'flat';
   private hideTimer = 0;
 
   constructor(statusHost: HTMLElement, barHost: HTMLElement) {
@@ -55,7 +54,6 @@ export class GenProgress {
 
   start(mode: GenMode, shape: WorldShape = 'flat'): void {
     this.mode = mode;
-    this.shape = shape;
     this.steps = shape === 'sphere' ? STEPS.filter(([id]) => SPHERE_STAGES.includes(id)) : STEPS;
     for (const [id, seg] of this.segs) seg.style.display = this.steps.some(([s]) => s === id) ? '' : 'none';
     this.bar.setAttribute('aria-valuemax', String(this.steps.length));
@@ -123,9 +121,7 @@ export class GenProgress {
     this.status.classList.remove('faded');
     const total = this.steps.length;
     const what = this.mode === 'preview' ? 'Preview' : 'Building';
-    // Spheres stop before the landmark registry for now; say so rather than implying the world is complete.
-    const later = this.shape === 'sphere' ? ' · landmarks are not available on spheres yet' : '';
-    if (finished === total) this.status.textContent = (this.mode === 'preview' ? 'Preview ready' : 'World ready') + later;
+    if (finished === total) this.status.textContent = this.mode === 'preview' ? 'Preview ready' : 'World ready';
     else if (running) this.status.textContent = `${what} · ${this.labels.get(running)} · ${finished + 1} of ${total}`;
     else this.status.textContent = `${what} · ${finished} of ${total}`;
   }

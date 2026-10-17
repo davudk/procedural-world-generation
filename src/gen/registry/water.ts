@@ -1,7 +1,7 @@
-import { cellIndex, coarser, cellX as colOf, cellY as rowOf, onFace } from '../grid/grid';
+import { cellIndex, cellFace, coarser, cellX as colOf, cellY as rowOf, onFace, tryCellIndex } from '../grid/grid';
 import { chamferDistance } from '../grid/ops';
 import { candidate, own } from './candidate';
-import { blockMean, cellAtM, cellX, cellY, insideDistance, label, labelAngle, mergeTree, nearestWhere, resolveOwners, type GridSpec } from './grid';
+import { blockMean, cellAtM, cellX, cellY, compKm2, insideDistance, label, labelAngle, mergeTree, nearestWhereM, resolveOwners, type GridSpec, type MergeTree } from './grid';
 import { gradAt } from './shared';
 import type { Candidate, RegistryInput, Shared } from './types';
 
@@ -11,6 +11,30 @@ const SEA_MIN_DEPTH_KM = 20;
 /** Straits: passages at most this wide (km) between two basins of at least STRAIT_SIDE_KM2. */
 const STRAIT_MAX_KM = 60;
 const STRAIT_SIDE_KM2 = 2000;
+/**
+ * Oceans on a closed surface (research 10 §5.11): the world ocean (the largest sea body, at least
+ * OCEAN_MIN_SHARE of the planet) is split at its narrowest passages. A basin of the distance-from-land
+ * merge tree is an ocean nucleus when it holds ≥ OCEAN_NUCLEUS_SHARE of the world ocean, its centre is
+ * ≥ OCEAN_DEPTH_FRAC × the equal-area size from land, and the passage joining it to a deeper basin is
+ * at most OCEAN_COL × its centre's distance from land; every cell of the world ocean then belongs to
+ * the nucleus it drains to in the merge tree (the root is always one), so the oceans partition it.
+ */
+const OCEAN_MIN_SHARE = 0.1;
+const OCEAN_NUCLEUS_SHARE = 0.035;
+const OCEAN_DEPTH_FRAC = 0.05;
+const OCEAN_COL = 0.7;
+const OCEAN_MAX = 5;
+
+/** Partition of the world ocean into named oceans (spheres), on the regional grid. */
+export interface OceanSplit {
+  /** Per regional cell: index of its ocean in `peaks`, −1 outside the world ocean. */
+  of: Int32Array;
+  /** Per ocean, largest first: merge-tree peak cell (the point farthest from land) and area (km²). */
+  peaks: number[];
+  areaKm2: number[];
+  /** Area of the world ocean (km²). */
+  worldKm2: number;
+}
 
 /**
  * Sea landmarks on the regional grid. Basins come from the merge tree of the distance from land over
@@ -35,6 +59,9 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
     const big = t.area[k] * rKm2 >= SEA_MIN_KM2 && t.peakV[k] * rKm >= SEA_MIN_DEPTH_KM;
     keep[k] = big && (t.parent[k] < 0 || t.peakV[k] - t.colV[k] >= 0.5 * t.peakV[k]) ? 1 : 0;
   }
+  const ocean = S.sphere ? splitOceans(I, S, t, seaR) : null;
+  // Ocean nuclei are named as oceans; the seas are the other basins.
+  if (ocean) for (const p of ocean.peaks) keep[t.owner[p]] = 0;
   const res = resolveOwners(t, keep);
   const basin = new Int32Array(MM).fill(-1);
   const bArea = new Float64Array(t.count);
@@ -44,18 +71,31 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
     const b = res[t.owner[i]];
     basin[i] = b;
     if (b < 0) continue;
-    bArea[b]++;
-    // Touches the map edge (flat; research 10 §5.11 replaces this rule on a closed surface).
-    if (R.border[i]) edge[b] = 1;
+    // Spheres: exact cell areas (in units of the nominal rKm2).
+    if (R.uniform) bArea[b]++;
+    else bArea[b] += R.area(i) / (rKm2 * 1e6);
+    // Touches the map edge (flat; on a closed surface the oceans come from splitOceans).
+    if (R.border[i] && !S.sphere) edge[b] = 1;
   }
   const basins: number[] = [];
   for (let k = 0; k < t.count; k++) if (keep[k] && bArea[k] > 0) basins.push(k);
   basins.sort((a, b) => bArea[b] - bArea[a] || a - b);
   const worldKm2 = I.worldKm * I.worldKm;
+  if (ocean) {
+    ocean.peaks.forEach((pk, o) => {
+      const [x, y] = snapSea(I, S, cellX(R, pk), cellY(R, pk));
+      const areaKm2 = ocean.areaKm2[o];
+      out.push(candidate({
+        kind: 'ocean', x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000, mag: Math.min(1, areaKm2 / (0.3 * worldKm2)),
+        data: { areaKm2: Math.round(areaKm2), maxShoreDistKm: Math.round(S.dLand[pk] * rKm) }, idX: cellX(R, pk), idY: cellY(R, pk),
+      }));
+    });
+    S.oceans = ocean;
+  }
   const seaCands: Candidate[] = [];
   basins.forEach((k, idx) => {
     const areaKm2 = bArea[k] * rKm2;
-    const isOcean = idx === 0 && edge[k] === 1 && areaKm2 >= 0.2 * worldKm2;
+    const isOcean = !ocean && idx === 0 && edge[k] === 1 && areaKm2 >= 0.2 * worldKm2;
     const [x, y] = snapSea(I, S, cellX(R, t.peak[k]), cellY(R, t.peak[k]));
     seaCands.push(candidate({
       kind: isOcean ? 'ocean' : 'sea', x, y, angle: NaN, extentM: Math.sqrt(areaKm2) * 1000,
@@ -76,7 +116,7 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
     const [vx, vy] = gradAt(S.dLand, R, c);
     const [x, y] = snapSea(I, S, cellX(R, c), cellY(R, c));
     straits.push(candidate({
-      kind: 'strait', x, y, angle: labelAngle(-vy, vx), extentM: Math.max(3 * widthKm, 15) * 1000,
+      kind: 'strait', x, y, angle: S.sphere ? S.geo.angleFromCell(R, c, -vy, vx, x, y) : labelAngle(-vy, vx), extentM: Math.max(3 * widthKm, 15) * 1000,
       mag: Math.min(1, Math.min(t.area[k], t.area[p]) * rKm2 / 50000),
       data: { widthKm: Math.max(1, Math.round(widthKm)) }, idX: cellX(R, c), idY: cellY(R, c),
     }));
@@ -85,7 +125,7 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
   const keptStraits: Candidate[] = [];
   for (const s of straits) {
     if (keptStraits.length >= 6) break;
-    if (keptStraits.some((o) => Math.hypot(o.x - s.x, o.y - s.y) < 50000)) continue;
+    if (keptStraits.some((o) => S.geo.dist(o.x, o.y, s.x, s.y) < 50000)) continue;
     keptStraits.push(s);
   }
   out.push(...keptStraits);
@@ -98,13 +138,62 @@ export function detectWater(I: RegistryInput, S: Shared, out: Candidate[]): void
   bays.list.sort((a, b) => b.extentM - a.extentM);
   for (const b of bays.list.slice(0, Math.round(Math.min(20, Math.max(4, S.landKm2 / 15000))))) out.push(b);
 
-  detectFjords(I, out);
-  coastalFeatures(I, out);
+  detectFjords(I, S, out);
+  coastalFeatures(I, S, out);
+}
+
+/** The world ocean of a sphere split into oceans (see OCEAN_*), or null when there is no world ocean. */
+function splitOceans(I: RegistryInput, S: Shared, t: MergeTree, seaR: Uint8Array): OceanSplit | null {
+  const R = S.reg;
+  const MM = R.cells;
+  const rKm = R.cellM / 1000;
+  const comps = label(seaR, R, false);
+  let w = -1;
+  for (let k = 0; k < comps.count; k++) if (w < 0 || comps.areaM2![k] > comps.areaM2![w]) w = k;
+  if (w < 0) return null;
+  const worldKm2 = comps.areaM2![w] / 1e6;
+  if (worldKm2 < (OCEAN_MIN_SHARE * R.totalArea) / 1e6) return null;
+  const wCells = comps.size[w];
+  // Candidate nuclei: basins of the world ocean, biggest first; the root (deepest basin) always.
+  const cand: number[] = [];
+  let root = -1;
+  for (let k = 0; k < t.count; k++) {
+    if (comps.label[t.peak[k]] !== w) continue;
+    if (t.parent[k] < 0) {
+      root = k;
+      continue;
+    }
+    if (t.area[k] < OCEAN_NUCLEUS_SHARE * wCells || t.peakV[k] * rKm < OCEAN_DEPTH_FRAC * I.worldKm) continue;
+    if (t.colV[k] > OCEAN_COL * t.peakV[k]) continue;
+    cand.push(k);
+  }
+  if (root < 0) return null;
+  cand.sort((a, b) => t.area[b] - t.area[a] || a - b);
+  const nuclei = [root, ...cand.slice(0, OCEAN_MAX - 1)];
+  const keep = new Uint8Array(t.count);
+  for (const k of nuclei) keep[k] = 1;
+  const res = resolveOwners(t, keep);
+  const idx = new Int32Array(t.count).fill(-1);
+  nuclei.forEach((k, o) => (idx[k] = o));
+  const of = new Int32Array(MM).fill(-1);
+  const areaKm2 = nuclei.map(() => 0);
+  for (let i = 0; i < MM; i++) {
+    if (comps.label[i] !== w) continue;
+    const o = idx[res[t.owner[i]]];
+    of[i] = o;
+    areaKm2[o] += R.area(i) / 1e6;
+  }
+  // Largest first (ties by the nucleus index).
+  const order = nuclei.map((_, o) => o).sort((a, b) => areaKm2[b] - areaKm2[a] || a - b);
+  const rank = new Int32Array(nuclei.length);
+  order.forEach((o, r) => (rank[o] = r));
+  for (let i = 0; i < MM; i++) if (of[i] >= 0) of[i] = rank[of[i]];
+  return { of, peaks: order.map((o) => t.peak[nuclei[o]]), areaKm2: order.map((o) => areaKm2[o]), worldKm2 };
 }
 
 /** Nearest sea cell of the macro grid to a map position, as map metres. */
 function snapSea(I: RegistryInput, S: Shared, x: number, y: number): [number, number] {
-  const fc = nearestWhere(I.fine, x / I.fine.cellM, y / I.fine.cellM, 4 * S.f, (c) => I.sea[c] === 1);
+  const fc = nearestWhereM(I.fine, x, y, 4 * S.f, (c) => I.sea[c] === 1);
   return fc >= 0 ? [cellX(I.fine, fc), cellY(I.fine, fc)] : [x, y];
 }
 
@@ -140,16 +229,28 @@ function embayments(
     sinT[d] = Math.sin((2 * Math.PI * d) / DIRS);
   }
   const emb = new Uint8Array(MM);
-  // Rays march straight lines in cells (planar; research 10 §5.11 marches great circles on a sphere).
+  const sphere = g.faces !== 1;
+  // Rays march straight lines in cells: planar on flat maps; on spheres straight in the extended
+  // equal-angle chart of the cell's face, which crosses seams and stays close to a great circle.
   for (let i = 0; i < MM; i++) {
     if (land[i] || dl[i] > rad) continue;
     const x0 = colOf(g, i) + 0.5;
     const y0 = rowOf(g, i) + 0.5;
+    const face = sphere ? cellFace(g, i) : 0;
     let hits = 0;
     for (let d = 0; d < DIRS; d++) {
       for (let s = 1; s <= rad; s += 0.75) {
         const x = Math.floor(x0 + cosT[d] * s);
         const y = Math.floor(y0 + sinT[d] * s);
+        if (sphere) {
+          const j = tryCellIndex(g, x, y, face);
+          if (j < 0) break;
+          if (land[j]) {
+            hits++;
+            break;
+          }
+          continue;
+        }
         if (!onFace(g, x, y)) break;
         if (land[cellIndex(g, x, y)]) {
           hits++;
@@ -178,7 +279,7 @@ function embayments(
   const list: Candidate[] = [];
   const gKm2 = gKm * gKm;
   for (let k = 0; k < comps.count; k++) {
-    const areaKm2 = comps.size[k] * gKm2;
+    const areaKm2 = compKm2(comps, k, gKm2);
     if (areaKm2 < minKm2 || !opens[k]) continue;
     const px = cellX(g, pole[k]);
     const py = cellY(g, pole[k]);
@@ -200,7 +301,7 @@ function embayments(
 }
 
 /** One fjord per connected trough of the glacial fjord mask; path from the head to the mouth. */
-function detectFjords(I: RegistryInput, out: Candidate[]): void {
+function detectFjords(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const fine = I.fine;
   const { cells: N, cellM, off8Axial: off, border, axialToRaster } = fine;
   const fj = I.landforms.fjord;
@@ -255,14 +356,22 @@ function detectFjords(I: RegistryInput, out: Candidate[]): void {
       ys.push(cellY(I.fine, c));
     }
     const mid = Math.floor(xs.length / 2);
-    const path = new Float32Array(xs.length * 2);
+    const path = S.sphere ? new Float64Array(xs.length * 2) : new Float32Array(xs.length * 2);
     for (let i = 0; i < xs.length; i++) {
       path[2 * i] = xs[i];
       path[2 * i + 1] = ys[i];
     }
     const last = xs.length - 1;
+    let angle: number;
+    if (S.sphere) {
+      const a = new Float64Array(3);
+      const b = new Float64Array(3);
+      S.geo.dir(xs[0], ys[0], a);
+      S.geo.dir(xs[last], ys[last], b);
+      angle = S.geo.angleAlong(xs[mid], ys[mid], a, b);
+    } else angle = labelAngle(xs[last] - xs[0], ys[last] - ys[0]);
     found.push(candidate({
-      kind: 'fjord', x: xs[mid], y: ys[mid], angle: labelAngle(xs[last] - xs[0], ys[last] - ys[0]), extentM: lenKm * 1000,
+      kind: 'fjord', x: xs[mid], y: ys[mid], angle, extentM: lenKm * 1000,
       mag: Math.min(1, lenKm / 150), data: { lengthKm: Math.round(lenKm) }, idX: xs[last], idY: ys[last], path,
     }));
   }
@@ -277,20 +386,21 @@ function detectFjords(I: RegistryInput, out: Candidate[]): void {
 }
 
 /** Lagoons, reefs and atolls from the coastal landform features. */
-function coastalFeatures(I: RegistryInput, out: Candidate[]): void {
+function coastalFeatures(I: RegistryInput, S: Shared, out: Candidate[]): void {
   const fs = I.landforms.features;
+  const X = (f: (typeof fs)[number]): number => S.geo.enc(f.face, f.x);
   const lagoons = fs.filter((f) => f.type === 'lagoon' && !f.data?.atoll && f.size >= 4000).sort((a, b) => b.size - a.size).slice(0, 8);
   for (const f of lagoons) {
     out.push(candidate({
-      kind: 'lagoon', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 40000),
-      data: { areaKm2: Math.round(f.data?.areaKm2 ?? (f.size / 1000) ** 2) }, idX: f.x, idY: f.y,
+      kind: 'lagoon', x: X(f), y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 40000),
+      data: { areaKm2: Math.round(f.data?.areaKm2 ?? (f.size / 1000) ** 2) }, idX: X(f), idY: f.y,
     }));
   }
   const reefs = fs.filter((f) => f.type === 'reef' && f.size >= 10000).sort((a, b) => b.size - a.size).slice(0, 6);
   for (const f of reefs) {
     out.push(candidate({
-      kind: 'reef', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 150000),
-      data: { lengthKm: Math.round(f.size / 1000), barrier: f.data?.barrier ? 1 : 0 }, idX: f.x, idY: f.y,
+      kind: 'reef', x: X(f), y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 150000),
+      data: { lengthKm: Math.round(f.size / 1000), barrier: f.data?.barrier ? 1 : 0 }, idX: X(f), idY: f.y,
       // A great barrier reef (≥ ~150 km) is a hero option of reef and island worlds (M8 baseline rec. 12).
       hero: { cat: 'reef', score: f.size / 150000 },
     }));
@@ -298,8 +408,8 @@ function coastalFeatures(I: RegistryInput, out: Candidate[]): void {
   const atolls = fs.filter((f) => f.type === 'atoll').sort((a, b) => b.size - a.size).slice(0, 10);
   for (const f of atolls) {
     out.push(candidate({
-      kind: 'atoll', x: f.x, y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 30000),
-      data: { diameterKm: Math.round(f.size / 100) / 10, islets: f.data?.motu ?? 0 }, idX: f.x, idY: f.y, tier: 'rare',
+      kind: 'atoll', x: X(f), y: f.y, angle: NaN, extentM: f.size, mag: Math.min(1, f.size / 30000),
+      data: { diameterKm: Math.round(f.size / 100) / 10, islets: f.data?.motu ?? 0 }, idX: X(f), idY: f.y, tier: 'rare',
     }));
   }
 }

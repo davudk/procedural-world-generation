@@ -11,7 +11,7 @@ import { detectWaters } from './rivers';
 import { computeShared } from './shared';
 import { worldTraits } from './traits';
 import type { Candidate, RegistryInput } from './types';
-import { detectWater } from './water';
+import { detectWater, type OceanSplit } from './water';
 
 export interface Registry {
   landmarks: Landmark[];
@@ -19,6 +19,9 @@ export interface Registry {
   stats: Record<string, number>;
   /** Hero candidates considered (category:score@x,y km), for diagnostics. */
   heroPool: string[];
+  /** Spheres: the world ocean's partition into the ocean landmarks (regional grid), for tests. */
+  oceans?: OceanSplit;
+  oceanGrid?: RegistryInput['fine'];
 }
 
 /**
@@ -49,11 +52,11 @@ export async function buildRegistry(I: RegistryInput, heroCount: number, rng: Rn
   detectRegions(I, S, cands);
   lap('regions');
   const worldM = I.worldKm * 1000;
-  const namer = new Namer(I.seed, rng, worldM);
+  const namer = new Namer(I.seed, rng, worldM, S.geo);
   // The fills run after the world-band budget, on what it kept: the world fill names the cover of land
   // the budget left far from every world-scale feature, and a summit whose volcano the budget dropped
   // is free again for the region fill.
-  const ranked = rankAndName(cands, S, namer, worldM, heroCount, externalWScale(I), (kept, dropped) => {
+  const ranked = rankAndName(cands, S, namer, worldM, heroCount, externalWScale(I, S), (kept, dropped) => {
     for (const c of dropped) if (c.summit !== undefined) relief.used[c.summit] = 0;
     const t0 = performance.now();
     stats.fillW = fillWorld(I, S, kept);
@@ -73,5 +76,6 @@ export async function buildRegistry(I: RegistryInput, heroCount: number, rng: Rn
   stats.heroTarget = heroCount;
   stats.heroCandidates = ranked.heroPool.length;
   stats.cultures = namer.cultures.length;
-  return { landmarks: ranked.landmarks, traits, stats, heroPool: ranked.heroPool };
+  if (S.oceans) stats.oceans = S.oceans.peaks.length;
+  return { landmarks: ranked.landmarks, traits, stats, heroPool: ranked.heroPool, ...(S.oceans ? { oceans: S.oceans, oceanGrid: S.reg } : {}) };
 }

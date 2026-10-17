@@ -16,10 +16,19 @@ export interface Landmark {
   id: number;
   kind: LandmarkKind;
   name: string;
-  /** Label anchor, map metres (x from the west edge, y from the north edge). */
+  /**
+   * Label anchor, map metres (x from the west edge, y from the north edge). On spheres face-local
+   * metres (u, v) on `face`, in the convention of river and lake positions (shared/cube.ts
+   * `surfaceDir`, `surfaceLatLon`).
+   */
   x: number;
   y: number;
-  /** Text direction for linear features (radians, 0 = east, counter-clockwise, map axes), or NaN for horizontal. */
+  /** Spheres only: cube face of the anchor (absent on flat maps). */
+  face?: number;
+  /**
+   * Text direction for linear features (radians, 0 = east, counter-clockwise, map axes), or NaN for
+   * horizontal. On spheres the axes are the anchor face's +u (east) and −v (north) directions.
+   */
   angle: number;
   /** Characteristic extent (m): diameter, length or √area. */
   extentM: number;
@@ -27,8 +36,10 @@ export interface Landmark {
   importance: number;
   /** Labels show only when the view's metres per pixel is at most this (zoom band, research 05 §3.2). */
   maxMpp: number;
-  /** Optional centreline for labels along rivers / ranges (map metres, x,y pairs). */
+  /** Optional centreline for labels along rivers / ranges (map metres, x,y pairs; spheres: face-local per point). */
   path?: Float32Array;
+  /** Spheres only: cube face of each path point. */
+  pathFace?: Uint8Array;
   /** Facts for the inspector / Atlas (e.g. heightM, prominenceM, lengthKm, areaKm2, depthM). */
   data: Record<string, number>;
   tier: Tier;
