@@ -1020,3 +1020,52 @@ Spherical worlds are being added as an option, with flat staying the default ([r
   - Peaks reach the summit ceiling on every archetype.
   - Large planets give spiky orographic precipitation maxima.
 - Glacial, landforms, hydro, biomes and the registry do not run on spheres (phase 4). Exports save the equirectangular projection.
+
+### Sphere phase 3 — Globe renderer and camera (2026-10-16)
+
+**What landed:**
+- **3D globe for sphere worlds.** The 3D view now draws the planet; 2D still shows the equirectangular map or the cube net (P). The phase-2 "globe view arrives in phase 3" fallback is gone. `WorldView.sphere` picks the globe or the flat terrain; flat rendering takes exactly the old code path.
+- **Terrain** (`render/terrain/cdlodSphere.ts`, `render/globe/globePass.ts`):
+  - CDLOD with six face roots in face angles (a, b), drawn with the flat terrain's 33×33 instanced grid and geomorph. Depth is log2(n/4), so leaf vertices sit every ⅛ cell (250 m on the default build).
+  - Node bounds: the 3×3 lattice of the node's directions at R + h_min and, lifted past the arcs' bulge, at R + h_max. Strugar's range test uses the box of that hull, so neighbouring levels differ by at most one across seams too (the equal-angle subdivision of both faces meets a shared edge at the same points).
+  - Frustum culling on that box, and horizon culling against the sea-level sphere: a node is skipped when every hull corner is hidden, which is exact because the hidden region (the tangent cone behind the near cap) is convex. At globe zoom about half the nodes go.
+  - Precision: one regime instead of research 10 §6.3's two. The CPU computes each node's centre at sea level relative to the eye in float64; the shader adds R × the direction offset from that centre in a form without large cancellations (tan a − tan a₀ = sin(a − a₀)/(cos a cos a₀), and F/|F| − F₀/|F₀| = dF/L − F₀(2F₀·dF + dF·dF)/(L L₀ (L + L₀))), plus h along the direction. Error stays under 5 cm at Earth radius (naive float32 is ~0.7 m); shared seam vertices agree to the same tolerance.
+  - The water lid is the sea sphere: the surface is max(h, 0) (spheres have no lakes yet).
+- **Textures** (`render/globe/cubeTex.ts`): 6-layer `TEXTURE_2D_ARRAY`s of (n + 4)² texels. The 2-texel border holds the neighbouring face's cells in the generator's halo convention (mirror cells, same as `padFace`), so the hand-filtered `texelFetch` bilinear never leaves its layer. The innermost corner texel holds the mean of the three corner cells, which makes a bilinear sample at a cube corner identical from all three faces (no crack at the 8 corners); outer corner texels are the mean of the two strips. Heights (R32F), climate (RGBA16F, linear) and draped layers are padded; normals come from a mipmapped RGBA16F array of 3D surface-gradient vectors, which are the same quantity on both sides of a seam and so need no padding.
+- **CPU height field** (`render/globe/globeGround.ts`): the same padded faces and bilinear as the GPU, per-face min/max pyramids whose base spans each cell's 3×3 neighbourhood across seams (so bounds cover the bilinear reach), and a ray march through the shell between R and R + h_max with bisection.
+- **Shading:** spheres have no biome stage yet, so realistic colours are the biome colour table over temperature and an aridity proxy (P / PET with the climate model's Holdridge PET), with 3D value-noise variation (continuous across seams), rock on steep slopes and snow from the seasonal temperature. Without climate, and with the Hypsometric palette, the tints are hypsometric. Oceans use the flat water's depth colours, Fresnel and glint, plus sea ice from temperature. Data layers (plates, boundaries, uplift, temperature, precipitation…) drape as on flat maps. Close up, the fragment height is a cubic B-spline of the 2 km cells, which rounds stair-step coastlines.
+- **Atmosphere** (`render/globe/atmosphere.ts`): single Rayleigh scattering through a shell of 2.5 % R (scale height a quarter of it, Earth's vertical optical depth), 12 samples per pixel for the background pass (space, stars, sun disc, limb glow) and 8 per terrain vertex for aerial perspective. Inside the shell it becomes the sky and the haze of low tilted views.
+- **Light:** the view's time is the solar time at longitude 0, so the sub-solar point is fixed on the planet and the night side shows. Near the surface the light is the cartographic sun (top-left of the screen) in every pixel's own tangent frame, with the sun model's colours for the target's local time and latitude (`sunLight` takes an optional latitude); it blends to the real sun, with per-pixel day/dusk/night colours and the terminator, between 3 % and 40 % of R altitude. Data-layer modes keep the cartographic light everywhere.
+- **Globe camera** (`render/camera/globeCamera.ts`), behind a `ViewCamera` interface that `OrbitCamera` also satisfies, so `OrbitController` and the compass drive whichever camera is active:
+  - State in float64: target unit vector and height, distance, pitch, bearing in the local east/north/up frame. Near the surface it is the flat orbit camera in the tangent plane; far out it frames the planet. Auto-tilt follows the flat curve (0 above 200 km).
+  - Grab pan rotates the rig about the planet centre: the rotation that takes the cursor ray's hit on the sphere through the grabbed point to that point, then a few damped Newton steps absorb the north-up re-alignment. Trackpad and key pans rotate by metres / radius. Drags past the limb take the nearest limb point.
+  - Zoom to cursor: change the distance about the target, then grab-pan the anchor back under the cursor; the target is re-seated on the terrain along the view ray each frame (skipping sub-millimetre moves so a still camera stays idle).
+  - Bearing is relative to local north outside |latitude| 85°; inside the polar caps the frame is parallel-transported (no spin), and leaving a cap converts the bearing so the view does not jump. The compass shows the true heading.
+  - Fit (Home) shows the whole planet around the current target, north up. Flights follow the great circle with van Wijk–Nuij altitude. The pitch is limited so the top of the view is at most 10° above the horizon. Closest zoom is 40 m/px (2 km cells, no detail map yet).
+- **App:** spheres get an equirectangular minimap with the footprint traced along the screen border (`render/globeMinimap.ts`; click or drag to fly), a lat/lon inspector on the globe, and the screenshot export. `WorldView.restore()` re-uploads the globe after a lost context. Quality tiers apply (CDLOD vertex density, MSAA, pixel ratio).
+- **Flat-only for now:** the close-zoom detail map, creeks, river ribbons, labels, clouds, valley fog and the horizon shadow/AO pass. Spheres have no rivers or landmarks yet, so only the detail map, clouds and shadows are actually missing; a notice says so once.
+
+**Measurements** (built-in browser pane, Apple Silicon, 1440 × 900 CSS at DPR 2 = 2880 × 1800, 4× MSAA; each frame timed with a synchronous 1-pixel readback, so the numbers include a pipeline stall and overstate real frame times):
+- Flat, seed 7, before → after: fitted view p50 7.9 → 7.9 ms (p95 8.6 → 8.8); tilted at 16 m/px p50 22.4 → 22.4 ms (p95 33.1 → 32.4). Identical within noise.
+- Globe, default small planet build: whole planet p50 3.9 ms (121 nodes); region view at 300 km p50 8.1 ms (90 nodes); tilted at 30 km p50 10.1 ms (278 nodes). Per-pixel atmosphere in the terrain shader cost ~3.5 ms more at that size; it moved to the vertices.
+- Uploading a 6 × 512² elevation (CPU height field, padding, gradients) takes ~250 ms on the main thread, once per elevation layer.
+- In the narrow pane (1008 × 1436), with the per-pixel atmosphere: whole planet p50 2.9 ms, region 3.8 ms, low tilted 4.1 ms.
+
+**Tests** (`tests/globe.test.ts`):
+- Padding: the seam table matches the generator's, border strips equal `padFace`, and a bilinear sample at each cube corner is the same from its three faces.
+- Gradients match the analytic gradient of a smooth field to 5 %, border cells included.
+- Vertex precision: a float32 emulation of the shader's position at Earth radius is within 5 cm of float64, and a seam vertex computed from both faces agrees.
+- Camera: ray–sphere pick projects back to the pixel; grab pan keeps the point under the cursor (0.01 px), including at 84°–90° latitude near the surface; zoom to cursor keeps the point within 0.5 px from globe view to 10 m/px, pinch and eased wheel; fit shows the whole planet north up; panning 2,000 km across a pole has no NaN and one clean north/south flip of the heading.
+- CDLOD: no level jump > 1 between neighbours across seams over 24 camera poses biased toward seams and corners; every horizon-culled node's surface is hidden; every visible surface point is covered by a selected node.
+- Flat goldens untouched (generation code did not change).
+
+**Verified in the browser:** the default sphere from space (limb glow, stars, terminator with a faintly moonlit night side, snow on northern ranges, deserts, continental shelves); zooming in to 40 m/px; tilted low views with haze; data drapes (plates) across a cube corner; a search of the framebuffer (sky pass off) for holes in tilted views at four seams, two cube corners and a pole found none; flat → sphere → flat switching; the inspector; screenshot capture; a simulated context loss and restore.
+
+**Known gaps:**
+- With 2 km cells and no detail, close views are smooth and featureless; Phase 4's streamed detail tiles fill that in.
+- From space, a north-up grab drag over a pole cannot always put the grabbed point exactly under the cursor; it does the best it can.
+- The minimap footprint is traced as a polyline in longitude and latitude, so views that contain a pole draw it awkwardly.
+- No horizon shadows or AO on the globe (the directional bake of research 10 §6.5 is not built).
+- Atmosphere colours are tuned by eye; there is no multiple scattering, and the cartographic and real sun can disagree slightly in sky brightness at mid zoom.
+- Elevation uploads are not sliced (~250 ms per layer at build size).
+- When the built-in browser pane is hidden, `requestAnimationFrame` stops, so the first fit can run with a 1 × 1 view. Flat worlds also showed a NaN `DetailGround` height in a hidden pane (a pre-existing issue, not looked into here).

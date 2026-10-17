@@ -12,7 +12,7 @@ A configurable procedural world generator in the browser. It builds a finite reg
 
 The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 
-**Status: milestone M9 (polish & ship).** Spherical worlds are planned as an option ([research 10](docs/research/10-spherical-worlds.md)). It includes:
+**Status: milestone M9 (polish & ship), plus spherical worlds in progress** ([research 10](docs/research/10-spherical-worlds.md)): set the world shape to Sphere for a cube-sphere planet with plates, erosion and climate, shown as a 3D globe or a 2D map (phases 1–3 of 4). It includes:
 - the hierarchical config system and the staged generation pipeline;
 - tectonic plates with motion and boundary classes;
 - continents grown to a target count;
@@ -29,6 +29,7 @@ The stack is TypeScript, Vite and raw WebGL2. Generation runs in a Web Worker.
 - a metrics harness (`npm run metrics`) that scores density, targets and boring/cluttered worlds over many seeds, archetypes and sizes;
 - time of day, seasons, drifting clouds with shadows, valley fog and shader tree crowns;
 - quality tiers for phones, recovery after a lost graphics context, and export (screenshot, 16-bit heightmap, colour map, world JSON, share link).
+- a 3D globe for sphere worlds: six-root CDLOD terrain without seams, an atmosphere with a limb glow and a day/night terminator, and a globe camera that grab-pans the planet under the cursor and zooms from the whole planet down to the surface.
 
 Close zoom (down to 8 m/px) shows a GPU-built 4096² detail heightmap (carved river valleys, thermal and hydraulic erosion) plus footprint-faded shader octaves, deterministic creeks generated for the visible area, soft horizon shadows and ambient occlusion, a gradient sky with aerial haze, and animated water with shoreline foam. See [docs/PLAN.md](docs/PLAN.md) for the full plan.
 
@@ -57,9 +58,10 @@ The world opens in **3D**. Press **V**, or the 2D/3D button, to switch to the 2D
 | Safari trackpad rotate | Rotate | — |
 | Arrows · + / − | Pan · zoom | Pan |
 | Q / E · R / F | Rotate · tilt | — |
-| Home · N | Fit the world · north up | Fit the world (also double-click) |
+| Home · N | Fit the world (the whole planet on spheres) · north up | Fit the world (also double-click) |
 | Compass | Click: north up; drag: rotate | — |
-| Minimap | Click or drag to fly there | — |
+| Minimap | Click or drag to fly there (spheres: an equirectangular map) | — |
+| P | — | Spheres: equirectangular map or cube net |
 | Touch | 1 finger pan; 2 fingers pan, zoom and rotate; 2 fingers moving vertically tilt | Pan, pinch |
 | B | Full-quality build | Full-quality build |
 | A | Atlas of named places (click a row or a label to fly there) | — |
@@ -67,6 +69,8 @@ The world opens in **3D**. Press **V**, or the 2D/3D button, to switch to the 2D
 | Export button | Screenshot, heightmap, colour map, world JSON, share link | Same |
 
 Realistic colouring comes from a biome colour table over temperature and aridity, with snow, rock, sand and marsh overlays. Palettes: Satellite, Stylised and Hypsometric. Pick **World (final, realistic)** with the Satellite palette for the finished world; the time, season and clouds controls sit below it. The layer picker also drapes any generated layer (plates, boundaries, uplift, drainage…) over the 3D terrain. The relief slider sets vertical exaggeration.
+
+On a sphere the controls are the same: dragging turns the planet so the point you grabbed stays under the cursor, and zooming in blends from a whole-planet view into the tilted orbit view near the surface. Spheres have no biome, hydrology or landmark stages yet, so the globe is coloured from temperature and precipitation, and close-zoom detail, rivers, labels and clouds are flat-only for now.
 
 ## Configuration
 
