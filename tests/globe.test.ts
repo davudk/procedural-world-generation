@@ -6,7 +6,7 @@ import { wrapAngle } from '../src/render/camera/orbitCamera';
 import { GlobeHeightField, SphereGround } from '../src/render/globe/globeGround';
 import { sphereGradients } from '../src/render/globe/globePass';
 import { hullBelowHorizon, SphereCdlodSelector, type SphereNode } from '../src/render/terrain/cdlodSphere';
-import { faceDir, latLonDir } from '../src/shared/cube';
+import { FACE_C, FACE_E, FACE_S, faceDir, latLonDir } from '../src/shared/cube';
 import { Rng } from '../src/shared/rng';
 
 describe('cube-face texture padding (research 10 §6.2)', () => {
@@ -101,6 +101,72 @@ describe('globe surface gradients', () => {
     }
     // Central differences over mirror cells at the seams: a few per cent at most.
     expect(worst).toBeLessThan(0.05);
+  });
+});
+
+describe('globe vertex precision (research 10 §6.3)', () => {
+  // The vertex shader's position, evaluated in float32 like the GPU: node centre relative to the eye
+  // (float64 on the CPU, then rounded) plus R · (direction offset) from the cancellation-free formula.
+  const f = Math.fround;
+  const vertexF32 = (face: number, ac: number, bc: number, off: [number, number], R: number, centreRel: number[]): number[] => {
+    const C = [FACE_C[face * 3], FACE_C[face * 3 + 1], FACE_C[face * 3 + 2]];
+    const E = [FACE_E[face * 3], FACE_E[face * 3 + 1], FACE_E[face * 3 + 2]];
+    const S = [FACE_S[face * 3], FACE_S[face * 3 + 1], FACE_S[face * 3 + 2]];
+    const a0 = f(ac), b0 = f(bc), oa = f(off[0]), ob = f(off[1]);
+    const X0 = f(Math.tan(a0)), Y0 = f(Math.tan(b0));
+    const F0 = [0, 1, 2].map((k) => f(f(C[k] + f(X0 * E[k])) + f(Y0 * S[k])));
+    const L0 = f(Math.hypot(F0[0], F0[1], F0[2]));
+    const dX = f(f(Math.sin(oa)) / f(f(Math.cos(f(a0 + oa))) * f(Math.cos(a0))));
+    const dY = f(f(Math.sin(ob)) / f(f(Math.cos(f(b0 + ob))) * f(Math.cos(b0))));
+    const dF = [0, 1, 2].map((k) => f(f(dX * E[k]) + f(dY * S[k])));
+    const F = [0, 1, 2].map((k) => f(F0[k] + dF[k]));
+    const L = f(Math.hypot(F[0], F[1], F[2]));
+    const q = f(f(2 * f(F0[0] * dF[0] + F0[1] * dF[1] + F0[2] * dF[2])) + f(dF[0] * dF[0] + dF[1] * dF[1] + dF[2] * dF[2]));
+    const k2 = f(q / f(f(L * L0) * f(L + L0)));
+    const dd = [0, 1, 2].map((k) => f(f(dF[k] / L) - f(F0[k] * k2)));
+    return [0, 1, 2].map((k) => f(f(centreRel[k]) + f(f(R) * dd[k])));
+  };
+
+  it('places vertices to a few cm at planet radius, and seam vertices agree across faces', () => {
+    const R = 6.4e6; // Earth-sized: the hard case
+    const Q = Math.PI / 4;
+    const d = new Float64Array(3);
+    const leaf = (Math.PI / 2) / 2 ** 11; // ~4.9 km nodes, 16 m vertex spacing
+    let worst = 0;
+    let seam = 0;
+    for (const [face, a0, b0] of [[0, Q - leaf, Q - leaf], [4, -Q, -Q], [1, Q - leaf, 0.3], [2, 0.1, -Q]] as const) {
+      const ac = a0 + leaf / 2, bc = b0 + leaf / 2;
+      // Eye 2 km above the node centre.
+      faceDir(face, ac, bc, d);
+      const eye = [d[0] * (R + 2000), d[1] * (R + 2000), d[2] * (R + 2000)];
+      const centreRel = [d[0] * R - eye[0], d[1] * R - eye[1], d[2] * R - eye[2]];
+      for (const [gx, gy] of [[0, 0], [32, 0], [16, 16], [32, 32], [7, 25]]) {
+        const off: [number, number] = [(gx / 32 - 0.5) * leaf, (gy / 32 - 0.5) * leaf];
+        const p = vertexF32(face, ac, bc, off, R, centreRel);
+        faceDir(face, ac + off[0], bc + off[1], d);
+        const exact = [d[0] * R - eye[0], d[1] * R - eye[1], d[2] * R - eye[2]];
+        worst = Math.max(worst, Math.hypot(p[0] - exact[0], p[1] - exact[1], p[2] - exact[2]));
+      }
+      // The node's east edge from the neighbouring face (shared vertex at the seam), when on face 0's edge.
+      if (face === 0) {
+        const e = faceEdges()[0 * 4 + 1];
+        // The same point seen from the face beyond: its angles there (nudged across the edge so the
+        // face lookup lands on the neighbour), as the neighbour's node would compute them.
+        const fa = new Float64Array(3);
+        faceDir(0, Q, bc, d);
+        dirToFaceAngles(d[0] + 1e-9 * FACE_E[0], d[1] + 1e-9 * FACE_E[1], d[2] + 1e-9 * FACE_E[2], fa);
+        expect(fa[0]).toBe(e.face);
+        const nc = [fa[1] < 0 ? -Q + leaf / 2 : Q - leaf / 2, Math.floor((fa[2] + Q) / leaf) * leaf - Q + leaf / 2];
+        faceDir(e.face, nc[0], nc[1], d);
+        const cr = [d[0] * R - eye[0], d[1] * R - eye[1], d[2] * R - eye[2]];
+        const pB = vertexF32(e.face, nc[0], nc[1], [fa[1] - nc[0], fa[2] - nc[1]], R, cr);
+        const pA = vertexF32(0, ac, bc, [Q - ac, 0], R, centreRel);
+        seam = Math.max(seam, Math.hypot(pA[0] - pB[0], pA[1] - pB[1], pA[2] - pB[2]));
+      }
+    }
+    // Naive float32 (R · dir − eye) would be off by ~0.5–1 m here.
+    expect(worst).toBeLessThan(0.05);
+    expect(seam).toBeLessThan(0.05);
   });
 });
 
