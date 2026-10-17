@@ -284,12 +284,26 @@ const W_FILL_RADIUS_FRAC = 0.07;
 /** Share of the land in the disk the dominant cover needs. */
 const W_FILL_MIN_SHARE = 0.4;
 
-export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number {
+/**
+ * Spheres: the same fill once more at the whole-globe scale (band G, research 11 §4). A globe view
+ * reads features of ≥ 20 px at 2.2 R / 700 m/px, and its empty-disk cap is a fifth of the disc (2R/5);
+ * land farther than GLOBE_FILL_NEED × that cap from every such feature gets its cover named over a
+ * disc of GLOBE_FILL_RADIUS_R × R.
+ */
+const GLOBE_FILL_NEED = 0.75;
+const GLOBE_FILL_RADIUS_R = 0.18;
+
+export function fillGlobe(I: RegistryInput, S: Shared, out: Candidate[]): number {
+  const R = S.geo.R;
+  return fillWorld(I, S, out, { lo: ((2.2 * R) / 700) * 20, needM: GLOBE_FILL_NEED * ((2 * R) / 5), radM: GLOBE_FILL_RADIUS_R * R });
+}
+
+export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[], scale?: { lo: number; needM: number; radM: number }): number {
   const R = S.reg;
   const MM = R.cells;
   // Spheres: at the scale of the 1,024 km W cap (budget.ts wBand), not of the whole planet.
   const worldM = wBand(I.worldKm * 1000, S.geo).viewM;
-  const lo = worldM / 80;
+  const lo = scale ? scale.lo : worldM / 80;
   const covered = new Uint8Array(MM);
   const mark = (x: number, y: number): void => {
     covered[cellAtM(R, x, y)] = 1;
@@ -304,8 +318,8 @@ export function fillWorld(I: RegistryInput, S: Shared, out: Candidate[]): number
   for (let i = 0; i < g.n; i++) if (g.strahler[i] >= 6 && !(g.flags[i] & RIVER.DISTRIBUTARY)) mark(S.rivX[i], S.rivY[i]);
   for (const l of I.lakes) if (l.type !== 'playa' && Math.sqrt(l.areaKm2) * 1000 >= lo) mark(geo.enc(l.face, l.cx), l.cy);
   for (const f of I.landforms.features) if (LANDFORM_PLACES.has(f.type) && f.size >= lo) mark(geo.enc(f.face, f.x), f.y);
-  const rad = (W_FILL_RADIUS_FRAC * worldM) / R.cellM;
-  const need = (W_FILL_FRAC * worldM) / R.cellM;
+  const rad = (scale ? scale.radM : W_FILL_RADIUS_FRAC * worldM) / R.cellM;
+  const need = (scale ? scale.needM : W_FILL_FRAC * worldM) / R.cellM;
   const rKm2 = (R.cellM / 1000) ** 2;
   const covers: [string, string, number[]][] = [
     ['forest', 'taiga', [G.BOREAL]], ['forest', 'forest', [G.TEMPERATE]], ['forest', 'jungle', [G.TROPICAL]],

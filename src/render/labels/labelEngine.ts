@@ -34,6 +34,8 @@ const MPP_HYSTERESIS = 1.2;
  * can be seen past it); below ~0.3 (72° off the view) text near the limb would hang out into space.
  */
 export const GLOBE_MIN_FACING = 0.3;
+/** Globe: a label's boxes keep this far (CSS px) inside the planet's disc on screen. */
+const LIMB_MARGIN_PX = 2;
 
 /** What labels need of a rendered globe (GlobeGround satisfies it): planet-centred metres, +z north. */
 export interface LabelGlobe {
@@ -530,8 +532,43 @@ export class LabelEngine {
     if (info.layoutView === this.viewVersion && info.layoutSize === info.sizePx) return info.hasLayout;
     info.layoutView = this.viewVersion;
     info.layoutSize = info.sizePx;
-    info.hasLayout = info.path ? this.layoutPath(info) : this.layoutAnchor(info);
+    info.hasLayout = info.path ? this.layoutPath(info) : this.layoutAnchor(info) && (!info.dir || this.insideDisc(info));
     return info.hasLayout;
+  }
+
+  /**
+   * Globe: whether a label's boxes stay inside the planet's disc on screen. The limb distance is taken
+   * in the plane of the eye, the planet centre and the anchor: the tangent point T = R(cos φ ê + sin φ û)
+   * with cos φ = R / |eye| projects to the limb on the anchor's side. Long names of anchors that still
+   * face the eye (GLOBE_MIN_FACING) could otherwise reach past the disc into space.
+   */
+  private insideDisc(info: Info): boolean {
+    const p = this.proj;
+    const d = info.dir!;
+    const R = this.radius;
+    const D = Math.hypot(p.ex, p.ey, p.ez);
+    if (!(D > R * 1.0001)) return true;
+    if (!p.project(0, 0, 0)) return true;
+    const cx = p.sx, cy = p.sy;
+    const ex = p.ex / D, ey = p.ey / D, ez = p.ez / D;
+    const ae = d[0] * ex + d[1] * ey + d[2] * ez;
+    let ux = d[0] - ae * ex, uy = d[1] - ae * ey, uz = d[2] - ae * ez;
+    const ul = Math.hypot(ux, uy, uz);
+    if (ul < 1e-9) return true;
+    ux /= ul;
+    uy /= ul;
+    uz /= ul;
+    const cosP = R / D;
+    const sinP = Math.sqrt(1 - cosP * cosP);
+    if (!p.project(R * (cosP * ex + sinP * ux), R * (cosP * ey + sinP * uy), R * (cosP * ez + sinP * uz))) return true;
+    const lim = Math.hypot(p.sx - cx, p.sy - cy) - LIMB_MARGIN_PX;
+    const b = info.boxes;
+    for (let k = 0; k + 3 < b.length; k += 4) {
+      for (const [qx, qy] of [[b[k], b[k + 1]], [b[k + 2], b[k + 1]], [b[k], b[k + 3]], [b[k + 2], b[k + 3]]]) {
+        if (Math.hypot(qx - cx, qy - cy) > lim) return false;
+      }
+    }
+    return true;
   }
 
   private layoutAnchor(info: Info): boolean {

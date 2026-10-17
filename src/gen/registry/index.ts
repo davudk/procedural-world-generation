@@ -1,7 +1,7 @@
 import type { Landmark, WorldTraits } from '../../shared/landmarks';
 import type { Rng } from '../../shared/rng';
 import { externalWScale } from './budget';
-import { fillSummits, fillWorld } from './fill';
+import { fillGlobe, fillSummits, fillWorld } from './fill';
 import { detectLand } from './land';
 import { Namer } from './names';
 import { rankAndName } from './rank';
@@ -60,6 +60,7 @@ export async function buildRegistry(I: RegistryInput, heroCount: number, rng: Rn
     for (const c of dropped) if (c.summit !== undefined) relief.used[c.summit] = 0;
     const t0 = performance.now();
     stats.fillW = fillWorld(I, S, kept);
+    if (S.sphere) stats.fillG = fillGlobe(I, S, kept);
     const filled = fillSummits(I, S, kept, relief);
     stats.fillR = filled.r;
     stats.fillA = filled.a;

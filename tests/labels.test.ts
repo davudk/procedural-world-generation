@@ -514,6 +514,31 @@ describe('labels on a globe', () => {
     expect(shown).toBeGreaterThan(240 * 5);
   });
 
+  it('keeps long names near the limb inside the disc', () => {
+    const ground = new SphereGround(R);
+    const cam = globeCam();
+    cam.lookAtLatLon(0, 0);
+    const name = 'An Extraordinarily Long Name For A Little Peak';
+    // Longitude 55° (it still faces the eye by more than GLOBE_MIN_FACING) lies on face 1, centred on 90°; u grows with longitude there.
+    const nearLimb = landmark(1, { kind: 'peak', name, face: 1, x: (-35 * Math.PI / 180 + Math.PI / 4) * R, y: W / 2, maxMpp: 1e9 });
+    const centre = landmark(2, { kind: 'peak', name: `${name} II`, face: 0, x: W / 2, y: W / 2 + 100_000, maxMpp: 1e9 });
+    const engine = new LabelEngine(new FakeGlyphs());
+    engine.setLandmarks([nearLimb, centre], 0, R);
+    for (let f = 0; f < 6; f++) engine.update({ cam, ground: null, globe: ground, dpr: 1, timeSec: f / 60, exaggeration: 1 });
+    expect(engine.drawn.map((l) => l.id)).toEqual([2]);
+    // It is hidden by the disc test, not by the facing test: the anchor faces the eye by more than 0.3.
+    const p = new Float64Array(3);
+    surfaceDir(1, nearLimb.x, nearLimb.y, R, p);
+    const e = cam.eye();
+    const toEye = [e.x - p[0] * R, e.y - p[1] * R, e.z - p[2] * R];
+    expect((toEye[0] * p[0] + toEye[1] * p[1] + toEye[2] * p[2]) / Math.hypot(toEye[0], toEye[1], toEye[2])).toBeGreaterThan(0.3);
+    // A short name nearer the limb than most labels (longitude 40°) still shows.
+    const short = landmark(3, { kind: 'peak', name: 'Ab', face: 0, x: (40 * Math.PI / 180 + Math.PI / 4) * R, y: W / 2, maxMpp: 1e9 });
+    engine.setLandmarks([short], 0, R);
+    for (let f = 0; f < 6; f++) engine.update({ cam, ground: null, globe: ground, dpr: 1, timeSec: 1 + f / 60, exaggeration: 1 });
+    expect(engine.drawn.map((l) => l.id)).toEqual([3]);
+  });
+
   it('projects with the globe camera and lays out rotated and path labels on the near side', () => {
     const ground = new SphereGround(R);
     const cam = globeCam();

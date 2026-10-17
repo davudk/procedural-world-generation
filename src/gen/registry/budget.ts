@@ -29,6 +29,16 @@ const W_MIN_OWN = 18;
  */
 export const SPHERE_W_CAP_M = 1_024_000;
 
+/**
+ * Spheres: a W-scale candidate is only kept while fewer than SPHERE_W_LOCAL_CAP kept W-scale features
+ * (the registry's and the external ones) lie within SPHERE_W_LOCAL_RADIUS_M along the surface. A flat
+ * W view is the whole world, so its budget is its view budget; a land-centred 1,024 km cap on a planet
+ * sees far more land than the planet's average, so a planet-wide quota alone crowded such views (p95 of
+ * 70–100 features on island worlds, research 11 §4).
+ */
+const SPHERE_W_LOCAL_RADIUS_M = SPHERE_W_CAP_M / 2;
+const SPHERE_W_LOCAL_CAP = 40;
+
 /** View width (m) of band W and how many such views the world's area holds (flat: the world, 1). */
 export function wBand(worldM: number, geo: Geo): { viewM: number; views: number } {
   if (!geo.sphere) return { viewM: worldM, views: 1 };
@@ -120,6 +130,7 @@ export function applyWBudget(
       if (d < nearD.get(o)!) nearD.set(o, d);
     }
   };
+  const crowd = geo.sphere ? new LocalCrowd(geo, wScale, external, SPHERE_W_LOCAL_RADIUS_M) : null;
   const keep = new Set<Candidate>();
   // A kind with many world-scale instances characterises the world (fjords of a fjordland, islands of
   // an archipelago): its best SIGNATURE_KEEP always stay.
@@ -135,12 +146,14 @@ export function applyWBudget(
     for (const c of list.slice(0, SIGNATURE_KEEP)) {
       keep.add(c);
       place(c);
+      crowd?.add(c);
     }
   }
   for (const c of wScale) {
     if (!protectedSet.has(c) || keep.has(c)) continue;
     keep.add(c);
     place(c);
+    crowd?.add(c);
   }
   const perKind = new Map<string, number>();
   for (const c of keep) perKind.set(c.kind, (perKind.get(c.kind) ?? 0) + 1);
@@ -151,13 +164,16 @@ export function applyWBudget(
     let bs = -Infinity;
     for (let i = 0; i < rest.length; i++) {
       const c = rest[i];
+      if (crowd && crowd.full(c, SPHERE_W_LOCAL_CAP)) continue;
       const s = imp.get(c)! * KIND_DECAY ** (perKind.get(c.kind) ?? 0) * spread(c);
       if (s > bs || (s === bs && tieLess(c, rest[bi]))) (bs = s), (bi = i);
     }
+    if (bi < 0) break;
     const c = rest[bi];
     rest.splice(bi, 1);
     keep.add(c);
     place(c);
+    crowd?.add(c);
     perKind.set(c.kind, (perKind.get(c.kind) ?? 0) + 1);
   }
   const drop = new Set(rest);
@@ -166,4 +182,30 @@ export function applyWBudget(
 
 function tieLess(a: Candidate, b: Candidate): boolean {
   return a.kind < b.kind || (a.kind === b.kind && (a.idX < b.idX || (a.idX === b.idX && a.idY < b.idY)));
+}
+
+/** Spheres: how many kept W-scale features lie within a radius of each candidate (see SPHERE_W_LOCAL_CAP). */
+class LocalCrowd {
+  private readonly n = new Map<Candidate, number>();
+
+  constructor(
+    private readonly geo: Geo,
+    private readonly cands: readonly Candidate[],
+    external: { xs: number[]; ys: number[] },
+    private readonly radiusM: number,
+  ) {
+    for (const c of cands) {
+      let k = 0;
+      for (let i = 0; i < external.xs.length; i++) if (geo.dist(external.xs[i], external.ys[i], c.x, c.y) <= radiusM) k++;
+      this.n.set(c, k);
+    }
+  }
+
+  add(c: Candidate): void {
+    for (const o of this.cands) if (this.geo.dist(c.x, c.y, o.x, o.y) <= this.radiusM) this.n.set(o, this.n.get(o)! + 1);
+  }
+
+  full(c: Candidate, cap: number): boolean {
+    return this.n.get(c)! >= cap;
+  }
 }
