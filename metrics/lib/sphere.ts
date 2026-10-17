@@ -63,8 +63,12 @@ export function capView(c: ArrayLike<number>, R: number, W: number, H: number): 
   };
 }
 
-/** Orthographic whole-planet view (band G): a 2R × 2R square holding the disc, facing ≥ minFacing only. */
-export function globeView(c: ArrayLike<number>, R: number, minFacing: number): ViewProj {
+/**
+ * Orthographic whole-planet view (band G): a 2R × 2R square holding the disc. `unproject` (the land the
+ * view scores) covers the surface facing the eye by ≥ minFacing; `project` takes every point facing it
+ * by ≥ drawFacing (default the same), so features just past the scored rim still bound its empty disks.
+ */
+export function globeView(c: ArrayLike<number>, R: number, minFacing: number, drawFacing = minFacing): ViewProj {
   const cc = Float64Array.from([c[0], c[1], c[2]]);
   const e = new Float64Array(3);
   const n = new Float64Array(3);
@@ -72,7 +76,7 @@ export function globeView(c: ArrayLike<number>, R: number, minFacing: number): V
   return {
     W: 2 * R, H: 2 * R, c: cc,
     project(x, y, z, out) {
-      if (x * cc[0] + y * cc[1] + z * cc[2] < minFacing) return false;
+      if (x * cc[0] + y * cc[1] + z * cc[2] < drawFacing) return false;
       out[0] = R + (x * e[0] + y * e[1] + z * e[2]) * R;
       out[1] = R - (x * n[0] + y * n[1] + z * n[2]) * R;
       return true;

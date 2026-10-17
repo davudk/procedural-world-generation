@@ -9,6 +9,7 @@ import { components as gridComponents } from '../src/gen/grid/ops';
 import { Pipeline } from '../src/gen/pipeline';
 import { STAGES } from '../src/gen/stages';
 import type { BiomeExtra } from '../src/gen/stages/biome';
+import type { ClimateExtra } from '../src/gen/stages/climate';
 import { WATER, type HydroExtra } from '../src/gen/stages/hydro';
 import type { LandformsExtra } from '../src/gen/stages/landforms';
 import { BIOMES } from '../src/shared/biomes';
@@ -113,6 +114,8 @@ export interface WorldMetrics {
   iceShare: number;
   /** Highest summit (m). */
   peakMaxM: number;
+  /** Annual precipitation on land (mm/yr): 99.9th percentile (area-weighted on spheres) and maximum. */
+  precipLand: { p999: number; max: number };
   /** The World traits headline. */
   traitsLead: string;
   biome: { maxShare: number; maxName: string; distinct: number };
@@ -502,6 +505,28 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
     kingRatio: p95Peak > 0 ? kingM / p95Peak : NaN, kingM, wViewOk: NaN,
   };
   const iceShare = ice / landW;
+  const clim = p.output('climate')!.extra as ClimateExtra;
+  const precipLand = { p999: NaN, max: 0 };
+  if (clim.n === n) {
+    const pv: number[] = [];
+    const pw: number[] = [];
+    for (let i = 0; i < N; i++) {
+      if (!isLand[i]) continue;
+      pv.push(clim.precip[i]);
+      pw.push(grid ? areaKm2(i) : 1);
+      precipLand.max = Math.max(precipLand.max, clim.precip[i]);
+    }
+    const ord = pv.map((_, k) => k).sort((a, b) => pv[a] - pv[b]);
+    const total = pw.reduce((a, b) => a + b, 0);
+    let acc = 0;
+    for (const k of ord) {
+      acc += pw[k];
+      if (acc >= 0.999 * total) {
+        precipLand.p999 = pv[k];
+        break;
+      }
+    }
+  }
 
   // ── Geomorphic realism ────────────────────────────────────────────────────────────────────
   const coast = new Uint8Array(N);
@@ -690,7 +715,7 @@ export async function measureWorld(job: WorldJob): Promise<WorldMetrics> {
     archetype: job.archetype, seed: job.seed, mode: job.mode, group: job.group, query: specToQuery(spec),
     ms: Math.round(performance.now() - t0), shape: sphere ? 'sphere' : 'flat', worldKm, planetKm, cellKm, landKm2, coastKm, warmOceanKm2,
     counts, rates, countRanges, features, kinds, tiers, heroes, targets, contrast, geomorph, clarkEvans: clarkEvansR, clusterDisk,
-    quietShare, iceShare, peakMaxM: kingM, traitsLead: traits.headline, biome, bands, boring, cluttered,
+    quietShare, iceShare, peakMaxM: kingM, precipLand, traitsLead: traits.headline, biome, bands, boring, cluttered,
   };
 }
 
@@ -771,6 +796,8 @@ interface ViewInput {
   bigLakeInView: () => boolean;
   cells: (visit: (i: number) => void) => void;
   landAt: (mx: number, my: number) => number;
+  /** Band G: the scored part of the view (the disc facing ≥ GLOBE_MIN_FACING); features outside it are drawn, not counted. */
+  inside?: (x: number, y: number) => boolean;
   isLand: Uint8Array;
   hy: HydroExtra;
   bio: BiomeExtra;
@@ -780,7 +807,8 @@ function measureView(v: ViewInput, into: BandSample, uniform: boolean, ocean: nu
   const { band, viewW, viewH, x0, y0, isLand } = v;
   const x1 = x0 + viewW;
   const y1 = y0 + viewH;
-  const inView = (x: number, y: number): boolean => x >= x0 && x < x1 && y >= y0 && y < y1;
+  const inside = v.inside;
+  const inView = (x: number, y: number): boolean => x >= x0 && x < x1 && y >= y0 && y < y1 && (!inside || inside(x, y));
   let tot = 0;
   let land = 0;
   let maxH = -Infinity;
@@ -953,10 +981,12 @@ function sampleBandSphere(band: BandDef, c: SphereBandCtx): BandResult {
   const viewW = globe ? 2 * R : band.nominalKm * 1000;
   const viewH = globe ? 2 * R : viewW * VIEW_ASPECT;
   const capKm = globe ? (band.emptyCapKm * (2 * R)) / 1024000 : band.emptyCapKm;
-  const lo = viewW * WINDOW_LO;
+  const mpp = globe ? globeMpp(R) : viewW / SCREEN_PX;
+  // "Distinct" = at least view/80, i.e. 20 px on the 1600 px screen (research 05 §3.2). The globe's disc
+  // is only ~640 px tall at the registry's whole-planet scale, so G keeps the 20 px (≈ 2R/32), not 2R/80.
+  const lo = globe ? mpp * SCREEN_PX * WINDOW_LO : viewW * WINDOW_LO;
   const hi = viewW * WINDOW_HI;
   const feats = c.all.filter((f) => f.ext >= lo && f.ext <= hi && (f.cls !== 'river' || f.order >= band.minOrder));
-  const mpp = globe ? globeMpp(R) : viewW / SCREEN_PX;
   const labelled = c.labelled.filter((l) => l.maxMpp >= mpp);
   const rnd = prng((c.seed * 2654435761) ^ band.id.charCodeAt(0));
   const res: BandResult = { viewKm: viewW / 1000, capKm, land: emptySample(), uniform: emptySample(), ocean: [], classMean: {} };
@@ -966,9 +996,12 @@ function sampleBandSphere(band: BandDef, c: SphereBandCtx): BandResult {
   const nUni = Math.max(2, Math.round(c.views.uniform * scale));
   // Angular reach of the view from its centre, including the empty-disk raster's margin.
   const marginM = (EMPTY_MARGIN * viewW) / EMPTY_PX;
-  const reach = globe ? Math.acos(GLOBE_MIN_FACING) : Math.min(Math.PI / 2, Math.hypot(viewW / 2 + marginM, viewH / 2 + marginM) / R);
+  // Band G draws the whole facing hemisphere (scored inside the GLOBE_MIN_FACING disc, `inside`).
+  const reach = globe ? Math.PI / 2 : Math.min(Math.PI / 2, Math.hypot(viewW / 2 + marginM, viewH / 2 + marginM) / R);
   const tmp = new Float64Array(3);
   const q = new Float64Array(2);
+  const rimR2 = R * R * (1 - GLOBE_MIN_FACING * GLOBE_MIN_FACING);
+  const inside = globe ? (x: number, y: number): boolean => (x - R) ** 2 + (y - R) ** 2 <= rimR2 : null;
 
   const view = (proj: ViewProj): ViewInput => {
     const cc = proj.c;
@@ -999,9 +1032,9 @@ function sampleBandSphere(band: BandDef, c: SphereBandCtx): BandResult {
       local.push(bboxFinite({ cls: f.cls, x, y, ext: f.ext, r: f.r, order: f.order, ...(pts ? { pts } : {}) }));
     }
     const inView = (d: ArrayLike<number>): boolean =>
-      near(d, 0) && proj.project(d[0], d[1], d[2], q) && q[0] >= 0 && q[0] < viewW && q[1] >= 0 && q[1] < viewH;
+      near(d, 0) && proj.project(d[0], d[1], d[2], q) && q[0] >= 0 && q[0] < viewW && q[1] >= 0 && q[1] < viewH && (!inside || inside(q[0], q[1]));
     return {
-      band, viewW, viewH, x0: 0, y0: 0, feats: local, isLand, hy: c.hy, bio: c.bio,
+      band, viewW, viewH, x0: 0, y0: 0, feats: local, isLand, hy: c.hy, bio: c.bio, ...(inside ? { inside } : {}),
       labelInView: () => {
         let k = 0;
         for (const l of labelled) if (inView(l.d)) k++;
@@ -1018,7 +1051,7 @@ function sampleBandSphere(band: BandDef, c: SphereBandCtx): BandResult {
       landAt: (mx, my) => (proj.unproject(mx, my, tmp) ? dirToCell(tmp[0], tmp[1], tmp[2], n) : -1),
     };
   };
-  const make = (d: ArrayLike<number>): ViewProj => (globe ? globeView(d, R, GLOBE_MIN_FACING) : capView(d, R, viewW, viewH));
+  const make = (d: ArrayLike<number>): ViewProj => (globe ? globeView(d, R, GLOBE_MIN_FACING, 0) : capView(d, R, viewW, viewH));
 
   // Land-weighted: centred on a land cell drawn ∝ its area, jittered inside it; resampled if < 10 % land.
   const centre = new Float64Array(3);
