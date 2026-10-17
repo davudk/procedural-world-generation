@@ -8,8 +8,11 @@ import { invert, mat4 } from '../math/mat4';
  * over the terrain (the terrain shader calls the same function for its fragments).
  *
  * Paste GLOBE_ATMOS_GLSL after `precision` declarations. Provides
- *   vec3 atmosphere(vec3 ro, vec3 rd, float tMax, out vec3 trans)   in-scattered light and transmittance
- * for a ray from planet-centred `ro` (m) along unit `rd`, up to distance tMax.
+ *   vec3 atmosphere(vec3 ro, vec3 rd, float tMax, int steps, out vec3 trans)   in-scattered light and
+ * transmittance for a ray from planet-centred `ro` (m) along unit `rd`, up to distance tMax, and
+ * atmosphereK with the scattering scaled by k. Terrain and rivers use TERRAIN_AIR_K: the stylised
+ * air's path radiance is several times Earth's, which washed the land out to grey at regional zoom,
+ * while long slant paths (low tilted views, the limb) still saturate to the sky colour.
  */
 export const GLOBE_ATMOS_GLSL = /* glsl */ `
 uniform vec3 u_eyeP;        // eye, planet-centred (m)
@@ -20,7 +23,8 @@ uniform vec3 u_beta;        // Rayleigh scattering coefficients at sea level (1/
 uniform vec3 u_atmSun;      // unit vector toward the light that lights the air
 uniform float u_atmSunI;    // its intensity (0 = no light)
 
-vec3 atmosphere(vec3 ro, vec3 rd, float tMax, int steps, out vec3 trans) {
+vec3 atmosphereK(vec3 ro, vec3 rd, float tMax, int steps, float k, out vec3 trans) {
+  vec3 beta = u_beta * k;
   trans = vec3(1.0);
   float b = dot(ro, rd);
   float c = dot(ro, ro) - u_atmTop * u_atmTop;
@@ -38,13 +42,13 @@ vec3 atmosphere(vec3 ro, vec3 rd, float tMax, int steps, out vec3 trans) {
     vec3 p = ro + rd * (t0 + (float(i) + 0.5) * ds);
     float r = length(p);
     float rho = exp(-max(0.0, r - u_planetR) / u_atmH);
-    vec3 dTau = u_beta * rho * ds;
+    vec3 dTau = beta * rho * ds;
     float mu = dot(p / r, u_atmSun);
     // Light reaching the sample: Chapman-like optical depth toward the sun, cut by the planet's shadow
     // (soft over the few degrees the sun takes to set at that height).
     float dip = acos(clamp(u_planetR / r, 0.0, 1.0));
     float lit = smoothstep(-dip - 0.06, -dip + 0.04, mu);
-    vec3 tauSun = u_beta * u_atmH * rho / max(0.06, mu + 0.12);
+    vec3 tauSun = beta * u_atmH * rho / max(0.06, mu + 0.12);
     sum += exp(-(tau + 0.5 * dTau) - tauSun) * rho * ds * lit;
     tau += dTau;
   }
@@ -52,12 +56,30 @@ vec3 atmosphere(vec3 ro, vec3 rd, float tMax, int steps, out vec3 trans) {
   float cs = dot(rd, u_atmSun);
   float phase = 0.75 * (1.0 + cs * cs);
   // Rayleigh plus a little forward glow and grey multiple-scattering fill, so skies read light blue.
-  vec3 ray = sum * u_beta * phase;
-  vec3 fill = sum * dot(u_beta, vec3(0.33)) * 0.35;
+  vec3 ray = sum * beta * phase;
+  vec3 fill = sum * dot(beta, vec3(0.33)) * 0.35;
   float mie = 0.04 * pow(max(cs, 0.0), 8.0);
-  return (ray + fill + mie * sum * u_beta.b) * u_atmSunI;
+  return (ray + fill + mie * sum * beta.b) * u_atmSunI;
+}
+// The sky and the limb: the full air.
+vec3 atmosphere(vec3 ro, vec3 rd, float tMax, int steps, out vec3 trans) {
+  return atmosphereK(ro, rd, tMax, steps, 1.0, trans);
 }
 `;
+
+/**
+ * Tone curve of the globe terrain and rivers (fragment shaders): identity up to 0.8, the flat
+ * terrain's response, so biome colours keep their saturation, then a soft shoulder to 1 for bright
+ * snow, ice and glare. The sky pass keeps 1 − exp(−1.2 c), which the limb glow needs.
+ */
+export const TERRAIN_TONE_GLSL = /* glsl */ `
+vec3 terrainTone(vec3 c) {
+  return min(c, vec3(0.8)) + 0.2 * (1.0 - exp(-max(c - 0.8, vec3(0.0)) / 0.2));
+}
+`;
+
+/** Scattering scale of the aerial perspective over terrain and rivers (see GLOBE_ATMOS_GLSL). */
+export const TERRAIN_AIR_K = 0.25;
 
 /** Atmosphere constants for a planet of radius R (m): a stylised shell of 2.5 % R. */
 export function atmosphereFor(R: number): { top: number; H: number; beta: [number, number, number] } {

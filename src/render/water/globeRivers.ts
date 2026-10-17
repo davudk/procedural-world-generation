@@ -1,7 +1,7 @@
 import { surfaceDir } from '../../shared/cube';
 import { RIVER, type RiverGraph } from '../../shared/protocol';
 import { compileProgram, uniforms } from '../gl/util';
-import { bindGlobeAtmos, GLOBE_ATMOS_GLSL, type GlobeAtmosFrame } from '../globe/atmosphere';
+import { bindGlobeAtmos, GLOBE_ATMOS_GLSL, TERRAIN_AIR_K, TERRAIN_TONE_GLSL, type GlobeAtmosFrame } from '../globe/atmosphere';
 
 /**
  * Floats per vertex: unit direction xyz and water surface (m), unit side vector xyz (in the tangent
@@ -64,7 +64,7 @@ void main() {
   dayLight(dot(up, u_sunReal), lr, ar);
   v_light = 0.35 * mix(u_ambient, ar, u_realK) + 0.65 * mix(u_lightCol, lr, u_realK);
   vec3 trans;
-  v_air = atmosphere(u_eyeP, normalize(rel), length(rel), 6, trans);
+  v_air = atmosphereK(u_eyeP, normalize(rel), length(rel), 6, ${TERRAIN_AIR_K.toFixed(2)}, trans);
   v_trans = trans;
   gl_Position = u_viewProj * vec4(rel, 1.0);
   if (v_alpha <= 0.0) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);   // culled: outside the clip volume
@@ -81,6 +81,7 @@ in vec3 v_light;
 in vec3 v_air;
 in vec3 v_trans;
 uniform float u_time;
+${TERRAIN_TONE_GLSL}
 out vec4 o;
 void main() {
   int flags = int(v_flags + 0.5);
@@ -93,7 +94,7 @@ void main() {
   col *= v_light;
   // Aerial perspective and tone mapping as the globe terrain.
   col = col * v_trans + v_air;
-  col = 1.0 - exp(-col * 1.2);
+  col = terrainTone(col);
   float a = v_alpha;
   if ((flags & ${RIVER.EPHEMERAL}) != 0) a *= step(0.45, fract(v_along / 400.0)) * 0.7;
   a *= mix(0.85, 1.0, smoothstep(1.0, 3.0, v_widthPx)) * (1.0 - smoothstep(0.75, 1.0, abs(v_side)) * 0.6);

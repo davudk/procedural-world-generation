@@ -515,6 +515,7 @@ function showSphere(l: Layer): void {
     world.setGlobeSurface({
       temperature: temp, precip: layers.get('precip') ?? null, summerRain: layers.get('summerRain') ?? null, tempRange: layers.get('tempRange') ?? null,
       aridity: biome ? sphereLayer('aridity') : null, biome, snow: biome ? sphereLayer('snow') : null, erg: biome ? sphereLayer('erg') : null,
+      canopy: biome ? sphereLayer('canopy') : null,
     });
   }
   const drape = l.kind === 'elevation' ? null : l;

@@ -1,11 +1,11 @@
-import { BIOME } from '../../shared/biomes';
+import { BIOME, BIOMES } from '../../shared/biomes';
 import type { Layer, LayerKind } from '../../shared/protocol';
 import { compileProgram, uniforms } from '../gl/util';
 import { COLORMAPS_GLSL } from '../glsl/colormaps';
-import { buildBiomeLut, LUT_SIZE, type Palette } from '../terrain/biomeLut';
+import { buildBiomeLut, LUT_SIZE, zonalBiome, type Palette } from '../terrain/biomeLut';
 import { GRID } from '../terrain/cdlod';
 import { SPHERE_INSTANCE_FLOATS, SPHERE_MAX_NODES } from '../terrain/cdlodSphere';
-import { bindGlobeAtmos, GLOBE_ATMOS_GLSL, type GlobeAtmosFrame } from './atmosphere';
+import { bindGlobeAtmos, GLOBE_ATMOS_GLSL, TERRAIN_AIR_K, TERRAIN_TONE_GLSL, type GlobeAtmosFrame } from './atmosphere';
 import { GLOBE_DETAIL_GLSL, type GlobeDetailUniforms } from '../glsl/globeDetail';
 import { DG } from '../height/globeHeightFn';
 
@@ -160,7 +160,7 @@ void main() {
   v_rel = rel;
   v_relSea = relSea;
   vec3 trans;
-  v_air = atmosphere(u_eyeP, normalize(rel), length(rel), 8, trans);
+  v_air = atmosphereK(u_eyeP, normalize(rel), length(rel), 8, ${TERRAIN_AIR_K.toFixed(2)}, trans);
   v_trans = trans;
   gl_Position = u_viewProj * vec4(rel, 1.0);
 }`;
@@ -184,6 +184,8 @@ uniform int u_cn;                  // climate cells per face side
 uniform int u_hasClimate;
 uniform sampler2DArray u_cover;    // RGBA8 padded (climate grid): snow/ice, bare rock, sand (beach, salt flat, erg), marsh/bog/mangrove
 uniform int u_hasCover;            // 1 once the biome stage exists (else the climate proxy colours)
+uniform sampler2DArray u_veg;      // RGBA8 padded (climate grid): canopy cover, the biome stage's own biome colour (gba)
+uniform int u_hasVeg;
 uniform sampler2D u_lut;
 uniform int u_palette;             // 0 biome LUT colours, 1 hypsometric
 uniform sampler2DArray u_layer;    // padded draped layer
@@ -201,6 +203,7 @@ uniform float u_time;
 ${CUBE_GLSL}
 ${GLOBE_DETAIL_GLSL}
 ${COLORMAPS_GLSL}
+${TERRAIN_TONE_GLSL}
 out vec4 o;
 
 float hash13(vec3 p) {
@@ -216,6 +219,38 @@ float vnoise3(vec3 p) {
     mix(mix(hash13(i), hash13(i + vec3(1, 0, 0)), u.x), mix(hash13(i + vec3(0, 1, 0)), hash13(i + vec3(1, 1, 0)), u.x), u.y),
     mix(mix(hash13(i + vec3(0, 0, 1)), hash13(i + vec3(1, 0, 1)), u.x), mix(hash13(i + vec3(0, 1, 1)), hash13(i + 1.0), u.x), u.y),
     u.z);
+}
+// Value-noise fBm (0–1, mean 0.5), up to 4 octaves.
+float fbm3(vec3 p, int oct) {
+  float s = 0.0, w = 0.0, a = 0.5;
+  for (int i = 0; i < 4; i++) {
+    if (i >= oct) break;
+    s += a * vnoise3(p);
+    w += a;
+    p = p * 2.03 + 17.1;
+    a *= 0.5;
+  }
+  return s / w;
+}
+
+// Sea ice from the water's temperature now: a concentration that ramps over several degrees, its
+// threshold moved by domain-warped 3D noise (continuous across faces) so the edge is ragged instead
+// of a climate contour, then split into floes and polynyas, which fade to the concentration once they
+// are under a few pixels. Thin ice at the margin is grey, the pack is blue-white.
+void seaIce(vec3 P, float t, float pxFoot, out float ice, out vec3 iceCol) {
+  vec3 q = P / 1000.0;
+  vec3 w = vec3(vnoise3(q / 240.0), vnoise3(q / 240.0 + 5.2), vnoise3(q / 240.0 + 9.7)) - 0.5;
+  vec3 qw = q + w * 180.0;
+  float conc = smoothstep(-2.5, -11.0, t + 9.0 * (fbm3(qw / 170.0, 4) - 0.5));
+  float floeK = 1.0 - smoothstep(2500.0, 9000.0, pxFoot);
+  // Called inside the water branch, so the edge width comes from the pixel footprint, not fwidth.
+  float x = conc + 1.8 * (fbm3(qw / 16.0 + 3.0, 3) - 0.5);
+  float aa = 0.03 + 1.2 * pxFoot / 16000.0;
+  float floes = smoothstep(0.5 - aa, 0.5 + aa, x) * smoothstep(0.02, 0.2, conc);
+  ice = mix(conc, floes, floeK) * 0.97;
+  iceCol = mix(vec3(0.52, 0.60, 0.66), vec3(0.84, 0.89, 0.93), smoothstep(0.15, 0.85, conc));
+  // Thicker and thinner ice in patches (the pack is not one sheet).
+  iceCol *= 0.86 + 0.2 * fbm3(qw / 22.0 + 31.0, 3);
 }
 
 // Cubic B-spline of the raw elevation over 4×4 padded texels (PAD = 2 covers it at face edges):
@@ -255,6 +290,12 @@ vec4 coverAt(int f, vec2 ang) {
   float m = float(u_cn + 2 * PAD);
   vec2 p = ((ang + QUARTER) / delta + float(PAD)) / m;
   return texture(u_cover, vec3(p, float(f)));
+}
+vec4 vegAt(int f, vec2 ang) {
+  float delta = 1.5707963267948966 / float(u_cn);
+  float m = float(u_cn + 2 * PAD);
+  vec2 p = ((ang + QUARTER) / delta + float(PAD)) / m;
+  return texture(u_veg, vec3(p, float(f)));
 }
 float layerFetch(ivec2 t, int f) { return texelFetch(u_layer, ivec3(clamp(t, ivec2(0), ivec2(u_ln + 2 * PAD - 1)), f), 0).r; }
 float layerAt(int f, vec2 ang, bool nearest) {
@@ -331,12 +372,15 @@ void main() {
     col = mix(shallow, deep, pow(clamp(depth / (lake ? 400.0 : 4000.0), 0.0, 1.0), 0.35));
     col = mix(col, vec3(0.42, 0.68, 0.70), (1.0 - smoothstep(0.0, lake ? 15.0 : 60.0, depth)) * 0.6);
     // Sea and lake ice where the water is cold now (lakes freeze sooner).
-    float ice = u_hasClimate == 1 && u_realistic == 1 ? (lake ? smoothstep(-0.5, -5.0, tNow) : smoothstep(-4.0, -10.0, tNow)) : 0.0;
-    ice = smoothstep(0.3, 0.6, ice + 0.3 * (vnoise3(P / 30000.0) - 0.5));
+    float ice = 0.0;
+    vec3 iceCol = vec3(0.0);
+    if (u_hasClimate == 1 && u_realistic == 1) {
+      seaIce(P, lake ? tNow + 4.5 : tNow, pxFoot, ice, iceCol);
+    }
     float fres = 0.02 + 0.98 * pow(1.0 - max(dot(up, V), 0.0), 5.0);
     col = mix(col, vec3(0.55, 0.65, 0.78) * amb, fres * 0.5);
     float spec = pow(max(dot(reflect(-L, up), V), 0.0), 90.0);
-    col = mix(col, vec3(0.80, 0.86, 0.90) * (0.75 + 0.3 * max(dot(n, L), 0.0)), ice * 0.95);
+    col = mix(col, iceCol * (0.75 + 0.3 * max(dot(n, L), 0.0)), ice);
     col *= 0.35 * amb + 0.65 * lightCol;
     col += spec * 0.45 * lightCol * (1.0 - ice);
   } else {
@@ -352,6 +396,12 @@ void main() {
       vec2 luv = clamp(vec2((t + 20.0) / 50.0, log(ai * 10.0) / log(10.0) / 2.0), 0.5 / 64.0, 1.0 - 0.5 / 64.0);
       float drySummer = smoothstep(0.45, 0.30, cl.b);
       col = mix(texture(u_lut, vec2(luv.x, 0.5 * luv.y)).rgb, texture(u_lut, vec2(luv.x, 0.5 + 0.5 * luv.y)).rgb, drySummer);
+      if (u_hasVeg == 1) {
+        // Half the biome stage's own colour: the zonal table alone blurs savanna and dry forest (or
+        // steppe and woodland) into one tan, so forests the stage found (and named) read as open land.
+        vec4 vg = vegAt(f, ang);
+        col = mix(col, vg.gba, 0.5) * (1.0 - 0.1 * vg.r);   // dense canopy reads darker (as flat maps)
+      }
       col *= 0.88 + 0.24 * vnoise3(P / 90000.0 + 3.0);
       col *= mix(1.0, 0.9 + 0.2 * vnoise3(P / 3500.0), fine);
       float slope = length(grad);
@@ -381,7 +431,7 @@ void main() {
   }
   // Aerial perspective through the same atmosphere as the sky and the limb (integrated per vertex).
   col = col * v_trans + v_air;
-  col = 1.0 - exp(-col * 1.2);
+  col = terrainTone(col);
   o = vec4(pow(col, vec3(1.0 / 1.1)), 1.0);
 }`;
 
@@ -423,6 +473,8 @@ export interface GlobeSurface {
   biome?: Layer | null;
   snow?: Layer | null;
   erg?: Layer | null;
+  /** Biome stage canopy cover (0–1). */
+  canopy?: Layer | null;
 }
 
 const LAYER_MODE: Record<LayerKind, number> = { elevation: 0, categorical: 1, scalar: 2 };
@@ -444,6 +496,9 @@ export class GlobePass {
   private readonly gradTex: WebGLTexture;
   private readonly climateTex: WebGLTexture;
   private readonly coverTex: WebGLTexture;
+  private readonly vegTex: WebGLTexture;
+  private veg: { biome: ArrayLike<number>; canopy: ArrayLike<number> | null; clim: Float32Array; n: number } | null = null;
+  private vegPalette: Palette | null = null;
   private readonly surfTex: WebGLTexture;
   private readonly wlevelTex: WebGLTexture;
   private readonly wlevelDTex: WebGLTexture;
@@ -471,6 +526,7 @@ export class GlobePass {
       'u_climate', 'u_cn', 'u_hasClimate', 'u_lut', 'u_palette', 'u_layer', 'u_ln', 'u_layerMode', 'u_layerMin', 'u_layerMax',
       'u_sunCarto', 'u_camRight', 'u_camUp', 'u_sunReal', 'u_realK', 'u_lightCol', 'u_ambient', 'u_realistic', 'u_season', 'u_time',
       'u_surf', 'u_cover', 'u_hasCover', 'u_wlevel', 'u_wclass', 'u_hasWater', 'u_pxScale', 'u_wlevelD', 'u_wetD',
+      'u_veg', 'u_hasVeg',
     ] as const);
 
     const verts = new Float32Array((GRID + 1) * (GRID + 1) * 2);
@@ -515,6 +571,7 @@ export class GlobePass {
     this.gradTex = arrayTexture(gl, 'rgba16f');
     this.climateTex = arrayTexture(gl, 'rgba16f');
     this.coverTex = arrayTexture(gl, 'rgba8');
+    this.vegTex = arrayTexture(gl, 'rgba8');
     this.surfTex = arrayTexture(gl, 'r32f');
     this.wlevelTex = arrayTexture(gl, 'r32f');
     this.wlevelDTex = arrayTexture(gl, 'r32f');
@@ -603,6 +660,8 @@ export class GlobePass {
       const cover = coverMasksSphere(bio.data, snow.data, fit(s.erg ?? null)?.data ?? null, n);
       uploadArray(this.gl, this.coverTex, cover, n + 2 * PAD, 'rgba8', true);
     }
+    this.veg = bio && ar ? { biome: bio.data, canopy: fit(s.canopy ?? null)?.data ?? null, clim, n } : null;
+    this.vegPalette = null;
   }
 
   /** Drapes a sphere layer over the globe (null = realistic colouring). */
@@ -628,6 +687,15 @@ export class GlobePass {
     return this.layerMode === 0 && this.hasClimate === 1 && this.palette !== 'hypsometric';
   }
 
+  /** The vegetation texture in the current palette (rebuilt when the palette or the biomes change). */
+  private ensureVeg(): void {
+    const p: Palette = this.palette === 'stylised' ? 'stylised' : 'satellite';
+    if (!this.veg || this.vegPalette === p) return;
+    this.vegPalette = p;
+    const v = this.veg;
+    uploadArray(this.gl, this.vegTex, vegMasksSphere(v.biome, v.canopy, v.clim, v.n, p), v.n + 2 * PAD, 'rgba8', true);
+  }
+
   private ensureLut(): void {
     const p: Palette = this.palette === 'stylised' ? 'stylised' : 'satellite';
     if (this.lutPalette === p) return;
@@ -645,6 +713,7 @@ export class GlobePass {
     const u = this.u;
     gl.useProgram(this.prog);
     this.ensureLut();
+    this.ensureVeg();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instBuf);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, f.instances, 0, f.count * SPHERE_INSTANCE_FLOATS);
     gl.uniformMatrix4fv(u.u_viewProj, false, f.viewProj);
@@ -688,6 +757,8 @@ export class GlobePass {
     bindArr(12, this.wlevelDTex, u.u_wlevelD);
     bindArr(13, this.wetDTex, u.u_wetD);
     bindArr(8, this.wclassTex, u.u_wclass);
+    bindArr(14, this.vegTex, u.u_veg);
+    gl.uniform1i(u.u_hasVeg, this.veg ? 1 : 0);
     gl.uniform1i(u.u_hasCover, this.hasCover);
     gl.uniform1i(u.u_hasWater, this.hasWater);
     gl.activeTexture(gl.TEXTURE4);
@@ -831,6 +902,12 @@ export function coverMasksSphere(biome: ArrayLike<number>, snow: ArrayLike<numbe
     raw[i * 4 + 2] = Math.max(id === BIOME.BEACH || id === BIOME.SALT_FLAT ? 1 : 0, erg ? (0.6 * erg[i]) / 255 : 0);
     raw[i * 4 + 3] = id === BIOME.MARSH || id === BIOME.BOG || id === BIOME.SALT_MARSH || id === BIOME.MANGROVE || id === BIOME.SWAMP || id === BIOME.FEN ? 1 : 0;
   }
+  return blurPadded8(raw, n);
+}
+
+/** 3×3 box blur across seams, padded, as RGBA8 (values 0–1). */
+function blurPadded8(raw: Float32Array, n: number): Uint8Array {
+  const N = 6 * n * n;
   const p1 = padFaces(raw, n, 1, 4);
   const m1 = n + 2;
   const blurred = new Float32Array(N * 4);
@@ -865,4 +942,30 @@ function halveFaces(src: Float32Array, n: number): Float32Array {
     }
   }
   return out;
+}
+
+/** Biomes whose colour comes from the cover masks or the water (the zonal colour stands in for them). */
+const NOT_VEG = new Set<number>([BIOME.WATER, BIOME.ICE, BIOME.ROCK, BIOME.NIVAL, BIOME.BEACH, BIOME.SALT_FLAT]);
+
+/**
+ * Vegetation of the biome stage on six faces, 3×3 box-blurred across seams like the cover masks:
+ * canopy cover (r; the biome's nominal canopy without the layer) and the biome's palette colour
+ * (gba). `clim` is the climate texture's source (T, P/PET, summer rain share, half-range per cell).
+ */
+export function vegMasksSphere(
+  biome: ArrayLike<number>, canopy: ArrayLike<number> | null, clim: Float32Array, n: number, palette: Palette,
+): Uint8Array {
+  const N = 6 * n * n;
+  const raw = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++) {
+    let id = biome[i];
+    if (NOT_VEG.has(id)) id = zonalBiome(clim[i * 4], clim[i * 4 + 1], clim[i * 4 + 2] < 0.375);
+    const info = BIOMES[id];
+    const c = palette === 'satellite' ? info.satellite : info.stylised;
+    raw[i * 4] = canopy ? canopy[i] : info.canopy;
+    raw[i * 4 + 1] = c[0] / 255;
+    raw[i * 4 + 2] = c[1] / 255;
+    raw[i * 4 + 3] = c[2] / 255;
+  }
+  return blurPadded8(raw, n);
 }
