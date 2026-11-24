@@ -4,4 +4,5 @@ dist/
 .DS_Store
 .firebase/
 metrics/out*/
-.claude/worktrees/
+.claude/
+CLAUDE.md
