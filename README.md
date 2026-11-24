@@ -2,6 +2,11 @@
 
 **Live demo:** https://procedural-world-gen.web.app
 
+<p>
+  <img src="docs/images/earth.png" width="49%" alt="An Earth-like world with mountains, rivers, biomes and labelled places">
+  <img src="docs/images/archipelago.png" width="49%" alt="An archipelago world">
+</p>
+
 A configurable procedural world generator in the browser. It builds a finite region of a planet, seen top-down in 3D, with:
 - plate tectonics;
 - mountains formed by erosion;
